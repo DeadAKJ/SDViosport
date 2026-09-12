@@ -244,7 +244,11 @@ namespace SDViOS.Loader
                         object?[] invokeArgs = entry.GetParameters().Length > 0 ? new object?[] { smapiArgs } : Array.Empty<object>();
                         entry.Invoke(null, invokeArgs);
 
+                        LinkGameWindowToScene();
                         AttachTouchOverlayToGameRunner();
+                        UIApplication.SharedApplication.BeginInvokeOnMainThread(LinkGameWindowToScene);
+                        NSTimer.CreateScheduledTimer(0.25, false, _ => LinkGameWindowToScene());
+                        NSTimer.CreateScheduledTimer(1.0, false, _ => LinkGameWindowToScene());
                         return;
                     }
                 }
@@ -275,18 +279,150 @@ namespace SDViOS.Loader
 
                     AttachTouchOverlay(runner);
                     runner.Run();
+
+                    LinkGameWindowToScene();
+                    UIApplication.SharedApplication.BeginInvokeOnMainThread(LinkGameWindowToScene);
+                    NSTimer.CreateScheduledTimer(0.25, false, _ => LinkGameWindowToScene());
+                    NSTimer.CreateScheduledTimer(1.0, false, _ => LinkGameWindowToScene());
                 }
                 else
                 {
                     var entry = sdvAsm.EntryPoint;
                     object?[] invokeArgs = entry != null && entry.GetParameters().Length > 0 ? new object?[] { args } : Array.Empty<object>();
                     entry?.Invoke(null, invokeArgs);
+                    LinkGameWindowToScene();
+                    UIApplication.SharedApplication.BeginInvokeOnMainThread(LinkGameWindowToScene);
                 }
             }
             catch (Exception ex)
             {
                 EngineLogger.LogFatal("Vanilla Launch", ex);
                 throw;
+            }
+        }
+
+        public static UIWindowScene? GetActiveWindowScene()
+        {
+            try
+            {
+                var scenes = UIApplication.SharedApplication.ConnectedScenes;
+                if (scenes == null) return null;
+
+                foreach (var scene in scenes)
+                {
+                    if (scene is UIWindowScene ws && ws.ActivationState == UISceneActivationState.ForegroundActive)
+                        return ws;
+                }
+
+                foreach (var scene in scenes)
+                {
+                    if (scene is UIWindowScene ws && ws.ActivationState == UISceneActivationState.ForegroundInactive)
+                        return ws;
+                }
+
+                foreach (var scene in scenes)
+                {
+                    if (scene is UIWindowScene ws)
+                        return ws;
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[GameHost] Error getting UIWindowScene: {ex.Message}");
+            }
+            return null;
+        }
+
+        public static void LinkGameWindowToScene()
+        {
+            try
+            {
+                EngineLogger.Log("[GameHost] LinkGameWindowToScene: linking window...");
+
+                Game? runner = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    var runnerType = asm.GetType("StardewValley.GameRunner");
+                    if (runnerType != null)
+                    {
+                        var instanceField = runnerType.GetField("instance", BindingFlags.Static | BindingFlags.Public);
+                        runner = instanceField?.GetValue(null) as Game;
+                        if (runner != null) break;
+                    }
+                }
+
+                UIWindow? window = null;
+                UIViewController? vc = null;
+
+                if (runner != null)
+                {
+                    window = runner.Services.GetService(typeof(UIWindow)) as UIWindow;
+                    vc = runner.Services.GetService(typeof(UIViewController)) as UIViewController;
+                    EngineLogger.Log($"[GameHost] Runner services: Window={window != null}, VC={vc != null}");
+                }
+
+                if (window == null)
+                {
+                    foreach (var w in UIApplication.SharedApplication.Windows)
+                    {
+                        if (w != null)
+                        {
+                            window = w;
+                            vc = w.RootViewController;
+                            EngineLogger.Log($"[GameHost] Found window from UIApplication.Windows: {window}");
+                            break;
+                        }
+                    }
+                }
+
+                if (window == null)
+                {
+                    EngineLogger.LogWarning("[GameHost] No UIWindow found to link yet.");
+                    return;
+                }
+
+                var activeScene = GetActiveWindowScene();
+                if (activeScene != null)
+                {
+                    if (window.WindowScene != activeScene)
+                    {
+                        EngineLogger.Log($"[GameHost] Assigning window.WindowScene to {activeScene.Description} (State: {activeScene.ActivationState})");
+                        window.WindowScene = activeScene;
+                    }
+                }
+                else
+                {
+                    EngineLogger.LogWarning("[GameHost] No connected UIWindowScene found yet.");
+                }
+
+                if (vc != null && window.RootViewController != vc)
+                {
+                    window.RootViewController = vc;
+                }
+
+                if (UIApplication.SharedApplication.Delegate is AppDelegate appDelegate)
+                {
+                    if (appDelegate.Window != window)
+                    {
+                        appDelegate.Window = window;
+                        EngineLogger.Log("[GameHost] Set AppDelegate.Window to MonoGame UIWindow.");
+                    }
+                }
+
+                window.Hidden = false;
+                window.MakeKeyAndVisible();
+
+                if (vc != null && vc.View != null)
+                {
+                    vc.View.SetNeedsLayout();
+                    vc.View.LayoutIfNeeded();
+                }
+
+                EngineLogger.Log("[GameHost] MonoGame UIWindow successfully linked and made key.");
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogError($"[GameHost] LinkGameWindowToScene failed: {ex}");
             }
         }
 
@@ -303,6 +439,15 @@ namespace SDViOS.Loader
                         var runner = instanceField?.GetValue(null) as Game;
                         if (runner != null)
                         {
+                            foreach (var comp in runner.Components)
+                            {
+                                if (comp is TouchOverlay)
+                                {
+                                    EngineLogger.Log("[GameHost] TouchOverlay already attached to GameRunner.");
+                                    return;
+                                }
+                            }
+
                             AttachTouchOverlay(runner);
                             EngineLogger.Log("[GameHost] Successfully attached TouchOverlay to GameRunner.");
                             return;

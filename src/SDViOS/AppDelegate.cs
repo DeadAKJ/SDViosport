@@ -16,6 +16,19 @@ namespace SDViOS
         {
             try
             {
+                NSNotificationCenter.DefaultCenter.AddObserver(
+                    new NSString("UISceneWillConnectNotification"),
+                    _ => UIApplication.SharedApplication.BeginInvokeOnMainThread(GameHost.LinkGameWindowToScene)
+                );
+                NSNotificationCenter.DefaultCenter.AddObserver(
+                    new NSString("UISceneDidActivateNotification"),
+                    _ => UIApplication.SharedApplication.BeginInvokeOnMainThread(GameHost.LinkGameWindowToScene)
+                );
+                NSNotificationCenter.DefaultCenter.AddObserver(
+                    UIApplication.DidBecomeActiveNotification,
+                    _ => UIApplication.SharedApplication.BeginInvokeOnMainThread(GameHost.LinkGameWindowToScene)
+                );
+
                 GameHost.InitializeFileSystem();
                 EngineLogger.Log("[AppDelegate] FinishedLaunching: Checking game files...");
 
@@ -41,7 +54,13 @@ namespace SDViOS
 
         private void ShowMissingFilesScreen()
         {
-            Window = new UIWindow(UIScreen.MainScreen.Bounds);
+            var scene = GameHost.GetActiveWindowScene();
+            Window = scene != null ? new UIWindow(scene) : new UIWindow(UIScreen.MainScreen.Bounds);
+            if (scene != null && Window.WindowScene == null)
+            {
+                Window.WindowScene = scene;
+            }
+
             var vc = new UIViewController();
             vc.View!.BackgroundColor = UIColor.FromRGB(24, 30, 42);
 
@@ -90,6 +109,7 @@ namespace SDViOS
 
             vc.View.AddSubviews(labelTitle, labelStatus, btnReload);
             Window.RootViewController = vc;
+            Window.Hidden = false;
             Window.MakeKeyAndVisible();
         }
 
@@ -97,7 +117,13 @@ namespace SDViOS
         {
             InvokeOnMainThread(() =>
             {
-                Window = new UIWindow(UIScreen.MainScreen.Bounds);
+                var scene = GameHost.GetActiveWindowScene();
+                Window = scene != null ? new UIWindow(scene) : new UIWindow(UIScreen.MainScreen.Bounds);
+                if (scene != null && Window.WindowScene == null)
+                {
+                    Window.WindowScene = scene;
+                }
+
                 Window.WindowLevel = UIWindowLevel.Alert + 1000;
                 var vc = new UIViewController();
                 vc.View!.BackgroundColor = UIColor.FromRGB(45, 12, 12);
@@ -135,6 +161,13 @@ namespace SDViOS
             });
         }
 
+        public override void OnActivated(UIApplication application)
+        {
+            base.OnActivated(application);
+            EngineLogger.Log("[AppDelegate] OnActivated");
+            GameHost.LinkGameWindowToScene();
+        }
+
         public override void DidEnterBackground(UIApplication application)
         {
             EngineLogger.Log("[AppDelegate] DidEnterBackground");
@@ -143,6 +176,7 @@ namespace SDViOS
         public override void WillEnterForeground(UIApplication application)
         {
             EngineLogger.Log("[AppDelegate] WillEnterForeground");
+            GameHost.LinkGameWindowToScene();
         }
 
         public override void WillTerminate(UIApplication application)
