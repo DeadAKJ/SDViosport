@@ -249,12 +249,18 @@ namespace SDViOS.Loader
                 EngineLogger.Log($"Found StardewModdingAPI.dll at '{smapiPath}'. Bootstrapping SMAPI...");
                 try
                 {
+                    Environment.SetEnvironmentVariable("SMAPI_MODS_PATH", ModsDir);
+                    Environment.SetEnvironmentVariable("SMAPI_NO_TERMINAL", "1");
+                    Environment.SetEnvironmentVariable("STARDEW_VALLEY_MODS_PATH", ModsDir);
+
+                    string[] smapiArgs = new string[] { "--no-terminal", "--mods-path", ModsDir };
+
                     var smapiAsm = Assembly.LoadFrom(smapiPath);
                     var entry = smapiAsm.EntryPoint;
                     if (entry != null)
                     {
                         EngineLogger.Log($"Invoking SMAPI EntryPoint: {entry.DeclaringType?.FullName}.{entry.Name}");
-                        object?[] invokeArgs = entry.GetParameters().Length > 0 ? new object?[] { args } : Array.Empty<object>();
+                        object?[] invokeArgs = entry.GetParameters().Length > 0 ? new object?[] { smapiArgs } : Array.Empty<object>();
                         entry.Invoke(null, invokeArgs);
                         return;
                     }
