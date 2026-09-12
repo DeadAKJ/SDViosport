@@ -69,12 +69,41 @@ namespace SDViOS.Loader
             SyncBundledDirectory(Path.Combine(BundleDir, "Mods"), ModsDir);
             SyncBundledDirectory(Path.Combine(BundleDir, "smapi-internal"), Path.Combine(GameRootDir, "smapi-internal"));
 
+            // Clean up any stale BCL DLL that may have been placed into Documents in older builds
+            string staleCoreLib = Path.Combine(GameRootDir, "System.Private.CoreLib.dll");
+            if (File.Exists(staleCoreLib))
+            {
+                try { File.Delete(staleCoreLib); } catch { }
+            }
+
+            var gameDllNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "Stardew Valley.dll",
+                "StardewModdingAPI.dll",
+                "StardewValley.GameData.dll",
+                "xTile.dll",
+                "BmFont.dll",
+                "CPExtBmFont.dll",
+                "Lidgren.Network.dll",
+                "GalaxyCSharp.dll",
+                "Steamworks.NET.dll",
+                "System.Data.HashFunction.Core.dll",
+                "System.Data.HashFunction.Interfaces.dll",
+                "System.Data.HashFunction.xxHash.dll",
+                "Microsoft.Extensions.DependencyInjection.Abstractions.dll",
+                "TextCopy.dll"
+            };
+
             foreach (var dll in Directory.GetFiles(BundleDir, "*.dll"))
             {
-                string dest = Path.Combine(GameRootDir, Path.GetFileName(dll));
-                if (!File.Exists(dest) || File.GetLastWriteTimeUtc(dll) > File.GetLastWriteTimeUtc(dest))
+                string name = Path.GetFileName(dll);
+                if (gameDllNames.Contains(name))
                 {
-                    try { File.Copy(dll, dest, true); } catch { }
+                    string dest = Path.Combine(GameRootDir, name);
+                    if (!File.Exists(dest) || File.GetLastWriteTimeUtc(dll) > File.GetLastWriteTimeUtc(dest))
+                    {
+                        try { File.Copy(dll, dest, true); } catch { }
+                    }
                 }
             }
 
@@ -113,6 +142,13 @@ namespace SDViOS.Loader
             AppDomain.CurrentDomain.AssemblyResolve += (sender, args) =>
             {
                 string asmName = new AssemblyName(args.Name).Name + ".dll";
+
+                // Never resolve core runtime libraries from user directories
+                if (asmName.Equals("System.Private.CoreLib.dll", StringComparison.OrdinalIgnoreCase) ||
+                    asmName.Equals("mscorlib.dll", StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
 
                 string p1 = Path.Combine(bundlePath, asmName);
                 if (File.Exists(p1)) return Assembly.LoadFrom(p1);
