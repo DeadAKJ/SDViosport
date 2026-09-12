@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using Foundation;
 using UIKit;
@@ -99,9 +99,15 @@ namespace SDViOS
             var vc = new UIViewController();
             vc.View!.BackgroundColor = UIColor.FromRGB(40, 10, 10);
 
+            var realEx = ex;
+            while (realEx.InnerException != null)
+            {
+                realEx = realEx.InnerException;
+            }
+
             var label = new UILabel(new CoreGraphics.CGRect(20, 60, Window.Bounds.Width - 40, Window.Bounds.Height - 120))
             {
-                Text = $"Fatal Error on Launch:\n{ex.GetType().Name}: {ex.Message}\n\n{ex.StackTrace}",
+                Text = $"Fatal Error on Launch:\n{realEx.GetType().Name}: {realEx.Message}\n\n{realEx.StackTrace}",
                 TextColor = UIColor.White,
                 Font = UIFont.SystemFontOfSize(12),
                 Lines = 0
