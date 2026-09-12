@@ -50,18 +50,23 @@ jobs:
 
       - name: Package IPA
         run: |
-          mkdir -p ipa_staging/Payload
-          APP_PATH=$(find ./publish -name "*.app" -type d | head -n 1)
-          if [ -z "$APP_PATH" ]; then
-            echo "Error: .app folder not found in ./publish"
-            exit 1
+          if [ -f "./publish/SDViOS.ipa" ]; then
+            echo "Found generated IPA: ./publish/SDViOS.ipa"
+            cp ./publish/SDViOS.ipa ./StardewValley-iOS.ipa
+          else
+            echo "Packaging from .app bundle..."
+            APP_PATH=$(find . -name "*.app" -type d | head -n 1)
+            if [ -z "$APP_PATH" ]; then
+              echo "Error: No .app or .ipa found!"
+              exit 1
+            fi
+            echo "Found .app at: $APP_PATH"
+            mkdir -p ipa_staging/Payload
+            cp -R "$APP_PATH" ipa_staging/Payload/
+            cd ipa_staging
+            zip -r -q ../StardewValley-iOS.ipa Payload
+            cd ..
           fi
-          echo "Found app bundle at: $APP_PATH"
-          codesign --force --deep --sign - --entitlements src/SDViOS/Entitlements.plist "$APP_PATH"
-          cp -R "$APP_PATH" ipa_staging/Payload/
-          cd ipa_staging
-          zip -r -q ../StardewValley-iOS.ipa Payload
-          cd ..
           ls -lh StardewValley-iOS.ipa
 
       - name: Upload IPA Artifact
