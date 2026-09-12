@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using Foundation;
 using Microsoft.Xna.Framework;
+using UIKit;
 using SDViOS.Diagnostics;
 using SDViOS.Input;
 
@@ -21,25 +22,41 @@ namespace SDViOS.Loader
         public static void InitializeFileSystem()
         {
             DocumentsDir = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            GameRootDir = Path.Combine(DocumentsDir, "StardewValley");
+
+            // Check if game files are placed directly in Documents/ (Files App root) or in Documents/StardewValley/
+            string directDll = Path.Combine(DocumentsDir, "Stardew Valley.dll");
+            string subDirDll = Path.Combine(DocumentsDir, "StardewValley", "Stardew Valley.dll");
+
+            if (File.Exists(directDll))
+            {
+                GameRootDir = DocumentsDir;
+            }
+            else if (File.Exists(subDirDll))
+            {
+                GameRootDir = Path.Combine(DocumentsDir, "StardewValley");
+            }
+            else
+            {
+                // Default to Documents/ directly so users can just drop files into root of Files app
+                GameRootDir = DocumentsDir;
+            }
+
             ContentDir = Path.Combine(GameRootDir, "Content");
             ModsDir = Path.Combine(GameRootDir, "Mods");
             SavesDir = Path.Combine(GameRootDir, "Saves");
             LogsDir = Path.Combine(GameRootDir, "ErrorLogs");
 
-            // Ensure essential directories exist in user-accessible Files directory
             Directory.CreateDirectory(GameRootDir);
             Directory.CreateDirectory(ContentDir);
             Directory.CreateDirectory(ModsDir);
             Directory.CreateDirectory(SavesDir);
             Directory.CreateDirectory(LogsDir);
 
-            // Initialize comprehensive engine logging
             EngineLogger.Initialize(LogsDir);
+            EngineLogger.Log($"DocumentsDir: {DocumentsDir}");
             EngineLogger.Log($"GameRootDir: {GameRootDir}");
             EngineLogger.Log($"ContentDir: {ContentDir}");
             EngineLogger.Log($"ModsDir: {ModsDir}");
-            EngineLogger.Log($"SavesDir: {SavesDir}");
 
             // Copy bundled assets if present in App Bundle
             string bundlePath = NSBundle.MainBundle.BundlePath;
@@ -49,25 +66,15 @@ namespace SDViOS.Loader
             SyncBundledDirectory(Path.Combine(bundlePath, "Mods"), ModsDir);
             SyncBundledDirectory(Path.Combine(bundlePath, "smapi-internal"), Path.Combine(GameRootDir, "smapi-internal"));
 
-            // Copy any loose DLLs from bundle to GameRootDir if not already there
             foreach (var dll in Directory.GetFiles(bundlePath, "*.dll"))
             {
                 string dest = Path.Combine(GameRootDir, Path.GetFileName(dll));
                 if (!File.Exists(dest))
                 {
-                    try
-                    {
-                        File.Copy(dll, dest, true);
-                        EngineLogger.Log($"Copied bundle DLL to GameRoot: {Path.GetFileName(dll)}");
-                    }
-                    catch (Exception ex)
-                    {
-                        EngineLogger.LogError($"Failed copying DLL {dll}: {ex.Message}");
-                    }
+                    try { File.Copy(dll, dest, true); } catch { }
                 }
             }
 
-            // Set environment and current working directory
             Environment.SetEnvironmentVariable("APPDATA", DocumentsDir);
             Environment.SetEnvironmentVariable("STARDEW_VALLEY_MODS_PATH", ModsDir);
             Environment.SetEnvironmentVariable("MONO_STRICT_MS_COMPLIANT", "yes");
@@ -81,7 +88,6 @@ namespace SDViOS.Loader
             if (!Directory.Exists(sourceDir)) return;
             Directory.CreateDirectory(targetDir);
 
-            EngineLogger.Log($"Syncing {sourceDir} -> {targetDir}");
             foreach (string file in Directory.GetFiles(sourceDir, "*.*", SearchOption.AllDirectories))
             {
                 string relative = Path.GetRelativePath(sourceDir, file);
@@ -94,14 +100,7 @@ namespace SDViOS.Loader
 
                 if (!File.Exists(dest))
                 {
-                    try
-                    {
-                        File.Copy(file, dest, true);
-                    }
-                    catch (Exception ex)
-                    {
-                        EngineLogger.LogError($"Failed syncing file {file}: {ex.Message}");
-                    }
+                    try { File.Copy(file, dest, true); } catch { }
                 }
             }
         }
@@ -112,37 +111,21 @@ namespace SDViOS.Loader
             {
                 string asmName = new AssemblyName(args.Name).Name + ".dll";
 
-                // Check game root
                 string p1 = Path.Combine(GameRootDir, asmName);
-                if (File.Exists(p1))
-                {
-                    EngineLogger.Log($"[AssemblyResolve] Loaded '{asmName}' from GameRoot: {p1}");
-                    return Assembly.LoadFrom(p1);
-                }
+                if (File.Exists(p1)) return Assembly.LoadFrom(p1);
 
-                // Check smapi-internal
                 string p2 = Path.Combine(GameRootDir, "smapi-internal", asmName);
-                if (File.Exists(p2))
-                {
-                    EngineLogger.Log($"[AssemblyResolve] Loaded '{asmName}' from smapi-internal: {p2}");
-                    return Assembly.LoadFrom(p2);
-                }
+                if (File.Exists(p2)) return Assembly.LoadFrom(p2);
 
-                // Check bundle root
                 string p3 = Path.Combine(bundlePath, asmName);
-                if (File.Exists(p3))
-                {
-                    EngineLogger.Log($"[AssemblyResolve] Loaded '{asmName}' from Bundle: {p3}");
-                    return Assembly.LoadFrom(p3);
-                }
+                if (File.Exists(p3)) return Assembly.LoadFrom(p3);
 
-                // Check bundle smapi-internal
                 string p4 = Path.Combine(bundlePath, "smapi-internal", asmName);
-                if (File.Exists(p4))
-                {
-                    EngineLogger.Log($"[AssemblyResolve] Loaded '{asmName}' from Bundle smapi-internal: {p4}");
-                    return Assembly.LoadFrom(p4);
-                }
+                if (File.Exists(p4)) return Assembly.LoadFrom(p4);
+
+                // Also check Documents/ directly if GameRootDir is a subfolder
+                string p5 = Path.Combine(DocumentsDir, asmName);
+                if (File.Exists(p5)) return Assembly.LoadFrom(p5);
 
                 EngineLogger.LogWarning($"[AssemblyResolve] Unresolved assembly: {args.Name}");
                 return null;
@@ -162,13 +145,24 @@ namespace SDViOS.Loader
         public static void Launch(string[] args)
         {
             string smapiPath = Path.Combine(GameRootDir, "StardewModdingAPI.dll");
+            if (!File.Exists(smapiPath))
+            {
+                smapiPath = Path.Combine(DocumentsDir, "StardewModdingAPI.dll");
+            }
+
             string sdvPath = Path.Combine(GameRootDir, "Stardew Valley.dll");
-            bool forceVanilla = File.Exists(Path.Combine(GameRootDir, "force_vanilla.txt"));
+            if (!File.Exists(sdvPath))
+            {
+                sdvPath = Path.Combine(DocumentsDir, "Stardew Valley.dll");
+            }
+
+            bool forceVanilla = File.Exists(Path.Combine(GameRootDir, "force_vanilla.txt")) ||
+                                File.Exists(Path.Combine(DocumentsDir, "force_vanilla.txt"));
 
             if (forceVanilla)
             {
-                EngineLogger.Log("force_vanilla.txt detected. Skipping SMAPI to launch Pure Vanilla.");
-                LaunchVanilla(args);
+                EngineLogger.Log("force_vanilla.txt detected. Launching Pure Vanilla.");
+                LaunchVanilla(sdvPath, args);
                 return;
             }
 
@@ -186,31 +180,26 @@ namespace SDViOS.Loader
                         entry.Invoke(null, invokeArgs);
                         return;
                     }
-                    else
-                    {
-                        EngineLogger.LogError("SMAPI EntryPoint is null! Falling back to Vanilla.");
-                    }
                 }
                 catch (Exception ex)
                 {
                     EngineLogger.LogFatal("SMAPI Launch", ex);
-                    EngineLogger.Log("Falling back to Vanilla launch after SMAPI error...");
                 }
             }
 
-            LaunchVanilla(args);
+            LaunchVanilla(sdvPath, args);
         }
 
-        public static void LaunchVanilla(string[] args)
+        public static void LaunchVanilla(string sdvPath, string[] args)
         {
-            string sdvPath = Path.Combine(GameRootDir, "Stardew Valley.dll");
             if (!File.Exists(sdvPath))
             {
-                EngineLogger.LogWarning("No Stardew Valley.dll found! Please place game files into iOS Files app (On My iPhone > Stardew Valley).");
+                EngineLogger.LogError("Stardew Valley.dll not found in " + GameRootDir + " or " + DocumentsDir);
+                ShowMissingFilesAlert();
                 return;
             }
 
-            EngineLogger.Log("Launching Pure Vanilla Stardew Valley...");
+            EngineLogger.Log("Launching Pure Vanilla Stardew Valley from: " + sdvPath);
             try
             {
                 var sdvAsm = Assembly.LoadFrom(sdvPath);
@@ -225,7 +214,6 @@ namespace SDViOS.Loader
                 else
                 {
                     var entry = sdvAsm.EntryPoint;
-                    EngineLogger.Log($"Invoking Vanilla EntryPoint: {entry?.DeclaringType?.FullName}.{entry?.Name}");
                     object?[] invokeArgs = entry != null && entry.GetParameters().Length > 0 ? new object?[] { args } : Array.Empty<object>();
                     entry?.Invoke(null, invokeArgs);
                 }
@@ -234,6 +222,25 @@ namespace SDViOS.Loader
             {
                 EngineLogger.LogFatal("Vanilla Launch", ex);
             }
+        }
+
+        private static void ShowMissingFilesAlert()
+        {
+            try
+            {
+                UIApplication.SharedApplication.InvokeOnMainThread(() =>
+                {
+                    var alert = UIAlertController.Create(
+                        "Stardew Valley Files Missing",
+                        "Please copy your Stardew Valley game files into the iOS Files app:\n\nOn My iPhone > Stardew Valley\n\nInclude Stardew Valley.dll and Content folder.",
+                        UIAlertControllerStyle.Alert
+                    );
+                    alert.AddAction(UIAlertAction.Create("OK", UIAlertActionStyle.Default, null));
+                    var rootVC = UIApplication.SharedApplication.KeyWindow?.RootViewController;
+                    rootVC?.PresentViewController(alert, true, null);
+                });
+            }
+            catch { }
         }
     }
 }
