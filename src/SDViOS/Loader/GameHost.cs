@@ -395,7 +395,7 @@ namespace SDViOS.Loader
                     EngineLogger.LogWarning("[GameHost] No connected UIWindowScene found yet.");
                 }
 
-                if (vc != null && window.RootViewController != vc)
+                if (window.RootViewController == null && vc != null)
                 {
                     window.RootViewController = vc;
                 }
@@ -412,11 +412,12 @@ namespace SDViOS.Loader
                 window.Hidden = false;
                 window.MakeKeyAndVisible();
 
-                if (vc != null && vc.View != null)
+                try
                 {
-                    vc.View.SetNeedsLayout();
-                    vc.View.LayoutIfNeeded();
+                    window.SetNeedsLayout();
+                    window.LayoutIfNeeded();
                 }
+                catch { }
 
                 EngineLogger.Log("[GameHost] MonoGame UIWindow successfully linked and made key.");
             }
@@ -437,7 +438,7 @@ namespace SDViOS.Loader
                     {
                         var instanceField = runnerType.GetField("instance", BindingFlags.Static | BindingFlags.Public);
                         var runner = instanceField?.GetValue(null) as Game;
-                        if (runner != null)
+                        if (runner != null && runner.Components != null)
                         {
                             foreach (var comp in runner.Components)
                             {

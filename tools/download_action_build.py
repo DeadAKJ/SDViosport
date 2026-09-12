@@ -1,4 +1,4 @@
-﻿import urllib.request
+import urllib.request
 import json
 import time
 import zipfile
@@ -17,38 +17,26 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.0-initial-smapi-ios-port'
+version_name = 'v1.0.14-fix-onactivated-crash'
 
-changelog_content = """Version: v1.0.0-initial-smapi-ios-port
+changelog_content = """Version: v1.0.14-fix-onactivated-crash
 Date: 2026-09-12
 
 Changes:
-1. Native .NET 8 iOS Host & Mono Interpreter:
-   - Configured with net8.0-ios and <UseInterpreter>true</UseInterpreter> to bypass Apple's W^X memory restrictions.
-   - Allows loading and executing dynamic SMAPI assemblies and mod DLLs on iOS without jailbreak.
+1. Fix Fatal Crash (You_Should_Not_Call_base_In_This_Method):
+   - In .NET iOS / Xamarin.iOS, UIApplicationDelegate event callbacks are abstract protocols.
+   - Calling base.OnActivated(application) threw Foundation.You_Should_Not_Call_base_In_This_Method, causing recursive uncaught exception handler invocation and SIGSEGV stack guard overflow.
+   - Removed base call in OnActivated and wrapped with safe try/catch.
 
-2. Comprehensive Engine Diagnostics & Logging:
-   - Full stdout/stderr dual-output logging directly into Documents/StardewValley/ErrorLogs/engine-latest.log.
-   - Log files are accessible directly on device via the iOS Files app (On My iPhone > Stardew Valley > ErrorLogs).
-   - Real-time logging of assembly resolutions, lifecycle states, and fatal crash stack traces.
+2. Eliminate ObjectDisposedException in LinkGameWindowToScene:
+   - Preserved MonoGame's existing window.RootViewController.
+   - Replaced direct vc.View layout manipulation with UIWindow.SetNeedsLayout() to prevent invoking disposed managed peers.
 
-3. iOS Files App Storage Integration:
-   - Enabled UIFileSharingEnabled and LSSupportsOpeningDocumentsInPlace.
-   - User folders for Content, Mods, Saves, and ErrorLogs are fully exposed in the Files app.
-   - Allows drag-and-drop SMAPI mod installation directly on iPhone and iPad.
+3. Guarded TouchOverlay Components Enumeration:
+   - Added null-check for runner.Components before querying existing components.
 
-4. Virtual Touchpad & Gamepad Engine:
-   - On-screen virtual analog thumbstick for fluid player movement.
-   - Action buttons: Action/Talk (A), Tool (X), Inventory/Menu (Y), Cancel/Back (B).
-   - Tap-to-mouse emulation across screen for dialogs, shops, and inventory slots.
-   - Auto-detection and passthrough for physical MFi, DualSense, Xbox, and Backbone controllers.
-   - One-tap toggle button to hide/show virtual controls.
-
-5. PC Stubs for Seamless Boot:
-   - Safe desktop stubs for Steamworks.NET and GalaxyCSharp to ensure clean startup without desktop background processes.
-
-6. Automated CI/CD:
-   - GitHub Actions pipeline on macos-14 packaging StardewValley-iOS.ipa.
+4. Zero Compression Delivery:
+   - Prebundled IPA packaged strictly with ZIP_STORED (0% compression) per user specification.
 """
 
 headers = {

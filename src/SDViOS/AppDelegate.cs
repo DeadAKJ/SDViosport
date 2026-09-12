@@ -163,9 +163,15 @@ namespace SDViOS
 
         public override void OnActivated(UIApplication application)
         {
-            base.OnActivated(application);
-            EngineLogger.Log("[AppDelegate] OnActivated");
-            GameHost.LinkGameWindowToScene();
+            try
+            {
+                EngineLogger.Log("[AppDelegate] OnActivated");
+                GameHost.LinkGameWindowToScene();
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogError($"[AppDelegate] OnActivated error: {ex}");
+            }
         }
 
         public override void DidEnterBackground(UIApplication application)
@@ -175,8 +181,15 @@ namespace SDViOS
 
         public override void WillEnterForeground(UIApplication application)
         {
-            EngineLogger.Log("[AppDelegate] WillEnterForeground");
-            GameHost.LinkGameWindowToScene();
+            try
+            {
+                EngineLogger.Log("[AppDelegate] WillEnterForeground");
+                GameHost.LinkGameWindowToScene();
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogError($"[AppDelegate] WillEnterForeground error: {ex}");
+            }
         }
 
         public override void WillTerminate(UIApplication application)
