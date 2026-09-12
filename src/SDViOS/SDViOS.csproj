@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0-ios17.0</TargetFramework>
     <OutputType>Exe</OutputType>
@@ -17,7 +17,8 @@
 
     <!-- Mono Interpreter enabled for dynamic assembly execution (SMAPI & mods) -->
     <UseInterpreter>true</UseInterpreter>
-    <MtouchLink>SdkOnly</MtouchLink>
+    <MtouchLink>None</MtouchLink>
+    <PublishTrimmed>false</PublishTrimmed>
 
     <ApplicationTitle>Stardew Valley</ApplicationTitle>
     <ApplicationId>com.deadakj.sdvios</ApplicationId>

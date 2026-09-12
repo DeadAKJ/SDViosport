@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -132,6 +132,28 @@ namespace SDViOS.Loader
                 EngineLogger.LogWarning($"[AssemblyResolve] Unresolved assembly: {args.Name}");
                 return null;
             };
+
+            AppDomain.CurrentDomain.TypeResolve += (sender, args) =>
+            {
+                // If a type failed to resolve because of a trimmed or forwarded assembly,
+                // scan loaded assemblies (like System.Private.Xml) for the type.
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        var t = asm.GetType(args.Name, false);
+                        if (t != null)
+                        {
+                            EngineLogger.Log($"[TypeResolve] Resolved '{args.Name}' from assembly '{asm.GetName().Name}'");
+                            return asm;
+                        }
+                    }
+                    catch { }
+                }
+
+                EngineLogger.LogWarning($"[TypeResolve] Unresolved type: {args.Name}");
+                return null;
+            };
         }
 
         public static void AttachTouchOverlay(Game game)
@@ -234,6 +256,7 @@ namespace SDViOS.Loader
             catch (Exception ex)
             {
                 EngineLogger.LogFatal("Vanilla Launch", ex);
+                throw;
             }
         }
     }
