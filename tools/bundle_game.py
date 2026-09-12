@@ -22,6 +22,7 @@ def main():
     parser = argparse.ArgumentParser(description="Bundle Stardew Valley PC assets for iOS port")
     parser.add_argument("--game-path", "-g", default=None, help="Path to Stardew Valley game directory")
     parser.add_argument("--output", "-o", default="bundle_output", help="Output directory")
+    parser.add_argument("--vanilla", action="store_true", help="Bundle pure vanilla game (no SMAPI or mods)")
     parser.add_argument("--include-mods", action="store_true", help="Include installed mods folder")
     parser.add_argument("--zip", action="store_true", help="Create a zip archive")
     args = parser.parse_args()
@@ -42,8 +43,8 @@ def main():
         print(f"Error: Content directory missing in {game_path}")
         sys.exit(1)
 
-    has_smapi = os.path.exists(os.path.join(game_path, "StardewModdingAPI.dll"))
-    print(f"  SMAPI detected: {has_smapi}")
+    has_smapi = os.path.exists(os.path.join(game_path, "StardewModdingAPI.dll")) and not args.vanilla
+    print(f"  Mode: {'Pure Vanilla (No Mods)' if args.vanilla else 'SMAPI Modded'}")
 
     output_dir = args.output
     if os.path.exists(output_dir):
@@ -68,15 +69,19 @@ def main():
             shutil.copy2(src, os.path.join(output_dir, dll))
             print(f"  Copied {dll}")
 
-    smapi_internal = os.path.join(game_path, "smapi-internal")
-    if os.path.exists(smapi_internal):
-        print("  Copying smapi-internal...")
-        shutil.copytree(smapi_internal, os.path.join(output_dir, "smapi-internal"))
+    if has_smapi:
+        smapi_internal = os.path.join(game_path, "smapi-internal")
+        if os.path.exists(smapi_internal):
+            print("  Copying smapi-internal...")
+            shutil.copytree(smapi_internal, os.path.join(output_dir, "smapi-internal"))
+    else:
+        with open(os.path.join(output_dir, "force_vanilla.txt"), "w") as f:
+            f.write("Vanilla Mode Active")
 
     print("[3/4] Copying Content directory...")
     shutil.copytree(content_dir, os.path.join(output_dir, "Content"))
 
-    if args.include_mods:
+    if args.include_mods and not args.vanilla:
         mods_dir = os.path.join(game_path, "Mods")
         if os.path.exists(mods_dir):
             print("  Copying Mods directory...")

@@ -163,6 +163,14 @@ namespace SDViOS.Loader
         {
             string smapiPath = Path.Combine(GameRootDir, "StardewModdingAPI.dll");
             string sdvPath = Path.Combine(GameRootDir, "Stardew Valley.dll");
+            bool forceVanilla = File.Exists(Path.Combine(GameRootDir, "force_vanilla.txt"));
+
+            if (forceVanilla)
+            {
+                EngineLogger.Log("force_vanilla.txt detected. Skipping SMAPI to launch Pure Vanilla.");
+                LaunchVanilla(args);
+                return;
+            }
 
             if (File.Exists(smapiPath))
             {
@@ -180,41 +188,52 @@ namespace SDViOS.Loader
                     }
                     else
                     {
-                        EngineLogger.LogError("SMAPI EntryPoint is null!");
+                        EngineLogger.LogError("SMAPI EntryPoint is null! Falling back to Vanilla.");
                     }
                 }
                 catch (Exception ex)
                 {
                     EngineLogger.LogFatal("SMAPI Launch", ex);
+                    EngineLogger.Log("Falling back to Vanilla launch after SMAPI error...");
                 }
             }
 
-            if (File.Exists(sdvPath))
+            LaunchVanilla(args);
+        }
+
+        public static void LaunchVanilla(string[] args)
+        {
+            string sdvPath = Path.Combine(GameRootDir, "Stardew Valley.dll");
+            if (!File.Exists(sdvPath))
             {
-                EngineLogger.Log("Found Stardew Valley.dll. Launching Vanilla Stardew Valley...");
-                try
-                {
-                    var sdvAsm = Assembly.LoadFrom(sdvPath);
-                    var entry = sdvAsm.EntryPoint;
-                    if (entry != null)
-                    {
-                        EngineLogger.Log($"Invoking Vanilla EntryPoint: {entry.DeclaringType?.FullName}.{entry.Name}");
-                        object?[] invokeArgs = entry.GetParameters().Length > 0 ? new object?[] { args } : Array.Empty<object>();
-                        entry.Invoke(null, invokeArgs);
-                        return;
-                    }
-                    else
-                    {
-                        EngineLogger.LogError("Vanilla EntryPoint is null!");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    EngineLogger.LogFatal("Vanilla Launch", ex);
-                }
+                EngineLogger.LogWarning("No Stardew Valley.dll found! Please place game files into iOS Files app (On My iPhone > Stardew Valley).");
+                return;
             }
 
-            EngineLogger.LogWarning("No game assemblies found! Waiting for user to place game files into iOS Files app (On My iPhone > Stardew Valley).");
+            EngineLogger.Log("Launching Pure Vanilla Stardew Valley...");
+            try
+            {
+                var sdvAsm = Assembly.LoadFrom(sdvPath);
+                var runnerType = sdvAsm.GetType("StardewValley.GameRunner");
+                if (runnerType != null)
+                {
+                    EngineLogger.Log("Instantiating StardewValley.GameRunner with TouchOverlay...");
+                    var runner = (Game)Activator.CreateInstance(runnerType)!;
+                    AttachTouchOverlay(runner);
+                    runner.Run();
+                }
+                else
+                {
+                    var entry = sdvAsm.EntryPoint;
+                    EngineLogger.Log($"Invoking Vanilla EntryPoint: {entry?.DeclaringType?.FullName}.{entry?.Name}");
+                    object?[] invokeArgs = entry != null && entry.GetParameters().Length > 0 ? new object?[] { args } : Array.Empty<object>();
+                    entry?.Invoke(null, invokeArgs);
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogFatal("Vanilla Launch", ex);
+            }
         }
     }
 }

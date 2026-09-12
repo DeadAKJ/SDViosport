@@ -1,6 +1,7 @@
 ﻿param (
     [string]$SteamGamePath = "C:\Program Files (x86)\Steam\steamapps\common\Stardew Valley",
     [string]$OutputDir = ".\bundle_output",
+    [switch]$Vanilla,
     [switch]$IncludeMods,
     [switch]$CreateZip
 )
@@ -8,7 +9,11 @@
 $ErrorActionPreference = "Stop"
 
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host " Stardew Valley iOS Asset Bundler" -ForegroundColor Cyan
+if ($Vanilla) {
+    Write-Host " Stardew Valley iOS Asset Bundler [PURE VANILLA]" -ForegroundColor Yellow
+} else {
+    Write-Host " Stardew Valley iOS Asset Bundler [SMAPI MODDED]" -ForegroundColor Cyan
+}
 Write-Host "==========================================" -ForegroundColor Cyan
 
 if (-not (Test-Path $SteamGamePath)) {
@@ -27,11 +32,11 @@ if (-not (Test-Path $contentDir)) {
 }
 
 Write-Host "  Found Stardew Valley: $sdvDll"
-$hasSMAPI = Test-Path (Join-Path $SteamGamePath "StardewModdingAPI.dll")
+$hasSMAPI = (Test-Path (Join-Path $SteamGamePath "StardewModdingAPI.dll")) -and (-not $Vanilla)
 if ($hasSMAPI) {
-    Write-Host "  Found SMAPI installation (Modding enabled)." -ForegroundColor Green
+    Write-Host "  SMAPI installation detected." -ForegroundColor Green
 } else {
-    Write-Host "  SMAPI not found. Vanilla PC port will be prepared." -ForegroundColor Yellow
+    Write-Host "  Vanilla mode selected (No mods, pure base game)." -ForegroundColor Yellow
 }
 
 Write-Host "[2/4] Preparing output directory: $OutputDir" -ForegroundColor Green
@@ -64,16 +69,21 @@ foreach ($dll in $gameDlls) {
     }
 }
 
-$internalDir = Join-Path $SteamGamePath "smapi-internal"
-if (Test-Path $internalDir) {
-    Write-Host "  Copying smapi-internal..."
-    Copy-Item -Path $internalDir -Destination (Join-Path $OutputDir "smapi-internal") -Recurse -Force
+if ($hasSMAPI) {
+    $internalDir = Join-Path $SteamGamePath "smapi-internal"
+    if (Test-Path $internalDir) {
+        Write-Host "  Copying smapi-internal..."
+        Copy-Item -Path $internalDir -Destination (Join-Path $OutputDir "smapi-internal") -Recurse -Force
+    }
+} else {
+    # Mark as explicit vanilla mode
+    Set-Content -Path (Join-Path $OutputDir "force_vanilla.txt") -Value "Vanilla Mode Active"
 }
 
 Write-Host "  Copying Content directory (this may take a few seconds)..."
 Copy-Item -Path $contentDir -Destination (Join-Path $OutputDir "Content") -Recurse -Force
 
-if ($IncludeMods) {
+if ($IncludeMods -and -not $Vanilla) {
     $modsDir = Join-Path $SteamGamePath "Mods"
     if (Test-Path $modsDir) {
         Write-Host "  Copying Mods directory..." -ForegroundColor Green
@@ -91,5 +101,5 @@ if ($CreateZip) {
 
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host " Bundling Complete!" -ForegroundColor Green
-Write-Host " Ready for iOS deployment via GitHub Actions or Files App." -ForegroundColor Cyan
+Write-Host " Ready for iOS deployment via Files App (On My iPhone > Stardew Valley)." -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
