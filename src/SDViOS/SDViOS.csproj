@@ -7,6 +7,10 @@
     <SupportedOSPlatformVersion>14.0</SupportedOSPlatformVersion>
     <TargetPlatformIdentifier>ios</TargetPlatformIdentifier>
 
+    <!-- Disable EOL workload errors on newer runner SDKs -->
+    <CheckEolWorkloads>false</CheckEolWorkloads>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+
     <!-- Mono Interpreter enabled for dynamic assembly execution (SMAPI & mods) -->
     <UseInterpreter>true</UseInterpreter>
     <MtouchLink>SdkOnly</MtouchLink>

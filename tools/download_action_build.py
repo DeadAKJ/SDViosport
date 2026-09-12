@@ -10,8 +10,8 @@ import sys
 token = os.environ.get('GITHUB_TOKEN')
 token_file = os.path.join(os.path.dirname(__file__), 'token.txt')
 if not token and os.path.exists(token_file):
-    with open(token_file, 'r', encoding='utf-8') as f:
-        token = f.read().strip()
+    with open(token_file, 'r', encoding='utf-8-sig') as f:
+        token = f.read().strip().replace('\ufeff', '')
 
 if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")

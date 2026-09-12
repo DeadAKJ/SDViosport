@@ -27,11 +27,11 @@ jobs:
 
       - name: Install .NET iOS Workload
         run: |
-          dotnet workload install ios
+          dotnet workload install ios --skip-manifest-update
 
       - name: Restore NuGet Packages
         run: |
-          dotnet restore src/SDViOS/SDViOS.csproj
+          dotnet restore src/SDViOS/SDViOS.csproj -p:CheckEolWorkloads=false -p:CheckEolTargetFramework=false
 
       - name: Build and Publish iOS App
         run: |
@@ -41,6 +41,8 @@ jobs:
             -p:Platform=iPhone \
             -p:RuntimeIdentifier=ios-arm64 \
             -p:ArchiveOnBuild=false \
+            -p:CheckEolWorkloads=false \
+            -p:CheckEolTargetFramework=false \
             -o ./publish
 
       - name: Package IPA
