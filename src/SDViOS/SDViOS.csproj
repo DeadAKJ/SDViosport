@@ -31,7 +31,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="MonoGame.Framework.iOS" Version="3.8.1.303" />
+    <Reference Include="MonoGame.Framework">
+      <HintPath>..\..\lib\MonoGame.Framework.dll</HintPath>
+    </Reference>
     <PackageReference Include="SkiaSharp" Version="2.88.8" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="Mono.Cecil" Version="0.11.5" />
