@@ -278,7 +278,12 @@ namespace SDViOS.Loader
                 if (runnerType != null)
                 {
                     EngineLogger.Log("Instantiating StardewValley.GameRunner with TouchOverlay...");
+                    System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
                     var runner = (Game)Activator.CreateInstance(runnerType)!;
+
+                    var instanceField = runnerType.GetField("instance", BindingFlags.Static | BindingFlags.Public);
+                    instanceField?.SetValue(null, runner);
+
                     AttachTouchOverlay(runner);
                     runner.Run();
                 }
