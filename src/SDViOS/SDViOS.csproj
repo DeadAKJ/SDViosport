@@ -18,7 +18,7 @@
     <!-- Mono Interpreter enabled for dynamic assembly execution (SMAPI & mods) -->
     <UseInterpreter>true</UseInterpreter>
     <MtouchLink>None</MtouchLink>
-    <PublishTrimmed>false</PublishTrimmed>
+    <PublishTrimmed>true</PublishTrimmed>
 
     <ApplicationTitle>Stardew Valley</ApplicationTitle>
     <ApplicationId>com.deadakj.sdvios</ApplicationId>
