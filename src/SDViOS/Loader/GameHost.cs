@@ -72,7 +72,7 @@ namespace SDViOS.Loader
             foreach (var dll in Directory.GetFiles(BundleDir, "*.dll"))
             {
                 string dest = Path.Combine(GameRootDir, Path.GetFileName(dll));
-                if (!File.Exists(dest))
+                if (!File.Exists(dest) || File.GetLastWriteTimeUtc(dll) > File.GetLastWriteTimeUtc(dest))
                 {
                     try { File.Copy(dll, dest, true); } catch { }
                 }
@@ -101,7 +101,7 @@ namespace SDViOS.Loader
                     Directory.CreateDirectory(destFolder);
                 }
 
-                if (!File.Exists(dest))
+                if (!File.Exists(dest) || File.GetLastWriteTimeUtc(file) > File.GetLastWriteTimeUtc(dest))
                 {
                     try { File.Copy(file, dest, true); } catch { }
                 }
@@ -114,16 +114,16 @@ namespace SDViOS.Loader
             {
                 string asmName = new AssemblyName(args.Name).Name + ".dll";
 
-                string p1 = Path.Combine(GameRootDir, asmName);
+                string p1 = Path.Combine(bundlePath, asmName);
                 if (File.Exists(p1)) return Assembly.LoadFrom(p1);
 
-                string p2 = Path.Combine(GameRootDir, "smapi-internal", asmName);
+                string p2 = Path.Combine(bundlePath, "smapi-internal", asmName);
                 if (File.Exists(p2)) return Assembly.LoadFrom(p2);
 
-                string p3 = Path.Combine(bundlePath, asmName);
+                string p3 = Path.Combine(GameRootDir, asmName);
                 if (File.Exists(p3)) return Assembly.LoadFrom(p3);
 
-                string p4 = Path.Combine(bundlePath, "smapi-internal", asmName);
+                string p4 = Path.Combine(GameRootDir, "smapi-internal", asmName);
                 if (File.Exists(p4)) return Assembly.LoadFrom(p4);
 
                 string p5 = Path.Combine(DocumentsDir, asmName);
@@ -171,7 +171,7 @@ namespace SDViOS.Loader
             sdvPath = string.Empty;
             smapiPath = string.Empty;
 
-            string[] searchPaths = new[] { GameRootDir, DocumentsDir, BundleDir, Path.Combine(DocumentsDir, "StardewValley") };
+            string[] searchPaths = new[] { BundleDir, GameRootDir, DocumentsDir, Path.Combine(DocumentsDir, "StardewValley") };
             foreach (var dir in searchPaths)
             {
                 if (string.IsNullOrEmpty(dir)) continue;

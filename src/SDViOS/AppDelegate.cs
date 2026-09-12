@@ -95,26 +95,44 @@ namespace SDViOS
 
         private void ShowErrorScreen(Exception ex)
         {
-            Window = new UIWindow(UIScreen.MainScreen.Bounds);
-            var vc = new UIViewController();
-            vc.View!.BackgroundColor = UIColor.FromRGB(40, 10, 10);
-
-            var realEx = ex;
-            while (realEx.InnerException != null)
+            InvokeOnMainThread(() =>
             {
-                realEx = realEx.InnerException;
-            }
+                Window = new UIWindow(UIScreen.MainScreen.Bounds);
+                Window.WindowLevel = UIWindowLevel.Alert + 1000;
+                var vc = new UIViewController();
+                vc.View!.BackgroundColor = UIColor.FromRGB(45, 12, 12);
 
-            var label = new UILabel(new CoreGraphics.CGRect(20, 60, Window.Bounds.Width - 40, Window.Bounds.Height - 120))
-            {
-                Text = $"Fatal Error on Launch:\n{realEx.GetType().Name}: {realEx.Message}\n\n{realEx.StackTrace}",
-                TextColor = UIColor.White,
-                Font = UIFont.SystemFontOfSize(12),
-                Lines = 0
-            };
-            vc.View.AddSubview(label);
-            Window.RootViewController = vc;
-            Window.MakeKeyAndVisible();
+                var realEx = ex;
+                while (realEx.InnerException != null)
+                {
+                    realEx = realEx.InnerException;
+                }
+
+                nfloat width = Window.Bounds.Width;
+                nfloat height = Window.Bounds.Height;
+
+                var labelTitle = new UILabel(new CoreGraphics.CGRect(20, 50, width - 40, 30))
+                {
+                    Text = "CRASH REPORT",
+                    TextColor = UIColor.Red,
+                    Font = UIFont.BoldSystemFontOfSize(20),
+                    TextAlignment = UITextAlignment.Center
+                };
+
+                var tv = new UITextView(new CoreGraphics.CGRect(20, 90, width - 40, height - 110))
+                {
+                    Text = $"Error: {realEx.GetType().Name}\nMessage: {realEx.Message}\n\n--- Call Stack ---\n{realEx.StackTrace}\n\n--- Full Details ---\n{ex}",
+                    TextColor = UIColor.White,
+                    Font = UIFont.SystemFontOfSize(12),
+                    Editable = false,
+                    BackgroundColor = UIColor.FromRGB(20, 5, 5)
+                };
+
+                vc.View.AddSubviews(labelTitle, tv);
+                Window.RootViewController = vc;
+                Window.Hidden = false;
+                Window.MakeKeyAndVisible();
+            });
         }
 
         public override void DidEnterBackground(UIApplication application)
