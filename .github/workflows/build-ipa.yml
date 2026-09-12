@@ -41,6 +41,9 @@ jobs:
             -p:Platform=iPhone \
             -p:RuntimeIdentifier=ios-arm64 \
             -p:ArchiveOnBuild=false \
+            -p:EnableCodeSigning=false \
+            -p:CodesignKey="" \
+            -p:CodesignProvision="" \
             -p:CheckEolWorkloads=false \
             -p:CheckEolTargetFramework=false \
             -o ./publish
@@ -54,6 +57,7 @@ jobs:
             exit 1
           fi
           echo "Found app bundle at: $APP_PATH"
+          codesign --force --deep --sign - --entitlements src/SDViOS/Entitlements.plist "$APP_PATH"
           cp -R "$APP_PATH" ipa_staging/Payload/
           cd ipa_staging
           zip -r -q ../StardewValley-iOS.ipa Payload

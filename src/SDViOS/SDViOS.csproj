@@ -11,6 +11,10 @@
     <CheckEolWorkloads>false</CheckEolWorkloads>
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
 
+    <!-- Ad-hoc signing for sideloading (TrollStore, AltStore, Sideloadly) -->
+    <EnableCodeSigning>false</EnableCodeSigning>
+    <CodesignKey>-</CodesignKey>
+
     <!-- Mono Interpreter enabled for dynamic assembly execution (SMAPI & mods) -->
     <UseInterpreter>true</UseInterpreter>
     <MtouchLink>SdkOnly</MtouchLink>
