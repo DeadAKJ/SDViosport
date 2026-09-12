@@ -36,7 +36,7 @@ jobs:
       - name: Build and Publish iOS App
         run: |
           dotnet publish src/SDViOS/SDViOS.csproj \
-            -f net8.0-ios17.5 \
+            -f net8.0-ios17.0 \
             -c Release \
             -p:Platform=iPhone \
             -p:RuntimeIdentifier=ios-arm64 \
