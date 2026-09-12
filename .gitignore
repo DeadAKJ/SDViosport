@@ -1,0 +1,20 @@
+﻿# Build outputs
+bin/
+obj/
+publish/
+ipa_staging/
+*.ipa
+*.app
+
+# Bundled assets & archives
+bundle_output/
+*.zip
+
+# OS & IDE
+.DS_Store
+.vscode/
+.idea/
+*.user
+
+token.txt
+tools/token.txt
