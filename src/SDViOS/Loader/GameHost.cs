@@ -49,25 +49,35 @@ namespace SDViOS.Loader
             }
 
             ContentDir = Path.Combine(GameRootDir, "Content");
-            ModsDir = Path.Combine(GameRootDir, "Mods");
-            SavesDir = Path.Combine(GameRootDir, "Saves");
-            LogsDir = Path.Combine(GameRootDir, "ErrorLogs");
+            ModsDir = Path.Combine(DocumentsDir, "Mods");
+            SavesDir = Path.Combine(DocumentsDir, "Saves");
+            LogsDir = Path.Combine(DocumentsDir, "ErrorLogs");
 
             Directory.CreateDirectory(GameRootDir);
-            Directory.CreateDirectory(ContentDir);
             Directory.CreateDirectory(ModsDir);
             Directory.CreateDirectory(SavesDir);
             Directory.CreateDirectory(LogsDir);
 
             EngineLogger.Initialize(LogsDir);
-            EngineLogger.Log($"DocumentsDir: {DocumentsDir}");
-            EngineLogger.Log($"GameRootDir: {GameRootDir}");
+            EngineLogger.Log($"[Engine] Initialized file system.");
             EngineLogger.Log($"BundleDir: {BundleDir}");
+            EngineLogger.Log($"DocumentsDir: {DocumentsDir}");
+            EngineLogger.Log($"ModsDir: {ModsDir}");
 
-            // Copy bundled assets if present in App Bundle and not in Documents
-            SyncBundledDirectory(Path.Combine(BundleDir, "Content"), ContentDir);
-            SyncBundledDirectory(Path.Combine(BundleDir, "Mods"), ModsDir);
-            SyncBundledDirectory(Path.Combine(BundleDir, "smapi-internal"), Path.Combine(GameRootDir, "smapi-internal"));
+            // If bundled Mods directory exists and user Documents/Mods is empty, copy default bundled mods (only a few KB)
+            string bundledMods = Path.Combine(BundleDir, "Mods");
+            if (Directory.Exists(bundledMods) && Directory.GetFileSystemEntries(ModsDir).Length == 0)
+            {
+                try
+                {
+                    SyncBundledDirectory(bundledMods, ModsDir);
+                    EngineLogger.Log("[Engine] Seeded default mods to Documents/Mods.");
+                }
+                catch (Exception ex)
+                {
+                    EngineLogger.LogWarning($"[Engine] Failed to seed default mods: {ex.Message}");
+                }
+            }
 
             // Clean up any stale BCL DLL that may have been placed into Documents in older builds
             string staleCoreLib = Path.Combine(GameRootDir, "System.Private.CoreLib.dll");
@@ -76,39 +86,10 @@ namespace SDViOS.Loader
                 try { File.Delete(staleCoreLib); } catch { }
             }
 
-            var gameDllNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "Stardew Valley.dll",
-                "StardewModdingAPI.dll",
-                "StardewValley.GameData.dll",
-                "xTile.dll",
-                "BmFont.dll",
-                "CPExtBmFont.dll",
-                "Lidgren.Network.dll",
-                "GalaxyCSharp.dll",
-                "Steamworks.NET.dll",
-                "System.Data.HashFunction.Core.dll",
-                "System.Data.HashFunction.Interfaces.dll",
-                "System.Data.HashFunction.xxHash.dll",
-                "Microsoft.Extensions.DependencyInjection.Abstractions.dll",
-                "TextCopy.dll"
-            };
-
-            foreach (var dll in Directory.GetFiles(BundleDir, "*.dll"))
-            {
-                string name = Path.GetFileName(dll);
-                if (gameDllNames.Contains(name))
-                {
-                    string dest = Path.Combine(GameRootDir, name);
-                    if (!File.Exists(dest) || File.GetLastWriteTimeUtc(dll) > File.GetLastWriteTimeUtc(dest))
-                    {
-                        try { File.Copy(dll, dest, true); } catch { }
-                    }
-                }
-            }
-
             Environment.SetEnvironmentVariable("APPDATA", DocumentsDir);
             Environment.SetEnvironmentVariable("STARDEW_VALLEY_MODS_PATH", ModsDir);
+            Environment.SetEnvironmentVariable("SMAPI_MODS_PATH", ModsDir);
+            Environment.SetEnvironmentVariable("SMAPI_NO_TERMINAL", "1");
             Environment.SetEnvironmentVariable("MONO_STRICT_MS_COMPLIANT", "yes");
             Directory.SetCurrentDirectory(GameRootDir);
 
@@ -262,6 +243,8 @@ namespace SDViOS.Loader
                         EngineLogger.Log($"Invoking SMAPI EntryPoint: {entry.DeclaringType?.FullName}.{entry.Name}");
                         object?[] invokeArgs = entry.GetParameters().Length > 0 ? new object?[] { smapiArgs } : Array.Empty<object>();
                         entry.Invoke(null, invokeArgs);
+
+                        AttachTouchOverlayToGameRunner();
                         return;
                     }
                 }
@@ -304,6 +287,32 @@ namespace SDViOS.Loader
             {
                 EngineLogger.LogFatal("Vanilla Launch", ex);
                 throw;
+            }
+        }
+
+        public static void AttachTouchOverlayToGameRunner()
+        {
+            try
+            {
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    var runnerType = asm.GetType("StardewValley.GameRunner");
+                    if (runnerType != null)
+                    {
+                        var instanceField = runnerType.GetField("instance", BindingFlags.Static | BindingFlags.Public);
+                        var runner = instanceField?.GetValue(null) as Game;
+                        if (runner != null)
+                        {
+                            AttachTouchOverlay(runner);
+                            EngineLogger.Log("[GameHost] Successfully attached TouchOverlay to GameRunner.");
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[GameHost] Could not attach TouchOverlay to GameRunner: {ex.Message}");
             }
         }
     }
