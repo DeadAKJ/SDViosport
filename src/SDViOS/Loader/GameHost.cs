@@ -275,9 +275,63 @@ namespace SDViOS.Loader
                         var core = Activator.CreateInstance(scoreType, new object?[] { ModsDir, false, (bool?)false });
                         SMAPICoreInstance = core;
 
+                        // 1. Configure Settings before RunInteractively to prevent background console thread and update checks
+                        try
+                        {
+                            var settingsField = scoreType.GetField("Settings", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            var settings = settingsField?.GetValue(core);
+                            if (settings != null)
+                            {
+                                var st = settings.GetType();
+                                st.GetProperty("ListenForConsoleInput", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.SetValue(settings, false);
+                                st.GetProperty("CheckForUpdates", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.SetValue(settings, false);
+                                st.GetProperty("CheckForBlacklistUpdates", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.SetValue(settings, false);
+                                EngineLogger.Log("[GameHost] Configured SCore.Settings: ListenForConsoleInput=false, CheckForUpdates=false.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] Failed to configure SCore.Settings: {ex.Message}");
+                        }
+
+                        // 2. Install NonDisposingStreamWriter on SMAPI LogFileManager before launch
+                        ReviveSMAPILogFile(core);
+
                         var runMethod = scoreType.GetMethod("RunInteractively", BindingFlags.Public | BindingFlags.Instance);
                         runMethod?.Invoke(core, null);
                         EngineLogger.Log("[GameHost] SMAPI SCore.RunInteractively launched successfully.");
+
+                        // 3. Post-RunInteractively: Neutralize SGameRunner.OnGameExiting and revive SCore state
+                        try
+                        {
+                            var gameField = scoreType.GetField("Game", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            var game = gameField?.GetValue(core);
+                            if (game != null)
+                            {
+                                var onExitingField = game.GetType().GetField("OnGameExiting", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                                if (onExitingField != null)
+                                {
+                                    Action noopExit = () =>
+                                    {
+                                        EngineLogger.Log("[GameHost] SGameRunner.OnGameExiting intercepted and suppressed.");
+                                    };
+                                    onExitingField.SetValue(game, noopExit);
+                                    EngineLogger.Log("[GameHost] Replaced SGameRunner.OnGameExiting with no-op handler.");
+                                }
+                            }
+
+                            var isDispField = scoreType.GetField("IsDisposed", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            isDispField?.SetValue(core, false);
+
+                            var isRunningField = scoreType.GetField("IsGameRunning", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            isRunningField?.SetValue(core, true);
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] Post-RunInteractively patch warning: {ex.Message}");
+                        }
+
+                        ReviveSMAPILogFile(core);
                     }
                     else
                     {
@@ -385,6 +439,7 @@ namespace SDViOS.Loader
             try
             {
                 EngineLogger.Log("[GameHost] LinkGameWindowToScene: linking window...");
+                ReviveSMAPILogFile(SMAPICoreInstance);
 
                 Game? runner = null;
                 foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
@@ -836,6 +891,7 @@ namespace SDViOS.Loader
                     EngineLogger.Log("[GameHost] Creating modern CADisplayLink for game tick pipeline...");
                     _engineDisplayLink = CoreAnimation.CADisplayLink.Create(() =>
                     {
+                        ReviveSMAPILogFile(SMAPICoreInstance);
                         bool directFallback = false;
                         try
                         {
@@ -999,6 +1055,7 @@ namespace SDViOS.Loader
                 }
 
                 // 3. Tick Game (Runs SMAPI + Stardew Valley Update & Draw)
+                ReviveSMAPILogFile(SMAPICoreInstance);
                 runner.Tick();
 
                 // 4. Threading.Run
@@ -1088,6 +1145,83 @@ namespace SDViOS.Loader
             catch (Exception ex)
             {
                 EngineLogger.LogWarning($"[GameHost] Could not attach TouchOverlay to GameRunner: {ex.Message}");
+            }
+        }
+
+        public class NonDisposingStreamWriter : StreamWriter
+        {
+            public NonDisposingStreamWriter(Stream stream, System.Text.Encoding encoding) : base(stream, encoding) { }
+
+            protected override void Dispose(bool disposing)
+            {
+                try { Flush(); } catch { }
+                // Keep stream alive forever - do not call base.Dispose(disposing)
+            }
+
+            public override void Close()
+            {
+                try { Flush(); } catch { }
+                // Keep stream alive forever - do not close
+            }
+        }
+
+        public static void ReviveSMAPILogFile(object? core)
+        {
+            if (core == null) return;
+            try
+            {
+                var coreType = core.GetType();
+                var lmField = coreType.GetField("LogManager", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                var lm = lmField?.GetValue(core);
+                if (lm != null)
+                {
+                    var lfmField = lm.GetType().GetField("LogFile", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                    var lfm = lfmField?.GetValue(lm);
+                    if (lfm != null)
+                    {
+                        var streamField = lfm.GetType().GetField("Stream", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        var stream = streamField?.GetValue(lfm) as StreamWriter;
+                        var pathProp = lfm.GetType().GetProperty("Path", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        string? logPath = pathProp?.GetValue(lfm) as string;
+
+                        bool needsRevival = false;
+                        if (stream == null || !(stream is NonDisposingStreamWriter))
+                        {
+                            needsRevival = true;
+                        }
+                        else
+                        {
+                            try
+                            {
+                                if (stream.BaseStream == null || !stream.BaseStream.CanWrite)
+                                {
+                                    needsRevival = true;
+                                }
+                            }
+                            catch
+                            {
+                                needsRevival = true;
+                            }
+                        }
+
+                        if (needsRevival && !string.IsNullOrEmpty(logPath))
+                        {
+                            var dir = Path.GetDirectoryName(logPath);
+                            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                            {
+                                Directory.CreateDirectory(dir);
+                            }
+                            var fs = new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+                            var newWriter = new NonDisposingStreamWriter(fs, System.Text.Encoding.UTF8) { AutoFlush = true };
+                            streamField?.SetValue(lfm, newWriter);
+                            EngineLogger.Log($"[GameHost] Successfully installed NonDisposingStreamWriter to '{logPath}'.");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[GameHost] ReviveSMAPILogFile error: {ex.Message}");
             }
         }
     }

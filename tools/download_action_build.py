@@ -17,23 +17,26 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.22-fix-platform-viewcontroller-and-tick'
+version_name = 'v1.0.23-fix-smapi-console-thread-and-logwriter'
 
-changelog_content = """Version: v1.0.22-fix-platform-viewcontroller-and-tick
+changelog_content = """Version: v1.0.23-fix-smapi-console-thread-and-logwriter
 Date: 2026-09-13
 
 Changes:
-1. Repair iOSGamePlatform _viewController & View Hierarchy:
-   - Root Cause: In iOSGamePlatform.Tick(), instructions dereference `_viewController` and call `_viewController.get_View().MakeCurrent()`. When `_viewController` or its View is null, it threw NullReferenceException at Microsoft.Xna.Framework.iOSGamePlatform.Tick(), preventing Game.Tick(), DoInitialize(), and Draw() from ever executing.
-   - Discovered and cached active `iOSGameView` in window subviews, ensured retention, landscape bounds, and brought to front.
-   - Inspected and repaired `plat._viewController` and linked its View property to the active `iOSGameView`.
+1. Disable SMAPI Console Thread:
+   - Root Cause: In SCore.OnGameInitialized, SMAPI checked `Settings.ListenForConsoleInput` (default: true) and spawned a background thread to read console input. On iOS there is no interactive console, and the thread attempted to log "Type 'help' for help...", crashing with ObjectDisposedException: StreamWriter closed.
+   - Programmatically disabled `ListenForConsoleInput = false`, `CheckForUpdates = false`, and `CheckForBlacklistUpdates = false` on `SCore.Settings` before launch.
+   - Also enforced `ListenForConsoleInput: false` in `smapi-internal/config.json` and `config.user.json`.
 
-2. Direct Render Pipeline Fallback:
-   - CADisplayLink now wraps `plat.Tick()` with an automatic failover to `ExecuteDirectGameTick()`.
-   - Directly executes: `iOSGameView.MakeCurrent()`, `runner.Tick()`, `Threading.Run()`, `GraphicsDevice.Present()`, and `iOSGameView.Present()` (OpenGL buffer swap).
-   - Guarantees continuous 60 FPS update and presentation even if platform internals encounter reflection or lifecycle anomalies.
+2. Neutralize SGameRunner.OnGameExiting:
+   - Replaced `SGameRunner.OnGameExiting` delegate with a safe no-op handler so MonoGame cannot trigger `SCore.Dispose(false)`.
+   - Post-launch revived `SCore.IsDisposed = false` and `SCore.IsGameRunning = true`.
 
-3. Zero Compression & Auto-Purge:
+3. NonDisposingStreamWriter & LogFileManager Stream Revival:
+   - Subclassed StreamWriter as `NonDisposingStreamWriter` which flushes on Dispose/Close instead of closing the underlying file stream.
+   - Installed `NonDisposingStreamWriter` on `LogFileManager.Stream` at bootstrap, before CADisplayLink tick, before Direct Tick fallback, and in `LinkGameWindowToScene`.
+
+4. Zero Compression & Auto-Purge:
    - Bundled IPA packaged with 0% compression (`ZIP_STORED`), old version IPAs automatically purged.
 """
 
