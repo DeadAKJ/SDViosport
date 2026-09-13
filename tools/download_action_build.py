@@ -17,23 +17,26 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.19-fix-smapi-async-disposal-black-screen'
+version_name = 'v1.0.20-fix-base-isactive-displaylink-and-scenewindow'
 
-changelog_content = """Version: v1.0.19-fix-smapi-async-disposal-black-screen
+changelog_content = """Version: v1.0.20-fix-base-isactive-displaylink-and-scenewindow
 Date: 2026-09-13
 
 Changes:
-1. Prevent SMAPI SCore & Game Engine Auto-Disposal:
-   - Root Cause: On desktop PC, `Game.Run()` blocks in a while-loop. In `Program.Start()`, SMAPI wraps `SCore` in a `using (var core = new SCore(...))` block. On iOS MonoGame, `GamePlatform.DefaultRunBehavior` is `GameRunBehavior.Asynchronous`, so `Game.Run()` starts `CADisplayLink` and returns IMMEDIATELY.
-   - When `Game.Run()` returned immediately, `SCore.RunInteractively()` exited, and the `using` block immediately invoked `core.Dispose()`, which called `Game.Dispose()`.
-   - `Game.Dispose()` set `Game.Platform = null`, `Game._instance = null`, disposed `iOSGamePlatform`, and stopped `CADisplayLink`, leaving the game completely dead and destroyed before frame 1 ever rendered.
-   - Resolved by instantiating `SCore` directly in `GameHost` and storing it in a static field `SMAPICoreInstance`. `SCore` and `Game` remain alive and active forever without being disposed.
+1. Fix Game.IsActive Reflection on Private Base Field:
+   - In iOSGamePlatform.Tick(), instruction 1 is 'if (!Game.IsActive) return;'.
+   - Game.IsActive reads GamePlatform._isActive.
+   - Because _isActive is a private field declared on the base class GamePlatform, plat.GetType().GetField("_isActive") returned null and was never updated, leaving Game.IsActive permanently false.
+   - Resolved by traversing the full type hierarchy (for Type t = plat.GetType(); t != null; t = t.BaseType) and setting _isActive on both GamePlatform and GameRunner.
 
-2. Guarded Reflection and Diagnostics:
-   - Wrapped `runner.IsActive` logging in `try/catch` to ensure diagnostics can never abort `LinkGameWindowToScene()`.
+2. Modern CADisplayLink Implementation:
+   - MonoGame's internal CreateDisplayLink() invoked CADisplayLink.set_FrameInterval(), which is removed/broken on iOS 16+ and threw Arg_TargetInvocationException.
+   - Replaced with a custom CADisplayLink driving iOSGamePlatform.Tick() at 60 FPS registered on NSRunLoop.Main (Common & Default modes) and attached to plat._displayLink.
 
-3. Zero Compression Delivery:
-   - Bundled IPA packaged strictly with 0% compression (`ZIP_STORED`). Auto-purges older version IPAs to conserve disk space.
+3. UIWindow Recreation with Active UIWindowScene:
+   - MonoGame constructed UIWindow with UIScreen.MainScreen.Bounds, which is 0x0 during scene-based app startup.
+   - UIKit silently ignores frame modifications on windows attached without a scene, keeping bounds at 0x0 with 0 subviews.
+   - Resolved by creating new UIWindow(activeScene) when window bounds are empty, binding rootViewController, attaching the view, and registering it with Game services.
 """
 
 headers = {
