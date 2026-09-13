@@ -141,6 +141,29 @@ with opener.open(req) as resp:
             print(f"Extracting {filename} to {target_dir}...")
             z.extract(filename, target_dir)
 
+# Purge previous version IPAs to conserve disk space
+base_dir = r"C:\Users\User\Desktop\SDVport Version"
+root_bundled = os.path.join(base_dir, "StardewValley-Bundled.ipa")
+freed_bytes = 0
+purged_count = 0
+for r, d, f_list in os.walk(base_dir):
+    if os.path.abspath(r).startswith(os.path.abspath(target_dir)):
+        continue
+    for f in f_list:
+        if f.endswith(".ipa"):
+            full_p = os.path.join(r, f)
+            if os.path.abspath(full_p) == os.path.abspath(root_bundled):
+                continue
+            try:
+                freed_bytes += os.path.getsize(full_p)
+                os.remove(full_p)
+                purged_count += 1
+            except Exception as e:
+                print(f"  Warning: could not delete {full_p}: {e}")
+
+if purged_count > 0:
+    print(f"Purged {purged_count} old version IPA(s), freed {freed_bytes / (1024*1024):.2f} MB.")
+
 print("\n==========================================")
 print(f"Build {version_name} successfully delivered to:")
 print(f"  {target_dir}")
