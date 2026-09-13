@@ -1479,10 +1479,87 @@ namespace SDViOS.Loader
                             }
                             catch { }
                         }
+
+                        // Ensure instance _screen and _uiScreen render targets are allocated
+                        var currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
+                        if (currentGD != null)
+                        {
+                            int targetW = currentGD.PresentationParameters.BackBufferWidth > 0 ? currentGD.PresentationParameters.BackBufferWidth : 1792;
+                            int targetH = currentGD.PresentationParameters.BackBufferHeight > 0 ? currentGD.PresentationParameters.BackBufferHeight : 828;
+
+                            var screenProp = instType.GetProperty("screen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            var screenField = instType.GetField("_screen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            if ((screenProp != null && screenProp.GetValue(inst) == null) || (screenField != null && screenField.GetValue(inst) == null))
+                            {
+                                try
+                                {
+                                    var rt = new Microsoft.Xna.Framework.Graphics.RenderTarget2D(
+                                        currentGD, targetW, targetH, false,
+                                        Microsoft.Xna.Framework.Graphics.SurfaceFormat.Color,
+                                        Microsoft.Xna.Framework.Graphics.DepthFormat.None,
+                                        0,
+                                        Microsoft.Xna.Framework.Graphics.RenderTargetUsage.PreserveContents);
+                                    rt.Name = "@Game1.screen";
+                                    if (screenProp?.GetSetMethod(true) != null) screenProp.SetValue(inst, rt);
+                                    else screenField?.SetValue(inst, rt);
+                                    EngineLogger.Log($"[GameHost] Initialized instance screen render target ({targetW}x{targetH}).");
+                                }
+                                catch (Exception sEx)
+                                {
+                                    EngineLogger.LogWarning($"[GameHost] Failed to initialize instance screen: {sEx.Message}");
+                                }
+                            }
+
+                            var uiScreenProp = instType.GetProperty("uiScreen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            var uiScreenField = instType.GetField("_uiScreen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            if ((uiScreenProp != null && uiScreenProp.GetValue(inst) == null) || (uiScreenField != null && uiScreenField.GetValue(inst) == null))
+                            {
+                                try
+                                {
+                                    var rt = new Microsoft.Xna.Framework.Graphics.RenderTarget2D(
+                                        currentGD, targetW, targetH, false,
+                                        Microsoft.Xna.Framework.Graphics.SurfaceFormat.Color,
+                                        Microsoft.Xna.Framework.Graphics.DepthFormat.None,
+                                        0,
+                                        Microsoft.Xna.Framework.Graphics.RenderTargetUsage.PreserveContents);
+                                    rt.Name = "@Game1.uiScreen";
+                                    if (uiScreenProp?.GetSetMethod(true) != null) uiScreenProp.SetValue(inst, rt);
+                                    else uiScreenField?.SetValue(inst, rt);
+                                    EngineLogger.Log($"[GameHost] Initialized instance uiScreen render target ({targetW}x{targetH}).");
+                                }
+                                catch (Exception uiEx)
+                                {
+                                    EngineLogger.LogWarning($"[GameHost] Failed to initialize instance uiScreen: {uiEx.Message}");
+                                }
+                            }
+                        }
                     }
                 }
 
-                // 5. Ensure Game1.defaultDeviceViewport is valid
+                // 5. Ensure Game1.spriteBatch is valid
+                if (game1Type != null)
+                {
+                    try
+                    {
+                        var sbField = game1Type.GetField("spriteBatch", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (sbField != null && sbField.GetValue(null) == null)
+                        {
+                            var currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
+                            if (currentGD != null)
+                            {
+                                var sb = new Microsoft.Xna.Framework.Graphics.SpriteBatch(currentGD);
+                                sbField.SetValue(null, sb);
+                                EngineLogger.Log("[GameHost] Initialized Game1.spriteBatch static instance.");
+                            }
+                        }
+                    }
+                    catch (Exception sbEx)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] Game1.spriteBatch initialization warning: {sbEx.Message}");
+                    }
+                }
+
+                // 6. Ensure Game1.defaultDeviceViewport is valid
                 if (game1Type != null)
                 {
                     var ddvField = game1Type.GetField("defaultDeviceViewport", BindingFlags.Static | BindingFlags.Public);

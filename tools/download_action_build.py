@@ -5,6 +5,7 @@ import zipfile
 import io
 import os
 import sys
+import subprocess
 
 # Load GitHub Token from environment or local gitignored token.txt
 token = os.environ.get('GITHUB_TOKEN')
@@ -17,17 +18,17 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.26-fix-game1-options-and-shoulddrawonbuffer'
+version_name = 'v1.0.27-fix-spritebatch-and-screens-black-screen'
 
-changelog_content = """Version: v1.0.26-fix-game1-options-and-shoulddrawonbuffer
+changelog_content = """Version: v1.0.27-fix-spritebatch-and-screens-black-screen
 Date: 2026-09-13
 
 Changes:
-1. Initialize Game1.options and instanceOptions for Game1 and SGame instances:
-   - Root Cause: In Game1.ShouldDrawOnBuffer(), Game1.get_options().get_zoomLevel() is called. When Game1.options / instanceOptions is null (which is normally only instantiated during game load/save loading), ShouldDrawOnBuffer throws NullReferenceException on every frame.
-   - Initialized Game1.options = new Options() (with zoomLevel = 1.0f, uiScale = 1.0f).
-   - Set instanceOptions on all active Game1 and SGame instances in runner.gameInstances.
-   - Also assigned Game1.game1 static field if null.
+1. Initialize Game1.spriteBatch, _screen, and _uiScreen RenderTargets:
+   - Root Cause: In Game1.renderScreenBuffer(RenderTarget2D target_screen), Game1.spriteBatch.Begin(...) and Game1.uiScreen.Bounds were invoked. Because spriteBatch, _screen, and _uiScreen were null, every frame threw System.NullReferenceException inside renderScreenBuffer, aborting the render pass and leaving the iOS screen entirely black.
+   - Initialized Game1.spriteBatch static instance with the active GraphicsDevice.
+   - Initialized _screen and _uiScreen RenderTarget2D instances on all active Game1 and SGame instances using backbuffer resolution with PreserveContents.
+   - Allows Game1.renderScreenBuffer to draw game buffer and UI buffer to screen cleanly without crashing or black screen.
 """
 
 headers = {
