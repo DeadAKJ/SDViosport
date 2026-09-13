@@ -1358,7 +1358,58 @@ namespace SDViOS.Loader
                     }
                 }
 
-                // 4. Ensure gameInstances have valid localMultiplayerWindow and instanceOptions
+                // 4. Ensure gameInstances have valid localMultiplayerWindow, instanceOptions, and Game1.game1
+                object? defaultOptions = null;
+                Type? optionsType = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    optionsType = asm.GetType("StardewValley.Options");
+                    if (optionsType != null)
+                    {
+                        try
+                        {
+                            defaultOptions = Activator.CreateInstance(optionsType);
+                            // Set zoomLevel = 1.0f, uiScale = 1.0f if present
+                            var zoomProp = optionsType.GetProperty("zoomLevel", BindingFlags.Public | BindingFlags.Instance)
+                                        ?? optionsType.GetProperty("ZoomLevel", BindingFlags.Public | BindingFlags.Instance);
+                            zoomProp?.SetValue(defaultOptions, 1.0f);
+
+                            var uiScaleProp = optionsType.GetProperty("uiScale", BindingFlags.Public | BindingFlags.Instance)
+                                           ?? optionsType.GetProperty("UiScale", BindingFlags.Public | BindingFlags.Instance);
+                            uiScaleProp?.SetValue(defaultOptions, 1.0f);
+                            break;
+                        }
+                        catch { }
+                    }
+                }
+
+                // Ensure Game1.options static property/field has a non-null Options instance
+                if (game1Type != null && defaultOptions != null)
+                {
+                    try
+                    {
+                        var g1OptProp = game1Type.GetProperty("options", BindingFlags.Static | BindingFlags.Public)
+                                     ?? game1Type.GetProperty("Options", BindingFlags.Static | BindingFlags.Public);
+                        if (g1OptProp != null && g1OptProp.GetValue(null) == null)
+                        {
+                            g1OptProp.SetValue(null, defaultOptions);
+                            EngineLogger.Log("[GameHost] Set Game1.options static property to defaultOptions.");
+                        }
+
+                        var g1OptField = game1Type.GetField("options", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                                      ?? game1Type.GetField("Options", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (g1OptField != null && g1OptField.GetValue(null) == null)
+                        {
+                            g1OptField.SetValue(null, defaultOptions);
+                            EngineLogger.Log("[GameHost] Set Game1.options static field to defaultOptions.");
+                        }
+                    }
+                    catch (Exception optEx)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] Game1.options initialization warning: {optEx.Message}");
+                    }
+                }
+
                 var instancesField = runner.GetType().GetField("gameInstances", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)
                                   ?? runner.GetType().BaseType?.GetField("gameInstances", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                 if (instancesField?.GetValue(runner) is System.Collections.IList instances && instances.Count > 0)
@@ -1378,16 +1429,53 @@ namespace SDViOS.Loader
                             }
                         }
 
+                        // Check instance field "instanceOptions"
+                        FieldInfo? instOptField = null;
+                        for (Type? t = instType; t != null; t = t.BaseType)
+                        {
+                            instOptField = t.GetField("instanceOptions", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            if (instOptField != null) break;
+                        }
+
+                        if (instOptField != null && instOptField.GetValue(inst) == null)
+                        {
+                            try
+                            {
+                                var newOpt = defaultOptions ?? Activator.CreateInstance(instOptField.FieldType);
+                                instOptField.SetValue(inst, newOpt);
+                                EngineLogger.Log("[GameHost] Assigned instanceOptions to game instance.");
+                            }
+                            catch (Exception ioEx)
+                            {
+                                EngineLogger.LogWarning($"[GameHost] instanceOptions field set error: {ioEx.Message}");
+                            }
+                        }
+
+                        // Check property "options" or "Options"
                         var optProp = instType.GetProperty("options", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
                                    ?? instType.GetProperty("Options", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                         if (optProp != null && optProp.GetValue(inst) == null)
                         {
                             try
                             {
-                                var optType = optProp.PropertyType;
-                                var optInstance = Activator.CreateInstance(optType);
+                                var optInstance = defaultOptions ?? Activator.CreateInstance(optProp.PropertyType);
                                 optProp.SetValue(inst, optInstance);
-                                EngineLogger.Log($"[GameHost] Initialized instance options: {optType.Name}");
+                                EngineLogger.Log($"[GameHost] Initialized instance options: {optProp.PropertyType.Name}");
+                            }
+                            catch { }
+                        }
+
+                        // Ensure Game1.game1 static field points to inst if null
+                        if (game1Type != null)
+                        {
+                            try
+                            {
+                                var g1Field = game1Type.GetField("game1", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                                if (g1Field != null && g1Field.GetValue(null) == null && game1Type.IsInstanceOfType(inst))
+                                {
+                                    g1Field.SetValue(null, inst);
+                                    EngineLogger.Log("[GameHost] Set Game1.game1 = instance.");
+                                }
                             }
                             catch { }
                         }

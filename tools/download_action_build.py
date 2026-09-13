@@ -17,19 +17,17 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.25-fix-touchpanel-primarywindow-and-presentationparameters'
+version_name = 'v1.0.26-fix-game1-options-and-shoulddrawonbuffer'
 
-changelog_content = """Version: v1.0.25-fix-touchpanel-primarywindow-and-presentationparameters
+changelog_content = """Version: v1.0.26-fix-game1-options-and-shoulddrawonbuffer
 Date: 2026-09-13
 
 Changes:
-1. Initialize TouchPanel.PrimaryWindow and Mouse.PrimaryWindow:
-   - Root Cause: In MonoGame, new PresentationParameters() and GraphicsDeviceManager.CreateDevice() call TouchPanel.DisplayOrientation, which accesses TouchPanel.PrimaryWindow.TouchPanelState.DisplayOrientation. When PrimaryWindow is null, this throws NullReferenceException.
-   - Initialized TouchPanel.PrimaryWindow and Mouse.PrimaryWindow from iOSGamePlatform._window or GameRunner.Window.
-   - Ensured TouchPanelState is instantiated and assigned to GameWindow if missing.
-
-2. Safe PresentationParameters Allocation & Fallback:
-   - Wrapped PresentationParameters instantiation with fallback to FormatterServices.GetUninitializedObject if the constructor fails, populating BackBuffer dimensions, Color format, Depth24Stencil8, and DeviceWindowHandle directly.
+1. Initialize Game1.options and instanceOptions for Game1 and SGame instances:
+   - Root Cause: In Game1.ShouldDrawOnBuffer(), Game1.get_options().get_zoomLevel() is called. When Game1.options / instanceOptions is null (which is normally only instantiated during game load/save loading), ShouldDrawOnBuffer throws NullReferenceException on every frame.
+   - Initialized Game1.options = new Options() (with zoomLevel = 1.0f, uiScale = 1.0f).
+   - Set instanceOptions on all active Game1 and SGame instances in runner.gameInstances.
+   - Also assigned Game1.game1 static field if null.
 """
 
 headers = {
