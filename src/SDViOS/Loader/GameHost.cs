@@ -390,8 +390,8 @@ namespace SDViOS.Loader
                 catch { }
 
                 var screenBounds = UIScreen.MainScreen.Bounds;
-                nfloat screenW = NMath.Max(screenBounds.Width, screenBounds.Height);
-                nfloat screenH = NMath.Min(screenBounds.Width, screenBounds.Height);
+                nfloat screenW = (nfloat)Math.Max((double)screenBounds.Width, (double)screenBounds.Height);
+                nfloat screenH = (nfloat)Math.Min((double)screenBounds.Width, (double)screenBounds.Height);
                 var landscapeFrame = new CGRect(0, 0, screenW, screenH);
 
                 var activeScene = GetActiveWindowScene();
