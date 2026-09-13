@@ -17,27 +17,25 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.23-fix-smapi-console-thread-and-logwriter'
+version_name = 'v1.0.24-fix-graphics-device-and-window'
 
-changelog_content = """Version: v1.0.23-fix-smapi-console-thread-and-logwriter
+changelog_content = """Version: v1.0.24-fix-graphics-device-and-window
 Date: 2026-09-13
 
 Changes:
-1. Disable SMAPI Console Thread:
-   - Root Cause: In SCore.OnGameInitialized, SMAPI checked `Settings.ListenForConsoleInput` (default: true) and spawned a background thread to read console input. On iOS there is no interactive console, and the thread attempted to log "Type 'help' for help...", crashing with ObjectDisposedException: StreamWriter closed.
-   - Programmatically disabled `ListenForConsoleInput = false`, `CheckForUpdates = false`, and `CheckForBlacklistUpdates = false` on `SCore.Settings` before launch.
-   - Also enforced `ListenForConsoleInput: false` in `smapi-internal/config.json` and `config.user.json`.
+1. Revive GraphicsDevice & GraphicsDeviceManager:
+   - Root Cause: In MonoGame GameRunner.Draw(GameTime), if GraphicsDevice is null, accessing Viewport or PresentationParameters throws NullReferenceException.
+   - Added ReviveGraphicsDeviceAndInstances helper that verifies Game1.graphics._graphicsDevice, clears disposed flag, and invokes CreateDevice()/ApplyChanges() or instantiates GraphicsDevice directly.
+   - Connected runner._graphicsDeviceService and runner._graphicsDeviceManager to Game1.graphics.
+   - Guarded DirectTickPipeline to avoid ticking when GraphicsDevice is null.
 
-2. Neutralize SGameRunner.OnGameExiting:
-   - Replaced `SGameRunner.OnGameExiting` delegate with a safe no-op handler so MonoGame cannot trigger `SCore.Dispose(false)`.
-   - Post-launch revived `SCore.IsDisposed = false` and `SCore.IsGameRunning = true`.
+2. Synchronize iOSGameWindow._viewController:
+   - Root Cause: In GameRunner.Draw, when _windowSizeChanged is true, Game1.Window_ClientSizeChanged is called, which calls iOSGameWindow.get_ClientBounds. That method dereferences _viewController.View. If _viewController is null, NullReferenceException occurs.
+   - Synchronized iOSGameWindow._viewController to plat._viewController and the active UIViewController.
 
-3. NonDisposingStreamWriter & LogFileManager Stream Revival:
-   - Subclassed StreamWriter as `NonDisposingStreamWriter` which flushes on Dispose/Close instead of closing the underlying file stream.
-   - Installed `NonDisposingStreamWriter` on `LogFileManager.Stream` at bootstrap, before CADisplayLink tick, before Direct Tick fallback, and in `LinkGameWindowToScene`.
-
-4. Zero Compression & Auto-Purge:
-   - Bundled IPA packaged with 0% compression (`ZIP_STORED`), old version IPAs automatically purged.
+3. Initialize Game1 MultiPlayer Window and Viewport:
+   - Initialized localMultiplayerWindow to 896x414 and instance options if null.
+   - Initialized Game1.defaultDeviceViewport to valid dimensions (896x414).
 """
 
 headers = {

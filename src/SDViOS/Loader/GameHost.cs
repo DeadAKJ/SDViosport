@@ -834,6 +834,27 @@ namespace SDViOS.Loader
                         {
                             EngineLogger.LogWarning($"[GameHost] Set plat._viewController.View warning: {ex.Message}");
                         }
+
+                        // Also synchronize iOSGameWindow._viewController if present
+                        try
+                        {
+                            var winField = plat.GetType().GetField("_window", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)
+                                        ?? plat.GetType().BaseType?.GetField("_window", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            var pWindow = winField?.GetValue(plat);
+                            if (pWindow != null)
+                            {
+                                var wVcf = pWindow.GetType().GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                                if (wVcf != null && wVcf.GetValue(pWindow) == null)
+                                {
+                                    wVcf.SetValue(pWindow, pvc);
+                                    EngineLogger.Log($"[GameHost] Synchronized iOSGameWindow._viewController to {pvc.GetType().FullName}");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] Set iOSGameWindow._viewController warning: {ex.Message}");
+                        }
                     }
 
                     try
@@ -892,6 +913,7 @@ namespace SDViOS.Loader
                     _engineDisplayLink = CoreAnimation.CADisplayLink.Create(() =>
                     {
                         ReviveSMAPILogFile(SMAPICoreInstance);
+                        ReviveGraphicsDeviceAndInstances(runner, plat, null, _activeGameView);
                         bool directFallback = false;
                         try
                         {
@@ -941,7 +963,10 @@ namespace SDViOS.Loader
                     }
                 }
 
-                // 7. Force View Layout & OpenGL Framebuffer Allocation
+                // 7. Revive GraphicsDevice, iOSGameWindow, and Game1 instances
+                ReviveGraphicsDeviceAndInstances(runner, plat, vc, _activeGameView);
+
+                // 8. Force View Layout & OpenGL Framebuffer Allocation
                 if (window != null)
                 {
                     try
@@ -1037,6 +1062,9 @@ namespace SDViOS.Loader
                     }
                 }
 
+                // Revive graphics device, window viewController, and instance options
+                ReviveGraphicsDeviceAndInstances(runner, plat, null, gameView);
+
                 // 2. MakeCurrent on iOSGameView
                 if (gameView != null && gameView.Handle != IntPtr.Zero)
                 {
@@ -1056,7 +1084,14 @@ namespace SDViOS.Loader
 
                 // 3. Tick Game (Runs SMAPI + Stardew Valley Update & Draw)
                 ReviveSMAPILogFile(SMAPICoreInstance);
-                runner.Tick();
+                if (runner.GraphicsDevice != null)
+                {
+                    runner.Tick();
+                }
+                else
+                {
+                    if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Skipping runner.Tick() because GraphicsDevice is null.");
+                }
 
                 // 4. Threading.Run
                 if (_threadingRunMethod == null)
@@ -1110,6 +1145,188 @@ namespace SDViOS.Loader
                     _directTickCount++;
                     EngineLogger.LogError($"[GameHost] Direct tick pipeline error: {ex}");
                 }
+            }
+        }
+
+        public static void ReviveGraphicsDeviceAndInstances(Game? runner, object? plat, UIViewController? vc, UIView? gameView)
+        {
+            if (runner == null) return;
+            try
+            {
+                // 1. Repair and synchronize iOSGameWindow._viewController
+                if (plat != null)
+                {
+                    try
+                    {
+                        var winField = plat.GetType().GetField("_window", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)
+                                    ?? plat.GetType().BaseType?.GetField("_window", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        var pWindow = winField?.GetValue(plat);
+                        if (pWindow != null)
+                        {
+                            var wVcf = pWindow.GetType().GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            if (wVcf != null && (wVcf.GetValue(pWindow) == null || (vc != null && wVcf.GetValue(pWindow) != vc)))
+                            {
+                                if (vc != null)
+                                {
+                                    wVcf.SetValue(pWindow, vc);
+                                    EngineLogger.Log($"[GameHost] Synchronized iOSGameWindow._viewController to {vc.GetType().FullName}");
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // 2. Discover and revive Game1.graphics (GraphicsDeviceManager)
+                object? gdm = null;
+                FieldInfo? sdvGraphicsField = null;
+                Type? game1Type = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    game1Type = asm.GetType("StardewValley.Game1");
+                    if (game1Type != null)
+                    {
+                        sdvGraphicsField = game1Type.GetField("graphics", BindingFlags.Static | BindingFlags.Public);
+                        gdm = sdvGraphicsField?.GetValue(null);
+                        if (gdm != null) break;
+                    }
+                }
+
+                if (gdm != null)
+                {
+                    var gdmType = gdm.GetType();
+                    var dispField = gdmType.GetField("disposed", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                    if (dispField != null && (bool)(dispField.GetValue(gdm) ?? false))
+                    {
+                        dispField.SetValue(gdm, false);
+                        EngineLogger.Log("[GameHost] Cleared GraphicsDeviceManager.disposed = false");
+                    }
+
+                    var gdField = gdmType.GetField("_graphicsDevice", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                    var currentGD = gdField?.GetValue(gdm) as Microsoft.Xna.Framework.Graphics.GraphicsDevice;
+
+                    if (currentGD == null)
+                    {
+                        EngineLogger.Log("[GameHost] GraphicsDeviceManager._graphicsDevice is null! Attempting revival...");
+                        try
+                        {
+                            var createDevMethod = gdmType.GetMethod("CreateDevice", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            createDevMethod?.Invoke(gdm, null);
+                            currentGD = gdField?.GetValue(gdm) as Microsoft.Xna.Framework.Graphics.GraphicsDevice;
+                            EngineLogger.Log($"[GameHost] CreateDevice result: GD={currentGD != null}");
+                        }
+                        catch (Exception cEx)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] CreateDevice invocation warning: {cEx.Message}");
+                        }
+
+                        if (currentGD == null)
+                        {
+                            try
+                            {
+                                var applyChangesMethod = gdmType.GetMethod("ApplyChanges", BindingFlags.Public | BindingFlags.Instance);
+                                applyChangesMethod?.Invoke(gdm, null);
+                                currentGD = gdField?.GetValue(gdm) as Microsoft.Xna.Framework.Graphics.GraphicsDevice;
+                                EngineLogger.Log($"[GameHost] ApplyChanges result: GD={currentGD != null}");
+                            }
+                            catch (Exception aEx)
+                            {
+                                EngineLogger.LogWarning($"[GameHost] ApplyChanges invocation warning: {aEx.Message}");
+                            }
+                        }
+
+                        if (currentGD == null)
+                        {
+                            try
+                            {
+                                var adapter = Microsoft.Xna.Framework.Graphics.GraphicsAdapter.DefaultAdapter;
+                                var profile = Microsoft.Xna.Framework.Graphics.GraphicsProfile.Reach;
+                                var pp = new Microsoft.Xna.Framework.Graphics.PresentationParameters();
+                                pp.BackBufferWidth = 896;
+                                pp.BackBufferHeight = 414;
+                                currentGD = new Microsoft.Xna.Framework.Graphics.GraphicsDevice(adapter, profile, pp);
+                                gdField?.SetValue(gdm, currentGD);
+                                EngineLogger.Log("[GameHost] Instantiated and assigned fresh GraphicsDevice to GraphicsDeviceManager.");
+                            }
+                            catch (Exception devEx)
+                            {
+                                EngineLogger.LogError($"[GameHost] Direct GraphicsDevice instantiation error: {devEx}");
+                            }
+                        }
+                    }
+
+                    // 3. Ensure runner's internal graphics services point to gdm
+                    for (Type? t = runner.GetType(); t != null; t = t.BaseType)
+                    {
+                        var gdmField = t.GetField("_graphicsDeviceManager", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        if (gdmField != null && gdmField.GetValue(runner) == null)
+                        {
+                            gdmField.SetValue(runner, gdm);
+                            EngineLogger.Log("[GameHost] Set runner._graphicsDeviceManager = Game1.graphics");
+                        }
+                        var gdsField = t.GetField("_graphicsDeviceService", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        if (gdsField != null && gdsField.GetValue(runner) == null)
+                        {
+                            gdsField.SetValue(runner, gdm);
+                            EngineLogger.Log("[GameHost] Set runner._graphicsDeviceService = Game1.graphics");
+                        }
+                    }
+                }
+
+                // 4. Ensure gameInstances have valid localMultiplayerWindow and instanceOptions
+                var instancesField = runner.GetType().GetField("gameInstances", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)
+                                  ?? runner.GetType().BaseType?.GetField("gameInstances", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                if (instancesField?.GetValue(runner) is System.Collections.IList instances && instances.Count > 0)
+                {
+                    foreach (var inst in instances)
+                    {
+                        if (inst == null) continue;
+                        var instType = inst.GetType();
+                        var lmwField = instType.GetField("localMultiplayerWindow", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (lmwField != null)
+                        {
+                            var rect = (Rectangle)(lmwField.GetValue(inst) ?? Rectangle.Empty);
+                            if (rect.Width <= 0 || rect.Height <= 0)
+                            {
+                                lmwField.SetValue(inst, new Rectangle(0, 0, 896, 414));
+                                EngineLogger.Log("[GameHost] Initialized instance localMultiplayerWindow to 896x414");
+                            }
+                        }
+
+                        var optProp = instType.GetProperty("options", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                   ?? instType.GetProperty("Options", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (optProp != null && optProp.GetValue(inst) == null)
+                        {
+                            try
+                            {
+                                var optType = optProp.PropertyType;
+                                var optInstance = Activator.CreateInstance(optType);
+                                optProp.SetValue(inst, optInstance);
+                                EngineLogger.Log($"[GameHost] Initialized instance options: {optType.Name}");
+                            }
+                            catch { }
+                        }
+                    }
+                }
+
+                // 5. Ensure Game1.defaultDeviceViewport is valid
+                if (game1Type != null)
+                {
+                    var ddvField = game1Type.GetField("defaultDeviceViewport", BindingFlags.Static | BindingFlags.Public);
+                    if (ddvField != null)
+                    {
+                        var vp = (Microsoft.Xna.Framework.Graphics.Viewport)(ddvField.GetValue(null) ?? default(Microsoft.Xna.Framework.Graphics.Viewport));
+                        if (vp.Width <= 0 || vp.Height <= 0)
+                        {
+                            ddvField.SetValue(null, new Microsoft.Xna.Framework.Graphics.Viewport(0, 0, 896, 414));
+                            EngineLogger.Log("[GameHost] Initialized Game1.defaultDeviceViewport to 896x414");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[GameHost] ReviveGraphicsDeviceAndInstances warning: {ex.Message}");
             }
         }
 
