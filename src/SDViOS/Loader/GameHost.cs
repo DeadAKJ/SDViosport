@@ -390,17 +390,22 @@ namespace SDViOS.Loader
                 catch { }
 
                 var activeScene = GetActiveWindowScene();
-                if (activeScene != null)
+                bool sceneIsActive = activeScene != null &&
+                                     activeScene.ActivationState == UISceneActivationState.ForegroundActive &&
+                                     activeScene.CoordinateSpace != null &&
+                                     !activeScene.CoordinateSpace.Bounds.IsEmpty;
+
+                if (sceneIsActive)
                 {
                     if (window.WindowScene != activeScene)
                     {
-                        EngineLogger.Log($"[GameHost] Assigning window.WindowScene to {activeScene.Description} (State: {activeScene.ActivationState})");
+                        EngineLogger.Log($"[GameHost] Assigning window.WindowScene to {activeScene!.Description} (Bounds: {activeScene.CoordinateSpace.Bounds})");
                         window.WindowScene = activeScene;
                     }
                 }
                 else
                 {
-                    EngineLogger.LogWarning("[GameHost] No connected UIWindowScene found yet.");
+                    EngineLogger.Log($"[GameHost] Deferring WindowScene assign: state={activeScene?.ActivationState}, bounds={activeScene?.CoordinateSpace?.Bounds}");
                 }
 
                 // Compute landscape geometry with multi-source fallback
@@ -429,6 +434,7 @@ namespace SDViOS.Loader
                 var landscapeFrame = new CGRect(0, 0, screenW, screenH);
                 EngineLogger.Log($"[GameHost] Landscape frame: {landscapeFrame.Width}x{landscapeFrame.Height} (screenBounds: {screenBounds.Width}x{screenBounds.Height})");
 
+                window.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
                 window.Frame = landscapeFrame;
                 window.Bounds = landscapeFrame;
                 window.Hidden = false;
@@ -470,9 +476,9 @@ namespace SDViOS.Loader
                     {
                         var rootV = window.RootViewController.View;
                         try { rootV.DangerousRetain(); } catch { }
+                        rootV.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
                         rootV.Frame = landscapeFrame;
                         rootV.Bounds = landscapeFrame;
-                        rootV.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
                         rootV.Hidden = false;
                         rootV.SetNeedsLayout();
                         rootV.LayoutIfNeeded();
@@ -487,38 +493,92 @@ namespace SDViOS.Loader
                 if (runner != null)
                 {
                     object? plat = null;
-                    try
-                    {
-                        var platField = typeof(Game).GetField("Platform", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                        plat = platField?.GetValue(runner);
-                    }
-                    catch { }
 
+                    // Method 1: Traverse inheritance hierarchy of runner
+                    Type? currType = runner.GetType();
+                    while (currType != null && plat == null)
+                    {
+                        foreach (var f in currType.GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance))
+                        {
+                            if (f.FieldType.Name.Contains("Platform") || f.Name.ToLower().Contains("platform"))
+                            {
+                                try
+                                {
+                                    var val = f.GetValue(runner);
+                                    if (val != null)
+                                    {
+                                        plat = val;
+                                        EngineLogger.Log($"[GameHost] Found GamePlatform on {currType.Name}.{f.Name} ({val.GetType().FullName})");
+                                        break;
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                        currType = currType.BaseType;
+                    }
+
+                    // Method 2: Inspect runner.Services dictionary
                     if (plat == null)
                     {
                         try
                         {
-                            var platProp = typeof(Game).GetProperty("Platform", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                            plat = platProp?.GetValue(runner);
+                            var svcProp = runner.GetType().GetProperty("Services", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                       ?? typeof(Game).GetProperty("Services");
+                            var svcContainer = svcProp?.GetValue(runner) as GameServiceContainer;
+                            if (svcContainer != null)
+                            {
+                                var dictField = typeof(GameServiceContainer).GetField("services", BindingFlags.NonPublic | BindingFlags.Instance);
+                                if (dictField?.GetValue(svcContainer) is System.Collections.IDictionary dict)
+                                {
+                                    foreach (var k in dict.Keys)
+                                    {
+                                        var v = dict[k];
+                                        EngineLogger.Log($"[GameHost] Service entry: {k} => {v?.GetType().FullName}");
+                                        if (v != null && v.GetType().Name.Contains("Platform"))
+                                        {
+                                            plat = v;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        catch { }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] Services inspection error: {ex.Message}");
+                        }
                     }
 
+                    // Method 3: Static Game._instance field
                     if (plat == null)
                     {
                         try
                         {
                             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                             {
-                                var platType = asm.GetType("Microsoft.Xna.Framework.GamePlatform") ?? asm.GetType("Microsoft.Xna.Framework.iOSGamePlatform");
-                                if (platType != null)
+                                var gType = asm.GetType("Microsoft.Xna.Framework.Game");
+                                if (gType != null)
                                 {
-                                    plat = runner.Services.GetService(platType);
-                                    if (plat != null) break;
+                                    var instField = gType.GetField("_instance", BindingFlags.NonPublic | BindingFlags.Static);
+                                    var gInst = instField?.GetValue(null);
+                                    if (gInst != null)
+                                    {
+                                        var pField = gType.GetField("Platform", BindingFlags.NonPublic | BindingFlags.Instance);
+                                        plat = pField?.GetValue(gInst);
+                                        if (plat != null)
+                                        {
+                                            EngineLogger.Log($"[GameHost] Found GamePlatform via Game._instance.Platform: {plat.GetType().FullName}");
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }
-                        catch { }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] Game._instance check error: {ex.Message}");
+                        }
                     }
 
                     if (plat != null)
@@ -583,6 +643,7 @@ namespace SDViOS.Loader
                     window.SetNeedsLayout();
                     window.LayoutIfNeeded();
                     var subviews = window.Subviews;
+                    EngineLogger.Log($"[GameHost] window.Subviews count: {subviews?.Length ?? 0}");
                     if (subviews != null)
                     {
                         foreach (var sv in subviews)
@@ -590,6 +651,7 @@ namespace SDViOS.Loader
                             try
                             {
                                 sv.DangerousRetain();
+                                sv.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
                                 sv.Frame = landscapeFrame;
                                 sv.Bounds = landscapeFrame;
                                 sv.Hidden = false;
@@ -597,6 +659,7 @@ namespace SDViOS.Loader
                                 sv.LayoutIfNeeded();
                                 var lsMethod = sv.GetType().GetMethod("LayoutSubviews", BindingFlags.Public | BindingFlags.Instance);
                                 lsMethod?.Invoke(sv, null);
+                                EngineLogger.Log($"[GameHost] Subview {sv.GetType().Name}: Frame={sv.Frame}, Hidden={sv.Hidden}");
                             }
                             catch (Exception ex)
                             {

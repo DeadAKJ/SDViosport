@@ -17,23 +17,24 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.17-fix-platform-field-and-frame-fallback'
+version_name = 'v1.0.18-fix-scene-window-attachment-and-platform-reflection'
 
-changelog_content = """Version: v1.0.17-fix-platform-field-and-frame-fallback
+changelog_content = """Version: v1.0.18-fix-scene-window-attachment-and-platform-reflection
 Date: 2026-09-13
 
 Changes:
-1. Fix GamePlatform Retrieval via Field and Service:
-   - Root Cause: MonoGame's `Game.Platform` is a private field, not a property. Reflection via `GetProperty("Platform")` returned null in v1.0.16, meaning `GamePlatform.IsActive = true` and `Application_DidBecomeActive` never ran, leaving `Game.IsActive = false` (Tick returned immediately every frame).
-   - Resolved by querying `Game.Platform` field directly, as well as `runner.Services.GetService(GamePlatform)`.
-   - Forcibly assigned `_isActive` field, `IsActive` property, unpaused `CADisplayLink`, and registered on NSRunLoopMode.Common.
+1. Defer UIWindowScene Binding until Active:
+   - In v1.0.13-v1.0.17, setting `window.WindowScene = activeScene` while the scene was ForegroundInactive caused UIKit to override `window.Frame` to empty (0x0). Furthermore, because UIKit manages scene window frames, subsequent C# assignments to `window.Frame` were ignored.
+   - Defer window scene assignment until `activeScene.ActivationState == ForegroundActive` and coordinate space bounds are non-empty.
+   - Added `UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight` to `window` and all subviews so UIKit automatically scales them to full landscape screen size.
 
-2. Multi-Source Landscape Bounds with 896x414 Hard Fallback:
-   - Root Cause: On iOS 16+ scene-based applications, `UIScreen.MainScreen.Bounds` is deprecated and returned 0x0 during early scene lifecycle, causing `landscapeFrame` to evaluate to 0x0 and collapsing `window.Frame` and all subviews.
-   - Resolved by querying `activeScene.Screen.Bounds` -> `activeScene.CoordinateSpace.Bounds` -> `UIScreen.MainScreen.Bounds` with a strict `896x414` landscape fallback.
+2. Exhaustive GamePlatform Discovery:
+   - Walked entire inheritance hierarchy (`SGameRunner` -> `GameRunner` -> `Game`) to find the `Platform` field directly from the runtime type.
+   - Added `GameServiceContainer.services` dictionary inspection and `Game._instance.Platform` static fallback.
+   - Forcibly set `_isActive`, `IsActive`, invoked `Application_DidBecomeActive`, and unpaused `CADisplayLink`.
 
 3. Zero Compression Delivery:
-   - Bundled IPA packaged strictly with `ZIP_STORED` (0% compression) per user specification.
+   - Bundled IPA packaged with 0% compression (ZIP_STORED). Auto-deletes older IPAs to conserve disk space.
 """
 
 headers = {
