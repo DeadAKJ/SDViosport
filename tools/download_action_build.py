@@ -17,26 +17,21 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.20-fix-base-isactive-displaylink-and-scenewindow'
+version_name = 'v1.0.21-fix-game-platform-null-and-disposed'
 
-changelog_content = """Version: v1.0.20-fix-base-isactive-displaylink-and-scenewindow
+changelog_content = """Version: v1.0.21-fix-game-platform-null-and-disposed
 Date: 2026-09-13
 
 Changes:
-1. Fix Game.IsActive Reflection on Private Base Field:
-   - In iOSGamePlatform.Tick(), instruction 1 is 'if (!Game.IsActive) return;'.
-   - Game.IsActive reads GamePlatform._isActive.
-   - Because _isActive is a private field declared on the base class GamePlatform, plat.GetType().GetField("_isActive") returned null and was never updated, leaving Game.IsActive permanently false.
-   - Resolved by traversing the full type hierarchy (for Type t = plat.GetType(); t != null; t = t.BaseType) and setting _isActive on both GamePlatform and GameRunner.
+1. Repair Bidirectional Game <-> GamePlatform Link:
+   - Root Cause: In iOSGamePlatform.Tick(), line 1 executes `this.get_Game().get_IsActive()`. Inside Game.get_IsActive(), the instruction is `this.Platform.get_IsActive()`. Because `this.Platform` was null on the Game instance, it threw `NullReferenceException` inside `Game.get_IsActive()`, aborting `Tick()` on every frame before update, draw, or render could execute.
+   - Resolved by explicitly restoring `game.Platform = plat`, `plat.<Game> = game`, resetting `_isDisposed = false` on Game, and resetting `disposed = false` on GamePlatform.
 
-2. Modern CADisplayLink Implementation:
-   - MonoGame's internal CreateDisplayLink() invoked CADisplayLink.set_FrameInterval(), which is removed/broken on iOS 16+ and threw Arg_TargetInvocationException.
-   - Replaced with a custom CADisplayLink driving iOSGamePlatform.Tick() at 60 FPS registered on NSRunLoop.Main (Common & Default modes) and attached to plat._displayLink.
+2. Verified UIWindow & Scene Integration:
+   - Preserved UIWindow scene recreation with 896x414 landscape geometry, confirmed active and key with 2 subviews.
 
-3. UIWindow Recreation with Active UIWindowScene:
-   - MonoGame constructed UIWindow with UIScreen.MainScreen.Bounds, which is 0x0 during scene-based app startup.
-   - UIKit silently ignores frame modifications on windows attached without a scene, keeping bounds at 0x0 with 0 subviews.
-   - Resolved by creating new UIWindow(activeScene) when window bounds are empty, binding rootViewController, attaching the view, and registering it with Game services.
+3. Zero Compression & Auto-Purge:
+   - Bundled IPA packaged with 0% compression (`ZIP_STORED`), old version IPAs automatically purged.
 """
 
 headers = {

@@ -622,9 +622,43 @@ namespace SDViOS.Loader
                     }
                 }
 
-                // 5. Force GamePlatform._isActive = true on ALL base types
+                // 5. Connect and repair Game <-> GamePlatform bidirectional link & IsActive
+                Game? targetGame = runner;
+
                 if (plat != null)
                 {
+                    // Check what Game the platform currently points to
+                    var gProp = plat.GetType().GetProperty("Game", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                             ?? plat.GetType().BaseType?.GetProperty("Game", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    var pGame = gProp?.GetValue(plat) as Game;
+                    if (pGame != null) targetGame = pGame;
+
+                    if (targetGame != null)
+                    {
+                        // Ensure plat.<Game>k__BackingField points to targetGame
+                        for (Type? t = plat.GetType(); t != null; t = t.BaseType)
+                        {
+                            var gf = t.GetField("<Game>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance);
+                            if (gf != null)
+                            {
+                                gf.SetValue(plat, targetGame);
+                                EngineLogger.Log($"[GameHost] Set {t.Name}.<Game> = targetGame ({targetGame.GetType().FullName})");
+                            }
+                        }
+                    }
+
+                    // Reset disposed = false on GamePlatform
+                    for (Type? t = plat.GetType(); t != null; t = t.BaseType)
+                    {
+                        var dispF = t.GetField("disposed", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        if (dispF != null)
+                        {
+                            dispF.SetValue(plat, false);
+                            EngineLogger.Log($"[GameHost] Reset {t.Name}.disposed = false on platform");
+                        }
+                    }
+
+                    // Set _isActive = true on GamePlatform
                     for (Type? t = plat.GetType(); t != null; t = t.BaseType)
                     {
                         var actField = t.GetField("_isActive", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
@@ -646,21 +680,41 @@ namespace SDViOS.Loader
                     }
                 }
 
-                if (runner != null)
+                // Repair Platform field on targetGame and runner
+                var gamesToFix = new System.Collections.Generic.HashSet<Game>();
+                if (targetGame != null) gamesToFix.Add(targetGame);
+                if (runner != null) gamesToFix.Add(runner);
+
+                foreach (var g in gamesToFix)
                 {
-                    for (Type? t = runner.GetType(); t != null; t = t.BaseType)
+                    for (Type? t = g.GetType(); t != null; t = t.BaseType)
                     {
-                        var actField = t.GetField("_isActive", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                        if (actField != null)
+                        var pf = t.GetField("Platform", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        if (pf != null && plat != null)
                         {
-                            actField.SetValue(runner, true);
-                            EngineLogger.Log($"[GameHost] Set {t.Name}._isActive = true on runner");
+                            pf.SetValue(g, plat);
+                            EngineLogger.Log($"[GameHost] Successfully assigned {t.Name}.Platform = plat on {g.GetType().Name}");
+                        }
+
+                        var dispF = t.GetField("_isDisposed", BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (dispF != null)
+                        {
+                            dispF.SetValue(g, false);
+                            EngineLogger.Log($"[GameHost] Reset {t.Name}._isDisposed = false on {g.GetType().Name}");
                         }
                     }
 
+                    // Also ensure Game._instance is set
+                    try
+                    {
+                        var instField = typeof(Game).GetField("_instance", BindingFlags.NonPublic | BindingFlags.Static);
+                        instField?.SetValue(null, g);
+                    }
+                    catch { }
+
                     bool act = false;
-                    try { act = runner.IsActive; } catch { }
-                    EngineLogger.Log($"[GameHost] Final check: runner.IsActive = {act}");
+                    try { act = g.IsActive; } catch (Exception ex) { EngineLogger.LogWarning($"[GameHost] {g.GetType().Name}.IsActive threw: {ex.Message}"); }
+                    EngineLogger.Log($"[GameHost] Check: {g.GetType().Name}.IsActive = {act}");
                 }
 
                 // 6. Create modern CADisplayLink driving iOSGamePlatform.Tick()
