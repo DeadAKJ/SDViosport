@@ -17,26 +17,23 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.16-fix-window-frame-and-disposed-vc'
+version_name = 'v1.0.17-fix-platform-field-and-frame-fallback'
 
-changelog_content = """Version: v1.0.16-fix-window-frame-and-disposed-vc
+changelog_content = """Version: v1.0.17-fix-platform-field-and-frame-fallback
 Date: 2026-09-13
 
 Changes:
-1. Fix ObjectDisposedException in LinkGameWindowToScene:
-   - Defensively called DangerousRetain() on UIWindow, UIViewController, and subviews to prevent iOS / UIKit scene detachment from disposing managed C# wrappers.
-   - Guarded every RootViewController and Subview property access with dedicated try/catch blocks so no exception can ever abort the activation pipeline.
+1. Fix GamePlatform Retrieval via Field and Service:
+   - Root Cause: MonoGame's `Game.Platform` is a private field, not a property. Reflection via `GetProperty("Platform")` returned null in v1.0.16, meaning `GamePlatform.IsActive = true` and `Application_DidBecomeActive` never ran, leaving `Game.IsActive = false` (Tick returned immediately every frame).
+   - Resolved by querying `Game.Platform` field directly, as well as `runner.Services.GetService(GamePlatform)`.
+   - Forcibly assigned `_isActive` field, `IsActive` property, unpaused `CADisplayLink`, and registered on NSRunLoopMode.Common.
 
-2. Enforce Landscape Screen Geometry:
-   - Overrode inactive / zero-size UIWindowScene bounds by calculating physical landscape dimensions from UIScreen.MainScreen.Bounds (Math.Max x Math.Min).
-   - Enforced window.Frame, window.Bounds, and subview frames to full landscape dimensions, guaranteeing CAEAGLLayer renderbuffer allocation.
+2. Multi-Source Landscape Bounds with 896x414 Hard Fallback:
+   - Root Cause: On iOS 16+ scene-based applications, `UIScreen.MainScreen.Bounds` is deprecated and returned 0x0 during early scene lifecycle, causing `landscapeFrame` to evaluate to 0x0 and collapsing `window.Frame` and all subviews.
+   - Resolved by querying `activeScene.Screen.Bounds` -> `activeScene.CoordinateSpace.Bounds` -> `UIScreen.MainScreen.Bounds` with a strict `896x414` landscape fallback.
 
-3. Unpause CADisplayLink and Run on Common RunLoop Modes:
-   - Forcibly unpaused MonoGame's CADisplayLink and registered it with NSRunLoopMode.Common in addition to Default, ensuring game ticks execute continuously.
-   - Forcibly invoked Application_DidBecomeActive and GamePlatform.IsActive = true.
-
-4. Zero Compression Delivery:
-   - StardewValley-Bundled.ipa packaged with 0% compression (ZIP_STORED) strictly per user requirements.
+3. Zero Compression Delivery:
+   - Bundled IPA packaged strictly with `ZIP_STORED` (0% compression) per user specification.
 """
 
 headers = {

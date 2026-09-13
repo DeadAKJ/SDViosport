@@ -389,11 +389,6 @@ namespace SDViOS.Loader
                 }
                 catch { }
 
-                var screenBounds = UIScreen.MainScreen.Bounds;
-                nfloat screenW = (nfloat)Math.Max((double)screenBounds.Width, (double)screenBounds.Height);
-                nfloat screenH = (nfloat)Math.Min((double)screenBounds.Width, (double)screenBounds.Height);
-                var landscapeFrame = new CGRect(0, 0, screenW, screenH);
-
                 var activeScene = GetActiveWindowScene();
                 if (activeScene != null)
                 {
@@ -407,6 +402,32 @@ namespace SDViOS.Loader
                 {
                     EngineLogger.LogWarning("[GameHost] No connected UIWindowScene found yet.");
                 }
+
+                // Compute landscape geometry with multi-source fallback
+                CGRect screenBounds = CGRect.Empty;
+                try
+                {
+                    if (activeScene?.Screen != null && !activeScene.Screen.Bounds.IsEmpty)
+                        screenBounds = activeScene.Screen.Bounds;
+                    else if (activeScene?.CoordinateSpace != null && !activeScene.CoordinateSpace.Bounds.IsEmpty)
+                        screenBounds = activeScene.CoordinateSpace.Bounds;
+                    else if (!UIScreen.MainScreen.Bounds.IsEmpty)
+                        screenBounds = UIScreen.MainScreen.Bounds;
+                }
+                catch { }
+
+                nfloat screenW = (nfloat)Math.Max((double)screenBounds.Width, (double)screenBounds.Height);
+                nfloat screenH = (nfloat)Math.Min((double)screenBounds.Width, (double)screenBounds.Height);
+
+                // Hard fallback if iOS reported 0x0 bounds (e.g. during scene transition)
+                if (screenW <= 0 || screenH <= 0)
+                {
+                    screenW = 896;
+                    screenH = 414;
+                }
+
+                var landscapeFrame = new CGRect(0, 0, screenW, screenH);
+                EngineLogger.Log($"[GameHost] Landscape frame: {landscapeFrame.Width}x{landscapeFrame.Height} (screenBounds: {screenBounds.Width}x{screenBounds.Height})");
 
                 window.Frame = landscapeFrame;
                 window.Bounds = landscapeFrame;
@@ -465,36 +486,95 @@ namespace SDViOS.Loader
                 // Force MonoGame GamePlatform.IsActive = true and activate display link
                 if (runner != null)
                 {
+                    object? plat = null;
                     try
                     {
-                        var platProp = typeof(Game).GetProperty("Platform", BindingFlags.NonPublic | BindingFlags.Instance);
-                        var plat = platProp?.GetValue(runner);
-                        if (plat != null)
+                        var platField = typeof(Game).GetField("Platform", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        plat = platField?.GetValue(runner);
+                    }
+                    catch { }
+
+                    if (plat == null)
+                    {
+                        try
+                        {
+                            var platProp = typeof(Game).GetProperty("Platform", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            plat = platProp?.GetValue(runner);
+                        }
+                        catch { }
+                    }
+
+                    if (plat == null)
+                    {
+                        try
+                        {
+                            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                            {
+                                var platType = asm.GetType("Microsoft.Xna.Framework.GamePlatform") ?? asm.GetType("Microsoft.Xna.Framework.iOSGamePlatform");
+                                if (platType != null)
+                                {
+                                    plat = runner.Services.GetService(platType);
+                                    if (plat != null) break;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    if (plat != null)
+                    {
+                        try
+                        {
+                            var actField = plat.GetType().GetField("_isActive", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            actField?.SetValue(plat, true);
+                        }
+                        catch { }
+
+                        try
                         {
                             var actProp = plat.GetType().GetProperty("IsActive", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                             actProp?.SetValue(plat, true);
+                        }
+                        catch { }
 
+                        try
+                        {
                             var didBecomeAct = plat.GetType().GetMethod("Application_DidBecomeActive", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                             didBecomeAct?.Invoke(plat, new object?[] { null });
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] Application_DidBecomeActive error: {ex.Message}");
+                        }
 
-                            var dlField = plat.GetType().GetField("_displayLink", BindingFlags.NonPublic | BindingFlags.Instance);
+                        try
+                        {
+                            var dlField = plat.GetType().GetField("_displayLink", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                             var dl = dlField?.GetValue(plat) as CoreAnimation.CADisplayLink;
                             if (dl != null)
                             {
                                 dl.Paused = false;
-                                try
-                                {
-                                    dl.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Common);
-                                }
-                                catch { }
+                                try { dl.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Common); } catch { }
+                                try { dl.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Default); } catch { }
+                                EngineLogger.Log($"[GameHost] CADisplayLink unpaused, Paused={dl.Paused}");
                             }
-
-                            EngineLogger.Log($"[GameHost] Set GamePlatform.IsActive=true (Game.IsActive={runner.IsActive}, DisplayLink.Paused={dl?.Paused})");
+                            else
+                            {
+                                EngineLogger.LogWarning("[GameHost] CADisplayLink is null on platform, calling CreateDisplayLink...");
+                                var cdlMethod = plat.GetType().GetMethod("CreateDisplayLink", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                                cdlMethod?.Invoke(plat, null);
+                            }
                         }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] CADisplayLink setup error: {ex.Message}");
+                        }
+
+                        EngineLogger.Log($"[GameHost] Forced GamePlatform.IsActive=true (Game.IsActive={runner.IsActive})");
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        EngineLogger.LogWarning($"[GameHost] Failed to force Game.IsActive: {ex.Message}");
+                        EngineLogger.LogWarning("[GameHost] Could not locate GamePlatform on runner!");
                     }
                 }
 
@@ -531,11 +611,18 @@ namespace SDViOS.Loader
                 }
 
                 // Diagnostics
-                var gd = runner?.GraphicsDevice;
                 EngineLogger.Log($"[GameHost] Window: Bounds={window.Bounds}, Frame={window.Frame}, Hidden={window.Hidden}, Key={window.IsKeyWindow}");
-                if (gd != null)
+                try
                 {
-                    EngineLogger.Log($"[GameHost] GraphicsDevice: Viewport={gd.Viewport.Width}x{gd.Viewport.Height}, BackBuffer={gd.PresentationParameters.BackBufferWidth}x{gd.PresentationParameters.BackBufferHeight}");
+                    var gd = runner?.GraphicsDevice;
+                    if (gd != null)
+                    {
+                        EngineLogger.Log($"[GameHost] GraphicsDevice: Viewport={gd.Viewport.Width}x{gd.Viewport.Height}, BackBuffer={gd.PresentationParameters.BackBufferWidth}x{gd.PresentationParameters.BackBufferHeight}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    EngineLogger.LogWarning($"[GameHost] GraphicsDevice query: {ex.Message}");
                 }
 
                 EngineLogger.Log("[GameHost] MonoGame UIWindow successfully linked and made key.");
