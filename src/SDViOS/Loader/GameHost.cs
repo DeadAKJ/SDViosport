@@ -19,6 +19,7 @@ namespace SDViOS.Loader
         public static string SavesDir { get; private set; } = string.Empty;
         public static string LogsDir { get; private set; } = string.Empty;
         public static string BundleDir { get; private set; } = string.Empty;
+        public static object? SMAPICoreInstance { get; set; }
 
         public static void InitializeFileSystem()
         {
@@ -235,24 +236,61 @@ namespace SDViOS.Loader
                     Environment.SetEnvironmentVariable("STARDEW_VALLEY_MODS_PATH", ModsDir);
 
                     string[] smapiArgs = new string[] { "--no-terminal", "--mods-path", ModsDir };
-
                     var smapiAsm = Assembly.LoadFrom(smapiPath);
-                    var entry = smapiAsm.EntryPoint;
-                    if (entry != null)
-                    {
-                        EngineLogger.Log($"Invoking SMAPI EntryPoint: {entry.DeclaringType?.FullName}.{entry.Name}");
-                        object?[] invokeArgs = entry.GetParameters().Length > 0 ? new object?[] { smapiArgs } : Array.Empty<object>();
-                        entry.Invoke(null, invokeArgs);
+                    System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
 
-                        LinkGameWindowToScene();
-                        AttachTouchOverlayToGameRunner();
-                        UIApplication.SharedApplication.BeginInvokeOnMainThread(LinkGameWindowToScene);
-                        NSTimer.CreateScheduledTimer(0.25, false, _ => LinkGameWindowToScene());
-                        NSTimer.CreateScheduledTimer(1.0, false, _ => LinkGameWindowToScene());
-                        NSTimer.CreateScheduledTimer(2.5, false, _ => LinkGameWindowToScene());
-                        NSTimer.CreateScheduledTimer(5.0, false, _ => LinkGameWindowToScene());
-                        return;
+                    // Register SMAPI internal assembly resolver if available
+                    try
+                    {
+                        var progType = smapiAsm.GetType("StardewModdingAPI.Program");
+                        var resolveMethod = progType?.GetMethod("CurrentDomain_AssemblyResolve", BindingFlags.Static | BindingFlags.NonPublic);
+                        if (resolveMethod != null)
+                        {
+                            var handler = (ResolveEventHandler)Delegate.CreateDelegate(typeof(ResolveEventHandler), resolveMethod);
+                            AppDomain.CurrentDomain.AssemblyResolve += handler;
+                            EngineLogger.Log("[GameHost] Registered SMAPI CurrentDomain_AssemblyResolve.");
+                        }
                     }
+                    catch (Exception ex)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] Could not hook SMAPI resolver: {ex.Message}");
+                    }
+
+                    // On iOS, MonoGame Game.Run() is asynchronous (DefaultRunBehavior = Asynchronous).
+                    // When running via Program.Main(), SCore is instantiated inside a `using (var core = new SCore(...))`
+                    // block which calls core.Dispose() as soon as Game.Run() returns, disposing the entire Game and GamePlatform!
+                    // By instantiating SCore directly and keeping a static reference, we ensure SCore and Game remain alive forever.
+                    var scoreType = smapiAsm.GetType("StardewModdingAPI.Framework.SCore");
+                    if (scoreType != null)
+                    {
+                        EngineLogger.Log("[GameHost] Instantiating persistent SCore (non-disposing)...");
+                        // public SCore(string modsPath, bool writeToConsole, bool? overrideDeveloperMode)
+                        var core = Activator.CreateInstance(scoreType, new object?[] { ModsDir, false, (bool?)false });
+                        SMAPICoreInstance = core;
+
+                        var runMethod = scoreType.GetMethod("RunInteractively", BindingFlags.Public | BindingFlags.Instance);
+                        runMethod?.Invoke(core, null);
+                        EngineLogger.Log("[GameHost] SMAPI SCore.RunInteractively launched successfully.");
+                    }
+                    else
+                    {
+                        EngineLogger.LogWarning("[GameHost] SCore type not found, falling back to EntryPoint...");
+                        var entry = smapiAsm.EntryPoint;
+                        if (entry != null)
+                        {
+                            object?[] invokeArgs = entry.GetParameters().Length > 0 ? new object?[] { smapiArgs } : Array.Empty<object>();
+                            entry.Invoke(null, invokeArgs);
+                        }
+                    }
+
+                    LinkGameWindowToScene();
+                    AttachTouchOverlayToGameRunner();
+                    UIApplication.SharedApplication.BeginInvokeOnMainThread(LinkGameWindowToScene);
+                    NSTimer.CreateScheduledTimer(0.25, false, _ => LinkGameWindowToScene());
+                    NSTimer.CreateScheduledTimer(1.0, false, _ => LinkGameWindowToScene());
+                    NSTimer.CreateScheduledTimer(2.5, false, _ => LinkGameWindowToScene());
+                    NSTimer.CreateScheduledTimer(5.0, false, _ => LinkGameWindowToScene());
+                    return;
                 }
                 catch (Exception ex)
                 {
@@ -630,7 +668,13 @@ namespace SDViOS.Loader
                             EngineLogger.LogWarning($"[GameHost] CADisplayLink setup error: {ex.Message}");
                         }
 
-                        EngineLogger.Log($"[GameHost] Forced GamePlatform.IsActive=true (Game.IsActive={runner.IsActive})");
+                        try
+                        {
+                            bool act = false;
+                            try { act = runner.IsActive; } catch { }
+                            EngineLogger.Log($"[GameHost] Forced GamePlatform.IsActive=true (Game.IsActive={act})");
+                        }
+                        catch { }
                     }
                     else
                     {

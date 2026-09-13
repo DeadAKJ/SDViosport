@@ -17,24 +17,23 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.18-fix-scene-window-attachment-and-platform-reflection'
+version_name = 'v1.0.19-fix-smapi-async-disposal-black-screen'
 
-changelog_content = """Version: v1.0.18-fix-scene-window-attachment-and-platform-reflection
+changelog_content = """Version: v1.0.19-fix-smapi-async-disposal-black-screen
 Date: 2026-09-13
 
 Changes:
-1. Defer UIWindowScene Binding until Active:
-   - In v1.0.13-v1.0.17, setting `window.WindowScene = activeScene` while the scene was ForegroundInactive caused UIKit to override `window.Frame` to empty (0x0). Furthermore, because UIKit manages scene window frames, subsequent C# assignments to `window.Frame` were ignored.
-   - Defer window scene assignment until `activeScene.ActivationState == ForegroundActive` and coordinate space bounds are non-empty.
-   - Added `UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight` to `window` and all subviews so UIKit automatically scales them to full landscape screen size.
+1. Prevent SMAPI SCore & Game Engine Auto-Disposal:
+   - Root Cause: On desktop PC, `Game.Run()` blocks in a while-loop. In `Program.Start()`, SMAPI wraps `SCore` in a `using (var core = new SCore(...))` block. On iOS MonoGame, `GamePlatform.DefaultRunBehavior` is `GameRunBehavior.Asynchronous`, so `Game.Run()` starts `CADisplayLink` and returns IMMEDIATELY.
+   - When `Game.Run()` returned immediately, `SCore.RunInteractively()` exited, and the `using` block immediately invoked `core.Dispose()`, which called `Game.Dispose()`.
+   - `Game.Dispose()` set `Game.Platform = null`, `Game._instance = null`, disposed `iOSGamePlatform`, and stopped `CADisplayLink`, leaving the game completely dead and destroyed before frame 1 ever rendered.
+   - Resolved by instantiating `SCore` directly in `GameHost` and storing it in a static field `SMAPICoreInstance`. `SCore` and `Game` remain alive and active forever without being disposed.
 
-2. Exhaustive GamePlatform Discovery:
-   - Walked entire inheritance hierarchy (`SGameRunner` -> `GameRunner` -> `Game`) to find the `Platform` field directly from the runtime type.
-   - Added `GameServiceContainer.services` dictionary inspection and `Game._instance.Platform` static fallback.
-   - Forcibly set `_isActive`, `IsActive`, invoked `Application_DidBecomeActive`, and unpaused `CADisplayLink`.
+2. Guarded Reflection and Diagnostics:
+   - Wrapped `runner.IsActive` logging in `try/catch` to ensure diagnostics can never abort `LinkGameWindowToScene()`.
 
 3. Zero Compression Delivery:
-   - Bundled IPA packaged with 0% compression (ZIP_STORED). Auto-deletes older IPAs to conserve disk space.
+   - Bundled IPA packaged strictly with 0% compression (`ZIP_STORED`). Auto-purges older version IPAs to conserve disk space.
 """
 
 headers = {
