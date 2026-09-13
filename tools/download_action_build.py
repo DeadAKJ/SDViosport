@@ -17,25 +17,19 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.24-fix-graphics-device-and-window'
+version_name = 'v1.0.25-fix-touchpanel-primarywindow-and-presentationparameters'
 
-changelog_content = """Version: v1.0.24-fix-graphics-device-and-window
+changelog_content = """Version: v1.0.25-fix-touchpanel-primarywindow-and-presentationparameters
 Date: 2026-09-13
 
 Changes:
-1. Revive GraphicsDevice & GraphicsDeviceManager:
-   - Root Cause: In MonoGame GameRunner.Draw(GameTime), if GraphicsDevice is null, accessing Viewport or PresentationParameters throws NullReferenceException.
-   - Added ReviveGraphicsDeviceAndInstances helper that verifies Game1.graphics._graphicsDevice, clears disposed flag, and invokes CreateDevice()/ApplyChanges() or instantiates GraphicsDevice directly.
-   - Connected runner._graphicsDeviceService and runner._graphicsDeviceManager to Game1.graphics.
-   - Guarded DirectTickPipeline to avoid ticking when GraphicsDevice is null.
+1. Initialize TouchPanel.PrimaryWindow and Mouse.PrimaryWindow:
+   - Root Cause: In MonoGame, new PresentationParameters() and GraphicsDeviceManager.CreateDevice() call TouchPanel.DisplayOrientation, which accesses TouchPanel.PrimaryWindow.TouchPanelState.DisplayOrientation. When PrimaryWindow is null, this throws NullReferenceException.
+   - Initialized TouchPanel.PrimaryWindow and Mouse.PrimaryWindow from iOSGamePlatform._window or GameRunner.Window.
+   - Ensured TouchPanelState is instantiated and assigned to GameWindow if missing.
 
-2. Synchronize iOSGameWindow._viewController:
-   - Root Cause: In GameRunner.Draw, when _windowSizeChanged is true, Game1.Window_ClientSizeChanged is called, which calls iOSGameWindow.get_ClientBounds. That method dereferences _viewController.View. If _viewController is null, NullReferenceException occurs.
-   - Synchronized iOSGameWindow._viewController to plat._viewController and the active UIViewController.
-
-3. Initialize Game1 MultiPlayer Window and Viewport:
-   - Initialized localMultiplayerWindow to 896x414 and instance options if null.
-   - Initialized Game1.defaultDeviceViewport to valid dimensions (896x414).
+2. Safe PresentationParameters Allocation & Fallback:
+   - Wrapped PresentationParameters instantiation with fallback to FormatterServices.GetUninitializedObject if the constructor fails, populating BackBuffer dimensions, Color format, Depth24Stencil8, and DeviceWindowHandle directly.
 """
 
 headers = {

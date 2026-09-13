@@ -1153,7 +1153,8 @@ namespace SDViOS.Loader
             if (runner == null) return;
             try
             {
-                // 1. Repair and synchronize iOSGameWindow._viewController
+                // 1. Repair and synchronize iOSGameWindow._viewController and TouchPanel/Mouse PrimaryWindow
+                Microsoft.Xna.Framework.GameWindow? xnaWindow = null;
                 if (plat != null)
                 {
                     try
@@ -1163,6 +1164,7 @@ namespace SDViOS.Loader
                         var pWindow = winField?.GetValue(plat);
                         if (pWindow != null)
                         {
+                            xnaWindow = pWindow as Microsoft.Xna.Framework.GameWindow;
                             var wVcf = pWindow.GetType().GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                             if (wVcf != null && (wVcf.GetValue(pWindow) == null || (vc != null && wVcf.GetValue(pWindow) != vc)))
                             {
@@ -1175,6 +1177,63 @@ namespace SDViOS.Loader
                         }
                     }
                     catch { }
+                }
+
+                if (xnaWindow == null && runner != null)
+                {
+                    try
+                    {
+                        xnaWindow = runner.Window as Microsoft.Xna.Framework.GameWindow;
+                    }
+                    catch { }
+                }
+
+                // Ensure TouchPanel.PrimaryWindow and Mouse.PrimaryWindow are initialized
+                if (xnaWindow != null)
+                {
+                    try
+                    {
+                        var tpType = typeof(Microsoft.Xna.Framework.Input.Touch.TouchPanel);
+                        var tpPwField = tpType.GetField("PrimaryWindow", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
+                        if (tpPwField != null && tpPwField.GetValue(null) == null)
+                        {
+                            tpPwField.SetValue(null, xnaWindow);
+                            EngineLogger.Log($"[GameHost] Set TouchPanel.PrimaryWindow = {xnaWindow.GetType().FullName}");
+                        }
+
+                        var mouseType = typeof(Microsoft.Xna.Framework.Input.Mouse);
+                        var mPwField = mouseType.GetField("PrimaryWindow", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
+                        if (mPwField != null && mPwField.GetValue(null) == null)
+                        {
+                            mPwField.SetValue(null, xnaWindow);
+                            EngineLogger.Log($"[GameHost] Set Mouse.PrimaryWindow = {xnaWindow.GetType().FullName}");
+                        }
+
+                        // Verify xnaWindow.TouchPanelState is present
+                        var winType = xnaWindow.GetType();
+                        FieldInfo? tpsField = null;
+                        for (Type? t = winType; t != null; t = t.BaseType)
+                        {
+                            tpsField = t.GetField("TouchPanelState", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            if (tpsField != null) break;
+                        }
+
+                        if (tpsField != null && tpsField.GetValue(xnaWindow) == null)
+                        {
+                            var tpsType = tpsField.FieldType;
+                            var tpsCtor = tpsType.GetConstructor(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance, null, new Type[] { typeof(Microsoft.Xna.Framework.GameWindow) }, null);
+                            if (tpsCtor != null)
+                            {
+                                var newTps = tpsCtor.Invoke(new object[] { xnaWindow });
+                                tpsField.SetValue(xnaWindow, newTps);
+                                EngineLogger.Log("[GameHost] Instantiated and assigned TouchPanelState to GameWindow.");
+                            }
+                        }
+                    }
+                    catch (Exception winEx)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] TouchPanel/Mouse PrimaryWindow initialization warning: {winEx.Message}");
+                    }
                 }
 
                 // 2. Discover and revive Game1.graphics (GraphicsDeviceManager)
@@ -1241,12 +1300,38 @@ namespace SDViOS.Loader
                             {
                                 var adapter = Microsoft.Xna.Framework.Graphics.GraphicsAdapter.DefaultAdapter;
                                 var profile = Microsoft.Xna.Framework.Graphics.GraphicsProfile.Reach;
-                                var pp = new Microsoft.Xna.Framework.Graphics.PresentationParameters();
-                                pp.BackBufferWidth = 896;
-                                pp.BackBufferHeight = 414;
-                                currentGD = new Microsoft.Xna.Framework.Graphics.GraphicsDevice(adapter, profile, pp);
-                                gdField?.SetValue(gdm, currentGD);
-                                EngineLogger.Log("[GameHost] Instantiated and assigned fresh GraphicsDevice to GraphicsDeviceManager.");
+                                Microsoft.Xna.Framework.Graphics.PresentationParameters? pp = null;
+
+                                try
+                                {
+                                    pp = new Microsoft.Xna.Framework.Graphics.PresentationParameters();
+                                }
+                                catch (Exception ppEx)
+                                {
+                                    EngineLogger.LogWarning($"[GameHost] PresentationParameters ctor warning: {ppEx.Message}. Using uninitialized allocation.");
+                                    try
+                                    {
+                                        pp = (Microsoft.Xna.Framework.Graphics.PresentationParameters)
+                                            System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(Microsoft.Xna.Framework.Graphics.PresentationParameters));
+                                    }
+                                    catch { }
+                                }
+
+                                if (pp != null)
+                                {
+                                    pp.BackBufferWidth = 896;
+                                    pp.BackBufferHeight = 414;
+                                    pp.BackBufferFormat = Microsoft.Xna.Framework.Graphics.SurfaceFormat.Color;
+                                    pp.DepthStencilFormat = Microsoft.Xna.Framework.Graphics.DepthFormat.Depth24Stencil8;
+                                    pp.IsFullScreen = true;
+                                    if (gameView != null && gameView.Handle != IntPtr.Zero)
+                                    {
+                                        pp.DeviceWindowHandle = gameView.Handle;
+                                    }
+                                    currentGD = new Microsoft.Xna.Framework.Graphics.GraphicsDevice(adapter, profile, pp);
+                                    gdField?.SetValue(gdm, currentGD);
+                                    EngineLogger.Log("[GameHost] Instantiated and assigned fresh GraphicsDevice to GraphicsDeviceManager.");
+                                }
                             }
                             catch (Exception devEx)
                             {
