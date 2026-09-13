@@ -22,6 +22,11 @@ namespace SDViOS.Loader
         public static object? SMAPICoreInstance { get; set; }
         private static CoreAnimation.CADisplayLink? _engineDisplayLink;
         private static int _tickLogCount = 0;
+        private static UIView? _activeGameView;
+        private static MethodInfo? _makeCurrentMethod;
+        private static MethodInfo? _presentMethod;
+        private static MethodInfo? _threadingRunMethod;
+        private static int _directTickCount = 0;
 
         public static void InitializeFileSystem()
         {
@@ -495,7 +500,32 @@ namespace SDViOS.Loader
                     vc = window.RootViewController;
                 }
 
-                EngineLogger.Log($"[GameHost] Status: Window={window != null} (Bounds={window?.Bounds}), VC={vc != null}, Platform={plat != null}");
+                // Discover _activeGameView if not yet cached
+                if (_activeGameView == null || _activeGameView.Handle == IntPtr.Zero)
+                {
+                    if (window?.Subviews != null)
+                    {
+                        foreach (var sv in window.Subviews)
+                        {
+                            if (sv != null && (sv.GetType().Name.Contains("GameView") || sv.GetType().FullName.Contains("iOSGameView")))
+                            {
+                                _activeGameView = sv;
+                                EngineLogger.Log($"[GameHost] Discovered _activeGameView in window.Subviews: {sv.GetType().FullName}");
+                                break;
+                            }
+                        }
+                    }
+                    if (_activeGameView == null && vc?.View != null)
+                    {
+                        if (vc.View.GetType().Name.Contains("GameView") || vc.View.GetType().FullName.Contains("iOSGameView"))
+                        {
+                            _activeGameView = vc.View;
+                            EngineLogger.Log($"[GameHost] Discovered _activeGameView in vc.View: {vc.View.GetType().FullName}");
+                        }
+                    }
+                }
+
+                EngineLogger.Log($"[GameHost] Status: Window={window != null} (Bounds={window?.Bounds}), VC={vc != null}, Platform={plat != null}, GameView={_activeGameView != null}");
 
                 // 3. Determine scene and screen geometry
                 var activeScene = GetActiveWindowScene();
@@ -613,6 +643,29 @@ namespace SDViOS.Loader
                     }
                 }
 
+                // Ensure _activeGameView is in window hierarchy and brought to front
+                if (window != null && _activeGameView != null)
+                {
+                    try
+                    {
+                        _activeGameView.DangerousRetain();
+                        _activeGameView.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
+                        _activeGameView.Frame = landscapeFrame;
+                        _activeGameView.Bounds = landscapeFrame;
+                        _activeGameView.Hidden = false;
+                        _activeGameView.Opaque = true;
+                        if (!window.Subviews.Contains(_activeGameView))
+                        {
+                            window.AddSubview(_activeGameView);
+                        }
+                        window.BringSubviewToFront(_activeGameView);
+                    }
+                    catch (Exception ex)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] _activeGameView window attachment warning: {ex.Message}");
+                    }
+                }
+
                 if (window != null && UIApplication.SharedApplication.Delegate is AppDelegate appDelegate)
                 {
                     if (appDelegate.Window != window)
@@ -669,6 +722,65 @@ namespace SDViOS.Loader
                         }
                     }
 
+                    // Inspect and repair _viewController on plat
+                    FieldInfo? vcf = null;
+                    for (Type? t = plat.GetType(); t != null; t = t.BaseType)
+                    {
+                        vcf = t.GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        if (vcf != null) break;
+                    }
+
+                    object? platVC = vcf?.GetValue(plat);
+                    EngineLogger.Log($"[GameHost] Current plat._viewController: {platVC?.GetType().FullName ?? "null"}");
+
+                    if (platVC == null)
+                    {
+                        if (vc != null && vcf != null && vcf.FieldType.IsInstanceOfType(vc))
+                        {
+                            vcf.SetValue(plat, vc);
+                            platVC = vc;
+                            EngineLogger.Log($"[GameHost] Assigned vc to plat._viewController ({vc.GetType().FullName})");
+                        }
+                        else if (vcf != null)
+                        {
+                            try
+                            {
+                                var newVC = Activator.CreateInstance(vcf.FieldType, new object[] { plat });
+                                if (newVC != null)
+                                {
+                                    vcf.SetValue(plat, newVC);
+                                    platVC = newVC;
+                                    EngineLogger.Log($"[GameHost] Created and assigned new {vcf.FieldType.FullName} to plat._viewController");
+                                    if (newVC is UIViewController createdUIVC && window != null)
+                                    {
+                                        window.RootViewController = createdUIVC;
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                EngineLogger.LogWarning($"[GameHost] Could not instantiate {vcf.FieldType.FullName}: {ex.Message}");
+                            }
+                        }
+                    }
+
+                    // If platVC is a UIViewController, make sure its View points to _activeGameView
+                    if (platVC is UIViewController pvc)
+                    {
+                        try
+                        {
+                            if (_activeGameView != null && pvc.View != _activeGameView)
+                            {
+                                pvc.View = _activeGameView;
+                                EngineLogger.Log("[GameHost] Connected _activeGameView to plat._viewController.View");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] Set plat._viewController.View warning: {ex.Message}");
+                        }
+                    }
+
                     try
                     {
                         var didBecomeAct = plat.GetType().GetMethod("Application_DidBecomeActive", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
@@ -717,47 +829,58 @@ namespace SDViOS.Loader
                     EngineLogger.Log($"[GameHost] Check: {g.GetType().Name}.IsActive = {act}");
                 }
 
-                // 6. Create modern CADisplayLink driving iOSGamePlatform.Tick()
+                // 6. Create modern CADisplayLink driving iOSGamePlatform.Tick() with Direct Render Fallback
                 if (plat != null && _engineDisplayLink == null)
                 {
                     var tickMethod = plat.GetType().GetMethod("Tick", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (tickMethod != null)
+                    EngineLogger.Log("[GameHost] Creating modern CADisplayLink for game tick pipeline...");
+                    _engineDisplayLink = CoreAnimation.CADisplayLink.Create(() =>
                     {
-                        EngineLogger.Log("[GameHost] Creating modern CADisplayLink for iOSGamePlatform.Tick...");
-                        _engineDisplayLink = CoreAnimation.CADisplayLink.Create(() =>
+                        bool directFallback = false;
+                        try
                         {
-                            try
+                            if (_tickLogCount < 5)
                             {
-                                if (_tickLogCount < 5)
-                                {
-                                    _tickLogCount++;
-                                    EngineLogger.Log($"[GameHost] CADisplayLink tick #{_tickLogCount} executing...");
-                                }
+                                _tickLogCount++;
+                                EngineLogger.Log($"[GameHost] CADisplayLink tick #{_tickLogCount} executing...");
+                            }
+                            if (tickMethod != null)
+                            {
                                 tickMethod.Invoke(plat, null);
                             }
-                            catch (Exception ex)
+                            else
                             {
-                                if (_tickLogCount < 10)
-                                {
-                                    _tickLogCount++;
-                                    EngineLogger.LogWarning($"[GameHost] CADisplayLink tick exception: {ex}");
-                                }
+                                directFallback = true;
                             }
-                        });
-                        try { _engineDisplayLink.PreferredFramesPerSecond = 60; } catch { }
-                        _engineDisplayLink.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Common);
-                        _engineDisplayLink.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Default);
-                        _engineDisplayLink.Paused = false;
-                        EngineLogger.Log("[GameHost] Modern CADisplayLink registered and unpaused.");
-
-                        for (Type? t = plat.GetType(); t != null; t = t.BaseType)
+                        }
+                        catch (Exception ex)
                         {
-                            var dlf = t.GetField("_displayLink", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                            if (dlf != null)
+                            directFallback = true;
+                            if (_tickLogCount < 10)
                             {
-                                dlf.SetValue(plat, _engineDisplayLink);
-                                EngineLogger.Log($"[GameHost] Assigned _engineDisplayLink to {t.Name}._displayLink");
+                                _tickLogCount++;
+                                EngineLogger.LogWarning($"[GameHost] plat.Tick() threw: {ex.InnerException?.GetType().Name}: {ex.InnerException?.Message}. Engaging direct render pipeline.");
                             }
+                        }
+
+                        if (directFallback)
+                        {
+                            ExecuteDirectGameTick(runner, plat, _activeGameView);
+                        }
+                    });
+                    try { _engineDisplayLink.PreferredFramesPerSecond = 60; } catch { }
+                    _engineDisplayLink.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Common);
+                    _engineDisplayLink.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Default);
+                    _engineDisplayLink.Paused = false;
+                    EngineLogger.Log("[GameHost] Modern CADisplayLink registered and unpaused.");
+
+                    for (Type? t = plat.GetType(); t != null; t = t.BaseType)
+                    {
+                        var dlf = t.GetField("_displayLink", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        if (dlf != null)
+                        {
+                            dlf.SetValue(plat, _engineDisplayLink);
+                            EngineLogger.Log($"[GameHost] Assigned _engineDisplayLink to {t.Name}._displayLink");
                         }
                     }
                 }
@@ -821,6 +944,115 @@ namespace SDViOS.Loader
             catch (Exception ex)
             {
                 EngineLogger.LogError($"[GameHost] LinkGameWindowToScene failed: {ex}");
+            }
+        }
+
+        private static void ExecuteDirectGameTick(Game? runner, object? plat, UIView? gameView)
+        {
+            try
+            {
+                if (runner == null) return;
+
+                // 1. Ensure runner is marked active
+                if (!runner.IsActive)
+                {
+                    for (Type? t = runner.GetType(); t != null; t = t.BaseType)
+                    {
+                        var actField = t.GetField("_isActive", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        actField?.SetValue(runner, true);
+                    }
+                }
+
+                // If gameView is null, look for it in key window
+                if (gameView == null || gameView.Handle == IntPtr.Zero)
+                {
+                    var kw = UIApplication.SharedApplication.KeyWindow ?? UIApplication.SharedApplication.Windows.FirstOrDefault(w => w != null);
+                    if (kw?.Subviews != null)
+                    {
+                        foreach (var sv in kw.Subviews)
+                        {
+                            if (sv != null && (sv.GetType().Name.Contains("GameView") || sv.GetType().FullName.Contains("iOSGameView")))
+                            {
+                                _activeGameView = sv;
+                                gameView = sv;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // 2. MakeCurrent on iOSGameView
+                if (gameView != null && gameView.Handle != IntPtr.Zero)
+                {
+                    if (_makeCurrentMethod == null)
+                    {
+                        _makeCurrentMethod = gameView.GetType().GetMethod("MakeCurrent", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    }
+                    try
+                    {
+                        _makeCurrentMethod?.Invoke(gameView, null);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Direct MakeCurrent error: {ex.Message}");
+                    }
+                }
+
+                // 3. Tick Game (Runs SMAPI + Stardew Valley Update & Draw)
+                runner.Tick();
+
+                // 4. Threading.Run
+                if (_threadingRunMethod == null)
+                {
+                    var threadingType = typeof(Game).Assembly.GetType("Microsoft.Xna.Framework.Threading");
+                    _threadingRunMethod = threadingType?.GetMethod("Run", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
+                }
+                try
+                {
+                    _threadingRunMethod?.Invoke(null, null);
+                }
+                catch { }
+
+                // 5. Present GraphicsDevice
+                try
+                {
+                    runner.GraphicsDevice?.Present();
+                }
+                catch (Exception ex)
+                {
+                    if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Direct GraphicsDevice.Present error: {ex.Message}");
+                }
+
+                // 6. Present iOSGameView (SwapBuffers)
+                if (gameView != null && gameView.Handle != IntPtr.Zero)
+                {
+                    if (_presentMethod == null)
+                    {
+                        _presentMethod = gameView.GetType().GetMethod("Present", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    }
+                    try
+                    {
+                        _presentMethod?.Invoke(gameView, null);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Direct iOSGameView.Present error: {ex.Message}");
+                    }
+                }
+
+                if (_directTickCount < 5)
+                {
+                    _directTickCount++;
+                    EngineLogger.Log($"[GameHost] Direct tick pipeline #{_directTickCount} executed successfully! (GD={runner.GraphicsDevice != null}, View={gameView != null})");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (_directTickCount < 10)
+                {
+                    _directTickCount++;
+                    EngineLogger.LogError($"[GameHost] Direct tick pipeline error: {ex}");
+                }
             }
         }
 

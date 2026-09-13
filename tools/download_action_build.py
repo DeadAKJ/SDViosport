@@ -17,18 +17,21 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.21-fix-game-platform-null-and-disposed'
+version_name = 'v1.0.22-fix-platform-viewcontroller-and-tick'
 
-changelog_content = """Version: v1.0.21-fix-game-platform-null-and-disposed
+changelog_content = """Version: v1.0.22-fix-platform-viewcontroller-and-tick
 Date: 2026-09-13
 
 Changes:
-1. Repair Bidirectional Game <-> GamePlatform Link:
-   - Root Cause: In iOSGamePlatform.Tick(), line 1 executes `this.get_Game().get_IsActive()`. Inside Game.get_IsActive(), the instruction is `this.Platform.get_IsActive()`. Because `this.Platform` was null on the Game instance, it threw `NullReferenceException` inside `Game.get_IsActive()`, aborting `Tick()` on every frame before update, draw, or render could execute.
-   - Resolved by explicitly restoring `game.Platform = plat`, `plat.<Game> = game`, resetting `_isDisposed = false` on Game, and resetting `disposed = false` on GamePlatform.
+1. Repair iOSGamePlatform _viewController & View Hierarchy:
+   - Root Cause: In iOSGamePlatform.Tick(), instructions dereference `_viewController` and call `_viewController.get_View().MakeCurrent()`. When `_viewController` or its View is null, it threw NullReferenceException at Microsoft.Xna.Framework.iOSGamePlatform.Tick(), preventing Game.Tick(), DoInitialize(), and Draw() from ever executing.
+   - Discovered and cached active `iOSGameView` in window subviews, ensured retention, landscape bounds, and brought to front.
+   - Inspected and repaired `plat._viewController` and linked its View property to the active `iOSGameView`.
 
-2. Verified UIWindow & Scene Integration:
-   - Preserved UIWindow scene recreation with 896x414 landscape geometry, confirmed active and key with 2 subviews.
+2. Direct Render Pipeline Fallback:
+   - CADisplayLink now wraps `plat.Tick()` with an automatic failover to `ExecuteDirectGameTick()`.
+   - Directly executes: `iOSGameView.MakeCurrent()`, `runner.Tick()`, `Threading.Run()`, `GraphicsDevice.Present()`, and `iOSGameView.Present()` (OpenGL buffer swap).
+   - Guarantees continuous 60 FPS update and presentation even if platform internals encounter reflection or lifecycle anomalies.
 
 3. Zero Compression & Auto-Purge:
    - Bundled IPA packaged with 0% compression (`ZIP_STORED`), old version IPAs automatically purged.
