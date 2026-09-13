@@ -249,6 +249,8 @@ namespace SDViOS.Loader
                         UIApplication.SharedApplication.BeginInvokeOnMainThread(LinkGameWindowToScene);
                         NSTimer.CreateScheduledTimer(0.25, false, _ => LinkGameWindowToScene());
                         NSTimer.CreateScheduledTimer(1.0, false, _ => LinkGameWindowToScene());
+                        NSTimer.CreateScheduledTimer(2.5, false, _ => LinkGameWindowToScene());
+                        NSTimer.CreateScheduledTimer(5.0, false, _ => LinkGameWindowToScene());
                         return;
                     }
                 }
@@ -389,6 +391,10 @@ namespace SDViOS.Loader
                         EngineLogger.Log($"[GameHost] Assigning window.WindowScene to {activeScene.Description} (State: {activeScene.ActivationState})");
                         window.WindowScene = activeScene;
                     }
+                    if (activeScene.CoordinateSpace != null && !activeScene.CoordinateSpace.Bounds.IsEmpty)
+                    {
+                        window.Frame = activeScene.CoordinateSpace.Bounds;
+                    }
                 }
                 else
                 {
@@ -398,6 +404,13 @@ namespace SDViOS.Loader
                 if (window.RootViewController == null && vc != null)
                 {
                     window.RootViewController = vc;
+                }
+
+                if (vc != null)
+                {
+                    vc.View.Frame = window.Bounds;
+                    vc.View.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
+                    vc.View.Hidden = false;
                 }
 
                 if (UIApplication.SharedApplication.Delegate is AppDelegate appDelegate)
@@ -412,12 +425,54 @@ namespace SDViOS.Loader
                 window.Hidden = false;
                 window.MakeKeyAndVisible();
 
+                // Force MonoGame GamePlatform.IsActive = true
+                if (runner != null)
+                {
+                    try
+                    {
+                        var platProp = typeof(Game).GetProperty("Platform", BindingFlags.NonPublic | BindingFlags.Instance);
+                        var plat = platProp?.GetValue(runner);
+                        if (plat != null)
+                        {
+                            var actProp = plat.GetType().GetProperty("IsActive", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            actProp?.SetValue(plat, true);
+
+                            var didBecomeAct = plat.GetType().GetMethod("Application_DidBecomeActive", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            didBecomeAct?.Invoke(plat, new object?[] { null });
+                            EngineLogger.Log($"[GameHost] Set GamePlatform.IsActive=true (Game.IsActive={runner.IsActive})");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] Failed to force Game.IsActive: {ex.Message}");
+                    }
+                }
+
                 try
                 {
                     window.SetNeedsLayout();
                     window.LayoutIfNeeded();
+                    if (vc?.View != null)
+                    {
+                        vc.View.SetNeedsLayout();
+                        vc.View.LayoutIfNeeded();
+                        var lsMethod = vc.View.GetType().GetMethod("LayoutSubviews", BindingFlags.Public | BindingFlags.Instance);
+                        lsMethod?.Invoke(vc.View, null);
+                    }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    EngineLogger.LogWarning($"[GameHost] LayoutSubviews force error: {ex.Message}");
+                }
+
+                // Diagnostics
+                var gd = runner?.GraphicsDevice;
+                EngineLogger.Log($"[GameHost] Window: Bounds={window.Bounds}, Frame={window.Frame}, Hidden={window.Hidden}, Key={window.IsKeyWindow}");
+                EngineLogger.Log($"[GameHost] VC View: Bounds={vc?.View?.Bounds}, Frame={vc?.View?.Frame}, Hidden={vc?.View?.Hidden}");
+                if (gd != null)
+                {
+                    EngineLogger.Log($"[GameHost] GraphicsDevice: Viewport={gd.Viewport.Width}x{gd.Viewport.Height}, BackBuffer={gd.PresentationParameters.BackBufferWidth}x{gd.PresentationParameters.BackBufferHeight}");
+                }
 
                 EngineLogger.Log("[GameHost] MonoGame UIWindow successfully linked and made key.");
             }
