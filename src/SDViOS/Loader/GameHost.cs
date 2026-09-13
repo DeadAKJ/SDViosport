@@ -383,6 +383,17 @@ namespace SDViOS.Loader
                     return;
                 }
 
+                try
+                {
+                    window.DangerousRetain();
+                }
+                catch { }
+
+                var screenBounds = UIScreen.MainScreen.Bounds;
+                nfloat screenW = NMath.Max(screenBounds.Width, screenBounds.Height);
+                nfloat screenH = NMath.Min(screenBounds.Width, screenBounds.Height);
+                var landscapeFrame = new CGRect(0, 0, screenW, screenH);
+
                 var activeScene = GetActiveWindowScene();
                 if (activeScene != null)
                 {
@@ -391,27 +402,16 @@ namespace SDViOS.Loader
                         EngineLogger.Log($"[GameHost] Assigning window.WindowScene to {activeScene.Description} (State: {activeScene.ActivationState})");
                         window.WindowScene = activeScene;
                     }
-                    if (activeScene.CoordinateSpace != null && !activeScene.CoordinateSpace.Bounds.IsEmpty)
-                    {
-                        window.Frame = activeScene.CoordinateSpace.Bounds;
-                    }
                 }
                 else
                 {
                     EngineLogger.LogWarning("[GameHost] No connected UIWindowScene found yet.");
                 }
 
-                if (window.RootViewController == null && vc != null)
-                {
-                    window.RootViewController = vc;
-                }
-
-                if (vc != null)
-                {
-                    vc.View.Frame = window.Bounds;
-                    vc.View.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
-                    vc.View.Hidden = false;
-                }
+                window.Frame = landscapeFrame;
+                window.Bounds = landscapeFrame;
+                window.Hidden = false;
+                window.MakeKeyAndVisible();
 
                 if (UIApplication.SharedApplication.Delegate is AppDelegate appDelegate)
                 {
@@ -422,10 +422,47 @@ namespace SDViOS.Loader
                     }
                 }
 
-                window.Hidden = false;
-                window.MakeKeyAndVisible();
+                if (vc != null)
+                {
+                    try
+                    {
+                        vc.DangerousRetain();
+                    }
+                    catch { }
 
-                // Force MonoGame GamePlatform.IsActive = true
+                    if (window.RootViewController == null)
+                    {
+                        try
+                        {
+                            window.RootViewController = vc;
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] RootViewController assign error: {ex.Message}");
+                        }
+                    }
+                }
+
+                try
+                {
+                    if (window.RootViewController?.View != null)
+                    {
+                        var rootV = window.RootViewController.View;
+                        try { rootV.DangerousRetain(); } catch { }
+                        rootV.Frame = landscapeFrame;
+                        rootV.Bounds = landscapeFrame;
+                        rootV.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
+                        rootV.Hidden = false;
+                        rootV.SetNeedsLayout();
+                        rootV.LayoutIfNeeded();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    EngineLogger.LogWarning($"[GameHost] RootViewController view layout error: {ex.Message}");
+                }
+
+                // Force MonoGame GamePlatform.IsActive = true and activate display link
                 if (runner != null)
                 {
                     try
@@ -439,7 +476,20 @@ namespace SDViOS.Loader
 
                             var didBecomeAct = plat.GetType().GetMethod("Application_DidBecomeActive", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                             didBecomeAct?.Invoke(plat, new object?[] { null });
-                            EngineLogger.Log($"[GameHost] Set GamePlatform.IsActive=true (Game.IsActive={runner.IsActive})");
+
+                            var dlField = plat.GetType().GetField("_displayLink", BindingFlags.NonPublic | BindingFlags.Instance);
+                            var dl = dlField?.GetValue(plat) as CoreAnimation.CADisplayLink;
+                            if (dl != null)
+                            {
+                                dl.Paused = false;
+                                try
+                                {
+                                    dl.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Common);
+                                }
+                                catch { }
+                            }
+
+                            EngineLogger.Log($"[GameHost] Set GamePlatform.IsActive=true (Game.IsActive={runner.IsActive}, DisplayLink.Paused={dl?.Paused})");
                         }
                     }
                     catch (Exception ex)
@@ -452,12 +502,27 @@ namespace SDViOS.Loader
                 {
                     window.SetNeedsLayout();
                     window.LayoutIfNeeded();
-                    if (vc?.View != null)
+                    var subviews = window.Subviews;
+                    if (subviews != null)
                     {
-                        vc.View.SetNeedsLayout();
-                        vc.View.LayoutIfNeeded();
-                        var lsMethod = vc.View.GetType().GetMethod("LayoutSubviews", BindingFlags.Public | BindingFlags.Instance);
-                        lsMethod?.Invoke(vc.View, null);
+                        foreach (var sv in subviews)
+                        {
+                            try
+                            {
+                                sv.DangerousRetain();
+                                sv.Frame = landscapeFrame;
+                                sv.Bounds = landscapeFrame;
+                                sv.Hidden = false;
+                                sv.SetNeedsLayout();
+                                sv.LayoutIfNeeded();
+                                var lsMethod = sv.GetType().GetMethod("LayoutSubviews", BindingFlags.Public | BindingFlags.Instance);
+                                lsMethod?.Invoke(sv, null);
+                            }
+                            catch (Exception ex)
+                            {
+                                EngineLogger.LogWarning($"[GameHost] Subview layout error: {ex.Message}");
+                            }
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -468,7 +533,6 @@ namespace SDViOS.Loader
                 // Diagnostics
                 var gd = runner?.GraphicsDevice;
                 EngineLogger.Log($"[GameHost] Window: Bounds={window.Bounds}, Frame={window.Frame}, Hidden={window.Hidden}, Key={window.IsKeyWindow}");
-                EngineLogger.Log($"[GameHost] VC View: Bounds={vc?.View?.Bounds}, Frame={vc?.View?.Frame}, Hidden={vc?.View?.Hidden}");
                 if (gd != null)
                 {
                     EngineLogger.Log($"[GameHost] GraphicsDevice: Viewport={gd.Viewport.Width}x{gd.Viewport.Height}, BackBuffer={gd.PresentationParameters.BackBufferWidth}x{gd.PresentationParameters.BackBufferHeight}");

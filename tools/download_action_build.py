@@ -17,26 +17,26 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.14-fix-onactivated-crash'
+version_name = 'v1.0.16-fix-window-frame-and-disposed-vc'
 
-changelog_content = """Version: v1.0.14-fix-onactivated-crash
-Date: 2026-09-12
+changelog_content = """Version: v1.0.16-fix-window-frame-and-disposed-vc
+Date: 2026-09-13
 
 Changes:
-1. Fix Fatal Crash (You_Should_Not_Call_base_In_This_Method):
-   - In .NET iOS / Xamarin.iOS, UIApplicationDelegate event callbacks are abstract protocols.
-   - Calling base.OnActivated(application) threw Foundation.You_Should_Not_Call_base_In_This_Method, causing recursive uncaught exception handler invocation and SIGSEGV stack guard overflow.
-   - Removed base call in OnActivated and wrapped with safe try/catch.
+1. Fix ObjectDisposedException in LinkGameWindowToScene:
+   - Defensively called DangerousRetain() on UIWindow, UIViewController, and subviews to prevent iOS / UIKit scene detachment from disposing managed C# wrappers.
+   - Guarded every RootViewController and Subview property access with dedicated try/catch blocks so no exception can ever abort the activation pipeline.
 
-2. Eliminate ObjectDisposedException in LinkGameWindowToScene:
-   - Preserved MonoGame's existing window.RootViewController.
-   - Replaced direct vc.View layout manipulation with UIWindow.SetNeedsLayout() to prevent invoking disposed managed peers.
+2. Enforce Landscape Screen Geometry:
+   - Overrode inactive / zero-size UIWindowScene bounds by calculating physical landscape dimensions from UIScreen.MainScreen.Bounds (Math.Max x Math.Min).
+   - Enforced window.Frame, window.Bounds, and subview frames to full landscape dimensions, guaranteeing CAEAGLLayer renderbuffer allocation.
 
-3. Guarded TouchOverlay Components Enumeration:
-   - Added null-check for runner.Components before querying existing components.
+3. Unpause CADisplayLink and Run on Common RunLoop Modes:
+   - Forcibly unpaused MonoGame's CADisplayLink and registered it with NSRunLoopMode.Common in addition to Default, ensuring game ticks execute continuously.
+   - Forcibly invoked Application_DidBecomeActive and GamePlatform.IsActive = true.
 
 4. Zero Compression Delivery:
-   - Prebundled IPA packaged strictly with ZIP_STORED (0% compression) per user specification.
+   - StardewValley-Bundled.ipa packaged with 0% compression (ZIP_STORED) strictly per user requirements.
 """
 
 headers = {
