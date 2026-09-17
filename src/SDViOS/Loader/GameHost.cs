@@ -23,6 +23,7 @@ namespace SDViOS.Loader
         private static CoreAnimation.CADisplayLink? _engineDisplayLink;
         private static int _tickLogCount = 0;
         private static UIView? _activeGameView;
+        private static UIViewController? _activeGameVC;
         private static MethodInfo? _makeCurrentMethod;
         private static MethodInfo? _presentMethod;
         private static MethodInfo? _threadingRunMethod;
@@ -565,6 +566,11 @@ namespace SDViOS.Loader
                     }
                 }
 
+                if (vc != null)
+                {
+                    _activeGameVC = vc;
+                }
+
                 // Discover _activeGameView from vc.View
                 if (vc != null)
                 {
@@ -592,6 +598,20 @@ namespace SDViOS.Loader
                             _activeGameView = sv;
                             EngineLogger.Log($"[GameHost] Discovered _activeGameView in window.Subviews: {sv.GetType().FullName}");
                             break;
+                        }
+                    }
+                }
+
+                // Ensure plat._viewController is set
+                if (plat != null && _activeGameVC != null)
+                {
+                    for (Type? t = plat.GetType(); t != null; t = t.BaseType)
+                    {
+                        var vcf = t.GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        if (vcf != null && vcf.GetValue(plat) != _activeGameVC)
+                        {
+                            vcf.SetValue(plat, _activeGameVC);
+                            EngineLogger.Log($"[GameHost] Assigned _activeGameVC to {t.Name}._viewController");
                         }
                     }
                 }
@@ -928,12 +948,6 @@ namespace SDViOS.Loader
                             foreach (var sv in subviews)
                             {
                                 if (sv == null) continue;
-                                if (sv != _activeGameView && sv != vc?.View && sv.GetType() == typeof(UIView))
-                                {
-                                    sv.RemoveFromSuperview();
-                                    EngineLogger.Log($"[GameHost] Removed obscuring dummy {sv.GetType().FullName} subview from window.");
-                                    continue;
-                                }
 
                                 try
                                 {
@@ -1109,6 +1123,20 @@ namespace SDViOS.Loader
             if (runner == null) return;
             try
             {
+                var effectiveVC = vc ?? _activeGameVC;
+                if (plat != null && effectiveVC != null)
+                {
+                    for (Type? t = plat.GetType(); t != null; t = t.BaseType)
+                    {
+                        var vcf = t.GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        if (vcf != null && vcf.GetValue(plat) != effectiveVC)
+                        {
+                            vcf.SetValue(plat, effectiveVC);
+                            EngineLogger.Log($"[GameHost] Restored {t.Name}._viewController = {effectiveVC.GetType().FullName}");
+                        }
+                    }
+                }
+
                 // 1. Repair and synchronize iOSGameWindow._viewController and TouchPanel/Mouse PrimaryWindow
                 Microsoft.Xna.Framework.GameWindow? xnaWindow = null;
                 if (plat != null)
@@ -1122,12 +1150,12 @@ namespace SDViOS.Loader
                         {
                             xnaWindow = pWindow as Microsoft.Xna.Framework.GameWindow;
                             var wVcf = pWindow.GetType().GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                            if (wVcf != null && (wVcf.GetValue(pWindow) == null || (vc != null && wVcf.GetValue(pWindow) != vc)))
+                            if (wVcf != null && (wVcf.GetValue(pWindow) == null || (effectiveVC != null && wVcf.GetValue(pWindow) != effectiveVC)))
                             {
-                                if (vc != null)
+                                if (effectiveVC != null)
                                 {
-                                    wVcf.SetValue(pWindow, vc);
-                                    EngineLogger.Log($"[GameHost] Synchronized iOSGameWindow._viewController to {vc.GetType().FullName}");
+                                    wVcf.SetValue(pWindow, effectiveVC);
+                                    EngineLogger.Log($"[GameHost] Synchronized iOSGameWindow._viewController to {effectiveVC.GetType().FullName}");
                                 }
                             }
                         }

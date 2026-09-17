@@ -18,22 +18,21 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.28-fix-spritebatch-state-and-view-hierarchy'
+version_name = 'v1.0.29-fix-window-subviews-and-spritebatch-auto-end'
 
-changelog_content = """Version: v1.0.28-fix-spritebatch-state-and-view-hierarchy
+changelog_content = """Version: v1.0.29-fix-window-subviews-and-spritebatch-auto-end
 Date: 2026-09-17
 
 Changes:
-1. Fix SpriteBatch Begin/End State & Exceptions:
-   - Protected TouchOverlay.Draw with try-finally to guarantee SpriteBatch.End() is always called, preventing _beginCalled from staying true permanently.
-   - Added SafeResetSpriteBatch helper that inspects and clears _beginCalled via reflection if a previous draw threw an unhandled exception.
-   - Auto-reset Game1.spriteBatch in ReviveGraphicsDeviceAndInstances before each tick so game drawing never gets stuck in "Begin cannot be called again until End has been successfully called".
-2. Fix UI Window & View Hierarchy (Black Screen Root Cause):
-   - Corrected UIWindow.RootViewController setup so iOSGameViewController is assigned as the root controller without calling manual AddSubview(vc.View) or AddSubview(_activeGameView).
-   - Removed duplicate/obscuring dummy UIView subviews from UIWindow.Subviews so the underlying OpenGL iOSGameView is never obscured.
-   - Re-instantiated and allocated OpenGL framebuffer storage (DestroyFramebuffer / CreateFramebuffer) for landscape orientation (896x414).
-   - Aligned Game1.defaultDeviceViewport with graphics backbuffer resolution (1792x828).
-   - Log full inner exception and stack trace from CADisplayLink tick failures.
+1. Binary Patch MonoGame.Framework.dll (SpriteBatch.Begin Auto-End):
+   - Patched SpriteBatch.Begin IL bytecode to automatically call End() if _beginCalled is true instead of throwing InvalidOperationException("Begin cannot be called again until End has been successfully called").
+   - Permanently eliminates the crash in renderScreenBuffer when SMAPI or previous draw cycles left the SpriteBatch begun.
+2. Fix UIWindow Subviews Stripping (Black Screen Root Cause):
+   - Removed the sv.RemoveFromSuperview() call on UIWindow.Subviews so iOS root view containers are never detached, preserving device rendering.
+   - Retained, laid out, and set Hidden=false for all UIWindow subviews in landscape mode.
+3. Retain and Synchronize Active UIViewController:
+   - Statically cached _activeGameVC in GameHost and synchronized both iOSGamePlatform._viewController and iOSGameWindow._viewController across ticks.
+   - Prevents iOSGamePlatform.Tick() NullReferenceException when accessing _viewController.View.MakeCurrent().
 """
 
 headers = {
