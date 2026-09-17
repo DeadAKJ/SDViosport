@@ -780,9 +780,16 @@ namespace SDViOS.Loader
                             _activeGameView.Layer.ContentsScale = scale;
                         }
 
-                        // Attach into active window view hierarchy
+                        // Attach into active window view hierarchy if not already root view
                         var targetParent = window.RootViewController?.View ?? window;
-                        if (_activeGameView.Superview != targetParent)
+                        bool isRootView = targetParent != null && (_activeGameView == targetParent || _activeGameView.Handle == targetParent.Handle);
+
+                        if (isRootView)
+                        {
+                            EngineLogger.Log($"[GameHost] _activeGameView is already RootViewController.View. (Window={_activeGameView.Window != null})");
+                            _activeGameView.Superview?.BringSubviewToFront(_activeGameView);
+                        }
+                        else if (_activeGameView.Superview != targetParent)
                         {
                             _activeGameView.RemoveFromSuperview();
                             targetParent.AddSubview(_activeGameView);
@@ -792,6 +799,17 @@ namespace SDViOS.Loader
                         else
                         {
                             targetParent.BringSubviewToFront(_activeGameView);
+                        }
+
+                        // Ensure SupportedOrientations on vc and plat is landscape before CreateFramebuffer
+                        if (vc != null)
+                        {
+                            try
+                            {
+                                var supProp = vc.GetType().GetProperty("SupportedOrientations", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                                supProp?.SetValue(vc, DisplayOrientation.LandscapeLeft | DisplayOrientation.LandscapeRight);
+                            }
+                            catch { }
                         }
 
                         // Notify DidMoveToWindow so MonoGame initializes scale and context
@@ -1039,8 +1057,11 @@ namespace SDViOS.Loader
             string indent = new string(' ', depth * 2);
             string superType = view.Superview != null ? view.Superview.GetType().Name : "none";
             string winDesc = view.Window != null ? $"Window(Key={view.Window.IsKeyWindow})" : "none";
-            string isGV = (view == _activeGameView) ? " [ACTIVE_GAME_VIEW]" : "";
-            EngineLogger.Log($"[GameHost] {indent}-> [{view.GetType().FullName}]{isGV} Frame={view.Frame}, Bounds={view.Bounds}, Hidden={view.Hidden}, Alpha={view.Alpha}, Opaque={view.Opaque}, Superview={superType}, Window={winDesc}, Subviews={view.Subviews?.Length ?? 0}");
+            string nativeClass = "unknown";
+            try { nativeClass = view.Class?.Name ?? view.GetType().Name; } catch { }
+            bool isGV = (_activeGameView != null && (view == _activeGameView || view.Handle == _activeGameView.Handle));
+            string isGVStr = isGV ? " [ACTIVE_GAME_VIEW]" : "";
+            EngineLogger.Log($"[GameHost] {indent}-> [{view.GetType().FullName} ({nativeClass})]{isGVStr} Frame={view.Frame}, Bounds={view.Bounds}, Hidden={view.Hidden}, Alpha={view.Alpha}, Opaque={view.Opaque}, Superview={superType}, Window={winDesc}, Subviews={view.Subviews?.Length ?? 0}");
             if (view.Subviews != null)
             {
                 foreach (var child in view.Subviews)
@@ -1096,11 +1117,14 @@ namespace SDViOS.Loader
                     var kw = UIApplication.SharedApplication.KeyWindow ?? UIApplication.SharedApplication.Windows.FirstOrDefault(w => w != null);
                     if (gameView.Window == null && kw != null)
                     {
-                        if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Direct tick: gameView detached from window! Re-attaching...");
-                        gameView.RemoveFromSuperview();
                         var targetParent = kw.RootViewController?.View ?? kw;
-                        targetParent.AddSubview(gameView);
-                        targetParent.BringSubviewToFront(gameView);
+                        if (targetParent != null && targetParent != gameView && targetParent.Handle != gameView.Handle)
+                        {
+                            if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Direct tick: gameView detached from window! Re-attaching...");
+                            gameView.RemoveFromSuperview();
+                            targetParent.AddSubview(gameView);
+                            targetParent.BringSubviewToFront(gameView);
+                        }
                     }
 
                     if (_makeCurrentMethod == null)
@@ -1628,14 +1652,28 @@ namespace SDViOS.Loader
                     if (ddvField != null)
                     {
                         currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
-                        int vpW = (currentGD != null && currentGD.PresentationParameters.BackBufferWidth > 0) ? currentGD.PresentationParameters.BackBufferWidth : 1792;
-                        int vpH = (currentGD != null && currentGD.PresentationParameters.BackBufferHeight > 0) ? currentGD.PresentationParameters.BackBufferHeight : 828;
-
-                        var vp = (Microsoft.Xna.Framework.Graphics.Viewport)(ddvField.GetValue(null) ?? default(Microsoft.Xna.Framework.Graphics.Viewport));
-                        if (vp.Width <= 0 || vp.Height <= 0)
+                        if (currentGD != null)
                         {
-                            ddvField.SetValue(null, new Microsoft.Xna.Framework.Graphics.Viewport(0, 0, vpW, vpH));
-                            EngineLogger.Log($"[GameHost] Initialized Game1.defaultDeviceViewport to {vpW}x{vpH}");
+                            int vpW = Math.Max(currentGD.PresentationParameters.BackBufferWidth, currentGD.PresentationParameters.BackBufferHeight);
+                            int vpH = Math.Min(currentGD.PresentationParameters.BackBufferWidth, currentGD.PresentationParameters.BackBufferHeight);
+                            if (vpW <= 0) vpW = 1792;
+                            if (vpH <= 0) vpH = 828;
+
+                            if (currentGD.Viewport.Width < currentGD.Viewport.Height)
+                            {
+                                currentGD.Viewport = new Microsoft.Xna.Framework.Graphics.Viewport(0, 0, vpW, vpH);
+                                currentGD.PresentationParameters.BackBufferWidth = vpW;
+                                currentGD.PresentationParameters.BackBufferHeight = vpH;
+                                currentGD.PresentationParameters.DisplayOrientation = Microsoft.Xna.Framework.DisplayOrientation.LandscapeLeft;
+                                EngineLogger.Log($"[GameHost] Corrected GraphicsDevice Viewport to Landscape ({vpW}x{vpH})");
+                            }
+
+                            var vp = (Microsoft.Xna.Framework.Graphics.Viewport)(ddvField.GetValue(null) ?? default(Microsoft.Xna.Framework.Graphics.Viewport));
+                            if (vp.Width <= 0 || vp.Height <= 0 || vp.Width < vp.Height)
+                            {
+                                ddvField.SetValue(null, currentGD.Viewport);
+                                EngineLogger.Log($"[GameHost] Synchronized Game1.defaultDeviceViewport to {currentGD.Viewport.Width}x{currentGD.Viewport.Height}");
+                            }
                         }
                     }
                 }

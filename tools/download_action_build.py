@@ -18,23 +18,22 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.30-attach-gameview-hierarchy-and-present'
+version_name = 'v1.0.31-fix-self-subview-and-landscape-framebuffer'
 
-changelog_content = """Version: v1.0.30-attach-gameview-hierarchy-and-present
+changelog_content = """Version: v1.0.31-fix-self-subview-and-landscape-framebuffer
 Date: 2026-09-17
 
 Changes:
-1. Attach _activeGameView Directly to Active UIWindow Hierarchy:
-   - Detached _activeGameView from any previous/stale UIWindow, bound vc.View = _activeGameView, and explicitly added it to the active UIWindow / RootViewController.View hierarchy with BringSubviewToFront.
-   - Guaranteed _activeGameView.Window points to the active UIWindow attached to the live UIWindowScene, enabling the iOS Quartz compositor to present the CAEAGLLayer.
-2. Ensure CAEAGLLayer Properties & DidMoveToWindow Notification:
-   - Synchronized ContentScaleFactor and Layer.ContentsScale with UIScreen.MainScreen.Scale.
-   - Set Layer.Opaque = true, Layer.Hidden = false, and invoked DidMoveToWindow() prior to DestroyFramebuffer/CreateFramebuffer so OpenGLES binds to the live screen window.
-3. Recursive View Hierarchy Audit & Tick Liveness Guard:
-   - Added LogViewHierarchy() recursive diagnostic audit printing the complete hierarchy tree and window attachment states.
-   - Added liveness check in direct tick pipeline to re-attach gameView if ever detached.
-4. Correct LocalMultiplayerWindow Dimensions:
-   - Scaled localMultiplayerWindow to full native backbuffer dimensions (1792x828) instead of half-resolution.
+1. Fix NSInvalidArgumentException 'Can't add self as subview':
+   - Guarded targetParent.AddSubview(_activeGameView) by checking both object and native handle identity (`targetParent != _activeGameView && targetParent.Handle != _activeGameView.Handle`).
+   - Prevented fatal UIKit exception that aborted framebuffer allocation and left OpenGLES drawing into framebuffer 0.
+2. Force Landscape Orientations on iOSGameViewController:
+   - Configured `SupportedOrientations = DisplayOrientation.LandscapeLeft | DisplayOrientation.LandscapeRight`.
+   - Prevented portrait (828x1792) viewport orientation on initial view layout.
+3. Synchronize Landscape Viewport & Display Dimensions:
+   - Forced landscape width and height (1792x828) into GraphicsDevice.Viewport and MonoGame internal fields.
+4. Enhanced View Hierarchy Diagnostic Logging:
+   - Added native Objective-C ClassName printing and handle comparison to pinpoint active game view attachment.
 """
 
 headers = {
