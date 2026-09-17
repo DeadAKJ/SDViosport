@@ -803,6 +803,8 @@ namespace SDViOS.Loader
                     catch (Exception ex)
                     {
                         EngineLogger.LogWarning($"[GameHost] Set iOSGameWindow._viewController warning: {ex.Message}");
+                    }
+
                     try
                     {
                         var didBecomeAct = plat.GetType().GetMethod("Application_DidBecomeActive", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
