@@ -28,6 +28,7 @@ namespace SDViOS.Loader
         private static MethodInfo? _presentMethod;
         private static MethodInfo? _threadingRunMethod;
         private static int _directTickCount = 0;
+        private static FieldInfo? _game1TicksField;
 
         public static void InitializeFileSystem()
         {
@@ -239,6 +240,9 @@ namespace SDViOS.Loader
                 EngineLogger.Log($"Found StardewModdingAPI.dll at '{smapiPath}'. Bootstrapping SMAPI...");
                 try
                 {
+                    string smapiInternalDir = Path.Combine(DocumentsDir, "smapi-internal");
+                    try { Directory.CreateDirectory(smapiInternalDir); } catch { }
+                    Environment.SetEnvironmentVariable("SMAPI_INTERNAL_PATH", smapiInternalDir);
                     Environment.SetEnvironmentVariable("SMAPI_MODS_PATH", ModsDir);
                     Environment.SetEnvironmentVariable("SMAPI_NO_TERMINAL", "1");
                     Environment.SetEnvironmentVariable("STARDEW_VALLEY_MODS_PATH", ModsDir);
@@ -246,6 +250,32 @@ namespace SDViOS.Loader
                     string[] smapiArgs = new string[] { "--no-terminal", "--mods-path", ModsDir };
                     var smapiAsm = Assembly.LoadFrom(smapiPath);
                     System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+
+                    // Redirect SMAPI Constants.InternalPath to Documents to prevent sandbox violations
+                    try
+                    {
+                        var constType = smapiAsm.GetType("StardewModdingAPI.Constants");
+                        if (constType != null)
+                        {
+                            var intProp = constType.GetProperty("InternalPath", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                            intProp?.SetValue(null, smapiInternalDir);
+                            for (Type? t = constType; t != null; t = t.BaseType)
+                            {
+                                var ipf = t.GetField("<InternalPath>k__BackingField", BindingFlags.NonPublic | BindingFlags.Static)
+                                       ?? t.GetField("_internalPath", BindingFlags.NonPublic | BindingFlags.Static)
+                                       ?? t.GetField("InternalPath", BindingFlags.NonPublic | BindingFlags.Static);
+                                if (ipf != null)
+                                {
+                                    ipf.SetValue(null, smapiInternalDir);
+                                    EngineLogger.Log($"[GameHost] Overrode Constants.InternalPath = {smapiInternalDir}");
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] InternalPath redirect warning: {ex.Message}");
+                    }
 
                     // Register SMAPI internal assembly resolver if available
                     try
@@ -969,46 +999,14 @@ namespace SDViOS.Loader
                     EngineLogger.Log($"[GameHost] Check: {g.GetType().Name}.IsActive = {act}");
                 }
 
-                // 6. Create modern CADisplayLink driving iOSGamePlatform.Tick() with Direct Render Fallback
+                // 6. Create modern CADisplayLink driving game tick & direct render pipeline
                 if (plat != null && _engineDisplayLink == null)
                 {
-                    var tickMethod = plat.GetType().GetMethod("Tick", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                     EngineLogger.Log("[GameHost] Creating modern CADisplayLink for game tick pipeline...");
                     _engineDisplayLink = CoreAnimation.CADisplayLink.Create(() =>
                     {
                         ReviveSMAPILogFile(SMAPICoreInstance);
-                        ReviveGraphicsDeviceAndInstances(runner, plat, null, _activeGameView);
-                        bool directFallback = false;
-                        try
-                        {
-                            if (_tickLogCount < 5)
-                            {
-                                _tickLogCount++;
-                                EngineLogger.Log($"[GameHost] CADisplayLink tick #{_tickLogCount} executing...");
-                            }
-                            if (tickMethod != null)
-                            {
-                                tickMethod.Invoke(plat, null);
-                            }
-                            else
-                            {
-                                directFallback = true;
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            directFallback = true;
-                            if (_tickLogCount < 10)
-                            {
-                                _tickLogCount++;
-                                EngineLogger.LogWarning($"[GameHost] plat.Tick() threw: {ex.InnerException ?? ex}. Engaging direct render pipeline.");
-                            }
-                        }
-
-                        if (directFallback)
-                        {
-                            ExecuteDirectGameTick(runner, plat, _activeGameView);
-                        }
+                        ExecuteDirectGameTick(runner, plat, _activeGameView);
                     });
                     try { _engineDisplayLink.PreferredFramesPerSecond = 60; } catch { }
                     _engineDisplayLink.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Common);
@@ -1093,6 +1091,26 @@ namespace SDViOS.Loader
             }
         }
 
+        private static int GetGame1Ticks()
+        {
+            try
+            {
+                if (_game1TicksField == null)
+                {
+                    var g1Type = AppDomain.CurrentDomain.GetAssemblies()
+                        .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
+                        .FirstOrDefault(t => t.FullName == "StardewValley.Game1");
+                    _game1TicksField = g1Type?.GetField("ticks", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                }
+                if (_game1TicksField != null)
+                {
+                    return Convert.ToInt32(_game1TicksField.GetValue(null));
+                }
+            }
+            catch { }
+            return -1;
+        }
+
         private static void ExecuteDirectGameTick(Game? runner, object? plat, UIView? gameView)
         {
             try
@@ -1130,7 +1148,21 @@ namespace SDViOS.Loader
                 // Revive graphics device, window viewController, and instance options
                 ReviveGraphicsDeviceAndInstances(runner, plat, null, gameView);
 
-                // 2. MakeCurrent on iOSGameView and verify window attachment
+                // 2. Introspect gameView on tick 0
+                if (_directTickCount == 0 && gameView != null)
+                {
+                    try
+                    {
+                        var methodNames = gameView.GetType().GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly).Select(m => m.Name).Distinct();
+                        EngineLogger.Log($"[GameHost] _activeGameView ({gameView.GetType().FullName}) methods: {string.Join(", ", methodNames)}");
+                        var fieldNames = gameView.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly).Select(f => $"{f.Name} ({f.FieldType.Name})");
+                        EngineLogger.Log($"[GameHost] _activeGameView fields: {string.Join(", ", fieldNames)}");
+                    }
+                    catch { }
+                }
+
+                // 3. MakeCurrent on iOSGameView and verify window attachment
+                bool makeCurrentSuccess = false;
                 if (gameView != null && gameView.Handle != IntPtr.Zero)
                 {
                     var kw = UIApplication.SharedApplication.KeyWindow ?? UIApplication.SharedApplication.Windows.FirstOrDefault(w => w != null);
@@ -1159,6 +1191,7 @@ namespace SDViOS.Loader
                     try
                     {
                         _makeCurrentMethod?.Invoke(gameView, null);
+                        makeCurrentSuccess = true;
                     }
                     catch (Exception ex)
                     {
@@ -1166,18 +1199,59 @@ namespace SDViOS.Loader
                     }
                 }
 
-                // 3. Tick Game (Runs SMAPI + Stardew Valley Update & Draw)
-                ReviveSMAPILogFile(SMAPICoreInstance);
-                if (runner.GraphicsDevice != null)
+                // 4. Diagnostic visual clear: on first 60 ticks, clear to CornflowerBlue so user sees active rendering
+                bool diagClearSuccess = false;
+                if (_directTickCount < 60 && runner.GraphicsDevice != null)
                 {
-                    runner.Tick();
-                }
-                else
-                {
-                    if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Skipping runner.Tick() because GraphicsDevice is null.");
+                    try
+                    {
+                        runner.GraphicsDevice.Clear(new Microsoft.Xna.Framework.Color(100, 149, 237));
+                        diagClearSuccess = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Diagnostic Clear error: {ex.Message}");
+                    }
                 }
 
-                // 4. Threading.Run
+                // 5. Tick Game (SMAPI + Stardew Valley Update & Draw)
+                ReviveSMAPILogFile(SMAPICoreInstance);
+                int ticksBefore = GetGame1Ticks();
+                bool platTickRan = false;
+                try
+                {
+                    if (plat != null)
+                    {
+                        var tickMethod = plat.GetType().GetMethod("Tick", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (tickMethod != null)
+                        {
+                            tickMethod.Invoke(plat, null);
+                            platTickRan = true;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] plat.Tick error: {ex.InnerException ?? ex}");
+                }
+
+                int ticksAfter = GetGame1Ticks();
+                bool runnerTickRan = false;
+                if (ticksAfter == ticksBefore && runner.GraphicsDevice != null)
+                {
+                    try
+                    {
+                        runner.Tick();
+                        runnerTickRan = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] runner.Tick error: {ex.InnerException ?? ex}");
+                    }
+                }
+                int finalTicks = GetGame1Ticks();
+
+                // 6. Threading.Run
                 if (_threadingRunMethod == null)
                 {
                     var threadingType = typeof(Game).Assembly.GetType("Microsoft.Xna.Framework.Threading");
@@ -1189,26 +1263,31 @@ namespace SDViOS.Loader
                 }
                 catch { }
 
-                // 5. Present GraphicsDevice
+                // 7. Present GraphicsDevice
+                bool gdPresentSuccess = false;
                 try
                 {
                     runner.GraphicsDevice?.Present();
+                    gdPresentSuccess = true;
                 }
                 catch (Exception ex)
                 {
                     if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Direct GraphicsDevice.Present error: {ex.Message}");
                 }
 
-                // 6. Present iOSGameView (SwapBuffers)
+                // 8. Present iOSGameView (SwapBuffers)
+                bool viewPresentSuccess = false;
                 if (gameView != null && gameView.Handle != IntPtr.Zero)
                 {
                     if (_presentMethod == null)
                     {
-                        _presentMethod = gameView.GetType().GetMethod("Present", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        _presentMethod = gameView.GetType().GetMethod("Present", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                      ?? gameView.GetType().GetMethod("SwapBuffers", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                     }
                     try
                     {
                         _presentMethod?.Invoke(gameView, null);
+                        viewPresentSuccess = true;
                     }
                     catch (Exception ex)
                     {
@@ -1216,15 +1295,30 @@ namespace SDViOS.Loader
                     }
                 }
 
-                if (_directTickCount < 5)
+                // 9. EAGLContext native renderbuffer presentation
+                bool eaglPresented = false;
+                try
+                {
+                    var currentCtx = OpenGLES.EAGLContext.CurrentContext;
+                    if (currentCtx != null)
+                    {
+                        eaglPresented = currentCtx.PresentRenderBuffer(36161); // 36161 = 0x8D41 = GL_RENDERBUFFER
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Direct EAGLContext.PresentRenderBuffer error: {ex.Message}");
+                }
+
+                if (_directTickCount < 10)
                 {
                     _directTickCount++;
-                    EngineLogger.Log($"[GameHost] Direct tick pipeline #{_directTickCount} executed successfully! (GD={runner.GraphicsDevice != null}, View={gameView != null})");
+                    EngineLogger.Log($"[GameHost] Frame #{_directTickCount}: MC={makeCurrentSuccess}, DiagClear={diagClearSuccess}, PlatTick={platTickRan}, RunnerTick={runnerTickRan}, G1.ticks={finalTicks}, GDPresent={gdPresentSuccess}, ViewPresent={viewPresentSuccess}, EAGLPresent={eaglPresented}, GD={runner.GraphicsDevice != null}, View={gameView != null}");
                 }
             }
             catch (Exception ex)
             {
-                if (_directTickCount < 10)
+                if (_directTickCount < 15)
                 {
                     _directTickCount++;
                     EngineLogger.LogError($"[GameHost] Direct tick pipeline error: {ex}");

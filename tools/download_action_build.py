@@ -18,19 +18,23 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.32-fix-view-hierarchy-detachment'
+version_name = 'v1.0.33-explicit-direct-render-pipeline'
 
-changelog_content = """Version: v1.0.32-fix-view-hierarchy-detachment
-Date: 2026-09-17
+changelog_content = """Version: v1.0.33-explicit-direct-render-pipeline
+Date: 2026-09-18
 
 Changes:
-1. Fix iOSGameView Ripping/Detachment from Active UIWindow:
-   - Prevented `_activeGameView.RemoveFromSuperview()` from executing if `_activeGameView` is already attached to the active window hierarchy.
-   - Prevents ripping `_activeGameView` out of `UIDropShadowView` and leaving it floating in unattached limbo with `Window=False`.
-2. Guard RootViewController.View Attachment:
-   - If `_activeGameView` is `RootViewController.View` but lost its superview or window connection, re-links `window.RootViewController = vc` and calls `window.MakeKeyAndVisible()`.
-3. Fallback KeyWindow Attachment in Direct Game Tick:
-   - Added direct attachment fallback in `ExecuteDirectGameTick()` to attach `gameView` directly to the key window if `gameView.Superview == null`.
+1. Unified Direct Render Pipeline in CADisplayLink:
+   - Fixed issue where `plat.Tick()` silently returned without calling `iOSGameView.MakeCurrent()`, `runner.Tick()`, or `iOSGameView.Present()`.
+   - CADisplayLink now directly invokes `ExecuteDirectGameTick()` on every frame.
+2. Verified Game Loop & Ticks:
+   - Tracks `Game1.ticks` before and after `plat.Tick()`; if `plat.Tick()` does not advance game time, directly calls `runner.Tick()` to ensure Update & Draw run.
+3. Diagnostic Visual Clear:
+   - On the first 60 frames, clears GraphicsDevice to CornflowerBlue (`Color(100, 149, 237)`) so the display link and OpenGL buffer swapping are visibly verified on the iOS screen even before game splash loads.
+4. Native EAGLContext Presentation:
+   - Explicitly invokes `EAGLContext.CurrentContext.PresentRenderBuffer(36161)` (GL_RENDERBUFFER) in addition to `iOSGameView.Present()` / `SwapBuffers()` and `GraphicsDevice.Present()`.
+5. Redirect SMAPI Internal Path:
+   - Redirected `SMAPI_INTERNAL_PATH` and `Constants.InternalPath` to `Documents/smapi-internal/` to eliminate crash marker sandbox violations (`deny(1) file-write-create`).
 """
 
 headers = {
