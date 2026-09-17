@@ -1188,6 +1188,7 @@ namespace SDViOS.Loader
             if (runner == null) return;
             try
             {
+                Microsoft.Xna.Framework.Graphics.GraphicsDevice? currentGD = runner.GraphicsDevice;
                 var effectiveVC = vc ?? _activeGameVC;
                 if (plat != null && effectiveVC != null)
                 {
@@ -1311,7 +1312,7 @@ namespace SDViOS.Loader
                     }
 
                     var gdField = gdmType.GetField("_graphicsDevice", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                    var currentGD = gdField?.GetValue(gdm) as Microsoft.Xna.Framework.Graphics.GraphicsDevice;
+                    currentGD = (gdField?.GetValue(gdm) as Microsoft.Xna.Framework.Graphics.GraphicsDevice) ?? currentGD;
 
                     if (currentGD == null)
                     {
