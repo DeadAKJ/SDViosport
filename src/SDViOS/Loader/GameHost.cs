@@ -1091,6 +1091,33 @@ namespace SDViOS.Loader
             }
         }
 
+        private static object? GetPrimaryGame1Instance()
+        {
+            try
+            {
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    var runnerType = asm.GetType("StardewValley.GameRunner");
+                    if (runnerType != null)
+                    {
+                        var instanceField = runnerType.GetField("instance", BindingFlags.Static | BindingFlags.Public);
+                        var runner = instanceField?.GetValue(null);
+                        if (runner != null)
+                        {
+                            var instField = runner.GetType().GetField("gameInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                         ?? runner.GetType().BaseType?.GetField("gameInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            if (instField?.GetValue(runner) is System.Collections.IList list && list.Count > 0)
+                            {
+                                return list[0];
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
         private static int GetGame1Ticks()
         {
             try
@@ -1100,15 +1127,75 @@ namespace SDViOS.Loader
                     var g1Type = AppDomain.CurrentDomain.GetAssemblies()
                         .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
                         .FirstOrDefault(t => t.FullName == "StardewValley.Game1");
-                    _game1TicksField = g1Type?.GetField("ticks", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                    _game1TicksField = g1Type?.GetField("ticks", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                                    ?? g1Type?.GetField("ticks", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                 }
                 if (_game1TicksField != null)
                 {
-                    return Convert.ToInt32(_game1TicksField.GetValue(null));
+                    object? target = _game1TicksField.IsStatic ? null : GetPrimaryGame1Instance();
+                    if (_game1TicksField.IsStatic || target != null)
+                    {
+                        return Convert.ToInt32(_game1TicksField.GetValue(target));
+                    }
                 }
             }
             catch { }
             return -1;
+        }
+
+        private static void IntrospectGameState(Game? runner, object? core)
+        {
+            try
+            {
+                EngineLogger.Log("=== Game State Introspection ===");
+                if (core != null)
+                {
+                    var ct = core.GetType();
+                    foreach (var f in ct.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                    {
+                        if (f.FieldType == typeof(bool) || f.FieldType.IsPrimitive || f.FieldType == typeof(string) || f.FieldType.IsEnum)
+                        {
+                            try { EngineLogger.Log($"[SMAPI SCore] {f.Name} = {f.GetValue(core)}"); } catch { }
+                        }
+                    }
+                }
+
+                if (runner != null)
+                {
+                    var rt = runner.GetType();
+                    var instField = rt.GetField("gameInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                 ?? rt.BaseType?.GetField("gameInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (instField?.GetValue(runner) is System.Collections.IList instances)
+                    {
+                        EngineLogger.Log($"[GameRunner] gameInstances.Count = {instances.Count}");
+                        for (int i = 0; i < instances.Count; i++)
+                        {
+                            var inst = instances[i];
+                            if (inst == null) continue;
+                            EngineLogger.Log($"[GameRunner] instance[{i}]: {inst.GetType().FullName}");
+                        }
+                    }
+                    else
+                    {
+                        EngineLogger.LogWarning("[GameRunner] gameInstances is null or not IList!");
+                    }
+                }
+
+                var g1Type = AppDomain.CurrentDomain.GetAssemblies()
+                    .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
+                    .FirstOrDefault(t => t.FullName == "StardewValley.Game1");
+                if (g1Type != null)
+                {
+                    var menuProp = g1Type.GetProperty("activeClickableMenu", BindingFlags.Public | BindingFlags.Static);
+                    var modeField = g1Type.GetField("gameMode", BindingFlags.Public | BindingFlags.Static);
+                    EngineLogger.Log($"[Game1 State] gameMode = {modeField?.GetValue(null)}, activeClickableMenu = {menuProp?.GetValue(null)?.GetType().FullName ?? "null"}");
+                }
+                EngineLogger.Log("================================");
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[GameHost] IntrospectGameState error: {ex.Message}");
+            }
         }
 
         private static void ExecuteDirectGameTick(Game? runner, object? plat, UIView? gameView)
@@ -1148,17 +1235,21 @@ namespace SDViOS.Loader
                 // Revive graphics device, window viewController, and instance options
                 ReviveGraphicsDeviceAndInstances(runner, plat, null, gameView);
 
-                // 2. Introspect gameView on tick 0
-                if (_directTickCount == 0 && gameView != null)
+                // 2. Introspect gameView and game state on tick 0
+                if (_directTickCount == 0)
                 {
-                    try
+                    if (gameView != null)
                     {
-                        var methodNames = gameView.GetType().GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly).Select(m => m.Name).Distinct();
-                        EngineLogger.Log($"[GameHost] _activeGameView ({gameView.GetType().FullName}) methods: {string.Join(", ", methodNames)}");
-                        var fieldNames = gameView.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly).Select(f => $"{f.Name} ({f.FieldType.Name})");
-                        EngineLogger.Log($"[GameHost] _activeGameView fields: {string.Join(", ", fieldNames)}");
+                        try
+                        {
+                            var methodNames = gameView.GetType().GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly).Select(m => m.Name).Distinct();
+                            EngineLogger.Log($"[GameHost] _activeGameView ({gameView.GetType().FullName}) methods: {string.Join(", ", methodNames)}");
+                            var fieldNames = gameView.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly).Select(f => $"{f.Name} ({f.FieldType.Name})");
+                            EngineLogger.Log($"[GameHost] _activeGameView fields: {string.Join(", ", fieldNames)}");
+                        }
+                        catch { }
                     }
-                    catch { }
+                    IntrospectGameState(runner, SMAPICoreInstance);
                 }
 
                 // 3. MakeCurrent on iOSGameView and verify window attachment
@@ -1199,22 +1290,7 @@ namespace SDViOS.Loader
                     }
                 }
 
-                // 4. Diagnostic visual clear: on first 60 ticks, clear to CornflowerBlue so user sees active rendering
-                bool diagClearSuccess = false;
-                if (_directTickCount < 60 && runner.GraphicsDevice != null)
-                {
-                    try
-                    {
-                        runner.GraphicsDevice.Clear(new Microsoft.Xna.Framework.Color(100, 149, 237));
-                        diagClearSuccess = true;
-                    }
-                    catch (Exception ex)
-                    {
-                        if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Diagnostic Clear error: {ex.Message}");
-                    }
-                }
-
-                // 5. Tick Game (SMAPI + Stardew Valley Update & Draw)
+                // 4. Tick Game (SMAPI + Stardew Valley Update & Draw)
                 ReviveSMAPILogFile(SMAPICoreInstance);
                 int ticksBefore = GetGame1Ticks();
                 bool platTickRan = false;
@@ -1251,7 +1327,7 @@ namespace SDViOS.Loader
                 }
                 int finalTicks = GetGame1Ticks();
 
-                // 6. Threading.Run
+                // 5. Threading.Run
                 if (_threadingRunMethod == null)
                 {
                     var threadingType = typeof(Game).Assembly.GetType("Microsoft.Xna.Framework.Threading");
@@ -1262,6 +1338,22 @@ namespace SDViOS.Loader
                     _threadingRunMethod?.Invoke(null, null);
                 }
                 catch { }
+
+                // 6. Diagnostic visual clear: on first 30 ticks, clear to CornflowerBlue AFTER runner.Tick()
+                // so GameRunner.Draw's initial black clear cannot overwrite it before presentation!
+                bool diagClearSuccess = false;
+                if (_directTickCount < 30 && runner.GraphicsDevice != null)
+                {
+                    try
+                    {
+                        runner.GraphicsDevice.Clear(new Microsoft.Xna.Framework.Color(100, 149, 237));
+                        diagClearSuccess = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Diagnostic Clear error: {ex.Message}");
+                    }
+                }
 
                 // 7. Present GraphicsDevice
                 bool gdPresentSuccess = false;
@@ -1842,6 +1934,24 @@ namespace SDViOS.Loader
         {
             public NonDisposingStreamWriter(Stream stream, System.Text.Encoding encoding) : base(stream, encoding) { }
 
+            public override void WriteLine(string? value)
+            {
+                base.WriteLine(value);
+                try
+                {
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        EngineLogger.Log($"[SMAPI] {value}");
+                    }
+                }
+                catch { }
+            }
+
+            public override void Write(string? value)
+            {
+                base.Write(value);
+            }
+
             protected override void Dispose(bool disposing)
             {
                 try { Flush(); } catch { }
@@ -1873,6 +1983,24 @@ namespace SDViOS.Loader
                         var stream = streamField?.GetValue(lfm) as StreamWriter;
                         var pathProp = lfm.GetType().GetProperty("Path", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                         string? logPath = pathProp?.GetValue(lfm) as string;
+
+                        // Redirect SMAPI log from hidden .config folder to visible Documents/ErrorLogs/SMAPI-latest.txt
+                        string visibleLogPath = Path.Combine(LogsDir, "SMAPI-latest.txt");
+                        if (logPath != visibleLogPath && !string.IsNullOrEmpty(LogsDir))
+                        {
+                            try
+                            {
+                                pathProp?.SetValue(lfm, visibleLogPath);
+                                for (Type? t = lfm.GetType(); t != null; t = t.BaseType)
+                                {
+                                    var pf = t.GetField("<Path>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance)
+                                          ?? t.GetField("_path", BindingFlags.NonPublic | BindingFlags.Instance);
+                                    pf?.SetValue(lfm, visibleLogPath);
+                                }
+                                logPath = visibleLogPath;
+                            }
+                            catch { }
+                        }
 
                         bool needsRevival = false;
                         if (stream == null || !(stream is NonDisposingStreamWriter))

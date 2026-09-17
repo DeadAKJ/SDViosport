@@ -18,23 +18,22 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.33-explicit-direct-render-pipeline'
+version_name = 'v1.0.34-unblock-game1-loop'
 
-changelog_content = """Version: v1.0.33-explicit-direct-render-pipeline
+changelog_content = """Version: v1.0.34-unblock-game1-loop
 Date: 2026-09-18
 
 Changes:
-1. Unified Direct Render Pipeline in CADisplayLink:
-   - Fixed issue where `plat.Tick()` silently returned without calling `iOSGameView.MakeCurrent()`, `runner.Tick()`, or `iOSGameView.Present()`.
-   - CADisplayLink now directly invokes `ExecuteDirectGameTick()` on every frame.
-2. Verified Game Loop & Ticks:
-   - Tracks `Game1.ticks` before and after `plat.Tick()`; if `plat.Tick()` does not advance game time, directly calls `runner.Tick()` to ensure Update & Draw run.
-3. Diagnostic Visual Clear:
-   - On the first 60 frames, clears GraphicsDevice to CornflowerBlue (`Color(100, 149, 237)`) so the display link and OpenGL buffer swapping are visibly verified on the iOS screen even before game splash loads.
-4. Native EAGLContext Presentation:
-   - Explicitly invokes `EAGLContext.CurrentContext.PresentRenderBuffer(36161)` (GL_RENDERBUFFER) in addition to `iOSGameView.Present()` / `SwapBuffers()` and `GraphicsDevice.Present()`.
-5. Redirect SMAPI Internal Path:
-   - Redirected `SMAPI_INTERNAL_PATH` and `Constants.InternalPath` to `Documents/smapi-internal/` to eliminate crash marker sandbox violations (`deny(1) file-write-create`).
+1. Move Diagnostic Clear Post-Tick:
+   - Cornflower Blue clear (`Color(100, 149, 237)`) on frames 1-30 now executes immediately BEFORE `GraphicsDevice.Present()`.
+   - Prevents `GameRunner.Draw()` from overwriting the diagnostic clear with black during initial loading.
+2. SMAPI Log Echo & Direct Path Redirection:
+   - `NonDisposingStreamWriter.WriteLine` now echoes every SMAPI log line directly to `EngineLogger.Log("[SMAPI] ...")`.
+   - Redirected `SMAPI-latest.txt` to visible `Documents/ErrorLogs/` instead of hidden `.config/`.
+3. Game State Introspection:
+   - On frame 1, dumps `SCore` flags, `GameRunner.gameInstances.Count`, instance types, and `Game1` state (`gameMode`, `activeClickableMenu`).
+4. Resilient `GetGame1Ticks()`:
+   - Supports reading `ticks` as either static or instance field from `gameInstances[0]`.
 """
 
 headers = {
