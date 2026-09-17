@@ -18,21 +18,23 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.29-fix-window-subviews-and-spritebatch-auto-end'
+version_name = 'v1.0.30-attach-gameview-hierarchy-and-present'
 
-changelog_content = """Version: v1.0.29-fix-window-subviews-and-spritebatch-auto-end
+changelog_content = """Version: v1.0.30-attach-gameview-hierarchy-and-present
 Date: 2026-09-17
 
 Changes:
-1. Binary Patch MonoGame.Framework.dll (SpriteBatch.Begin Auto-End):
-   - Patched SpriteBatch.Begin IL bytecode to automatically call End() if _beginCalled is true instead of throwing InvalidOperationException("Begin cannot be called again until End has been successfully called").
-   - Permanently eliminates the crash in renderScreenBuffer when SMAPI or previous draw cycles left the SpriteBatch begun.
-2. Fix UIWindow Subviews Stripping (Black Screen Root Cause):
-   - Removed the sv.RemoveFromSuperview() call on UIWindow.Subviews so iOS root view containers are never detached, preserving device rendering.
-   - Retained, laid out, and set Hidden=false for all UIWindow subviews in landscape mode.
-3. Retain and Synchronize Active UIViewController:
-   - Statically cached _activeGameVC in GameHost and synchronized both iOSGamePlatform._viewController and iOSGameWindow._viewController across ticks.
-   - Prevents iOSGamePlatform.Tick() NullReferenceException when accessing _viewController.View.MakeCurrent().
+1. Attach _activeGameView Directly to Active UIWindow Hierarchy:
+   - Detached _activeGameView from any previous/stale UIWindow, bound vc.View = _activeGameView, and explicitly added it to the active UIWindow / RootViewController.View hierarchy with BringSubviewToFront.
+   - Guaranteed _activeGameView.Window points to the active UIWindow attached to the live UIWindowScene, enabling the iOS Quartz compositor to present the CAEAGLLayer.
+2. Ensure CAEAGLLayer Properties & DidMoveToWindow Notification:
+   - Synchronized ContentScaleFactor and Layer.ContentsScale with UIScreen.MainScreen.Scale.
+   - Set Layer.Opaque = true, Layer.Hidden = false, and invoked DidMoveToWindow() prior to DestroyFramebuffer/CreateFramebuffer so OpenGLES binds to the live screen window.
+3. Recursive View Hierarchy Audit & Tick Liveness Guard:
+   - Added LogViewHierarchy() recursive diagnostic audit printing the complete hierarchy tree and window attachment states.
+   - Added liveness check in direct tick pipeline to re-attach gameView if ever detached.
+4. Correct LocalMultiplayerWindow Dimensions:
+   - Scaled localMultiplayerWindow to full native backbuffer dimensions (1792x828) instead of half-resolution.
 """
 
 headers = {

@@ -642,7 +642,33 @@ namespace SDViOS.Loader
                 var landscapeFrame = new CGRect(0, 0, screenW, screenH);
                 EngineLogger.Log($"[GameHost] Target landscape frame: {landscapeFrame.Width}x{landscapeFrame.Height}");
 
-                // 4. Scene attachment & Window Recreation
+                // 4. Scene attachment, Window Recreation & GameView Hierarchy Attachment
+                if (_activeGameView != null && _activeGameView.Superview != null)
+                {
+                    try
+                    {
+                        _activeGameView.RemoveFromSuperview();
+                        EngineLogger.Log("[GameHost] Detached _activeGameView from previous superview.");
+                    }
+                    catch (Exception ex)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] Detach _activeGameView: {ex.Message}");
+                    }
+                }
+
+                if (vc != null && _activeGameView != null && vc.View != _activeGameView)
+                {
+                    try
+                    {
+                        vc.View = _activeGameView;
+                        EngineLogger.Log("[GameHost] Assigned vc.View = _activeGameView.");
+                    }
+                    catch (Exception ex)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] Setting vc.View: {ex.Message}");
+                    }
+                }
+
                 bool windowNeedsRecreation = window == null || window.Bounds.IsEmpty || window.Bounds.Width <= 0 || window.Bounds.Height <= 0;
                 if (activeScene != null && windowNeedsRecreation)
                 {
@@ -727,8 +753,8 @@ namespace SDViOS.Loader
                     }
                 }
 
-                // Ensure _activeGameView is sized, visible, and has its OpenGL framebuffer allocated
-                if (_activeGameView != null)
+                // Ensure _activeGameView is directly attached into active window hierarchy, visible, and has its OpenGL framebuffer allocated
+                if (_activeGameView != null && window != null)
                 {
                     try
                     {
@@ -737,7 +763,40 @@ namespace SDViOS.Loader
                         _activeGameView.Frame = landscapeFrame;
                         _activeGameView.Bounds = landscapeFrame;
                         _activeGameView.Hidden = false;
+                        _activeGameView.Alpha = 1.0f;
                         _activeGameView.Opaque = true;
+                        _activeGameView.UserInteractionEnabled = true;
+
+                        var scale = window.Screen?.Scale ?? UIScreen.MainScreen.Scale;
+                        if (scale <= 0) scale = 2.0f;
+                        _activeGameView.ContentScaleFactor = scale;
+
+                        if (_activeGameView.Layer != null)
+                        {
+                            _activeGameView.Layer.Hidden = false;
+                            _activeGameView.Layer.Opaque = true;
+                            _activeGameView.Layer.Frame = landscapeFrame;
+                            _activeGameView.Layer.Bounds = landscapeFrame;
+                            _activeGameView.Layer.ContentsScale = scale;
+                        }
+
+                        // Attach into active window view hierarchy
+                        var targetParent = window.RootViewController?.View ?? window;
+                        if (_activeGameView.Superview != targetParent)
+                        {
+                            _activeGameView.RemoveFromSuperview();
+                            targetParent.AddSubview(_activeGameView);
+                            targetParent.BringSubviewToFront(_activeGameView);
+                            EngineLogger.Log($"[GameHost] Attached _activeGameView to {targetParent.GetType().Name}. (Window={_activeGameView.Window != null})");
+                        }
+                        else
+                        {
+                            targetParent.BringSubviewToFront(_activeGameView);
+                        }
+
+                        // Notify DidMoveToWindow so MonoGame initializes scale and context
+                        var didMoveMethod = _activeGameView.GetType().GetMethod("DidMoveToWindow", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        didMoveMethod?.Invoke(_activeGameView, null);
 
                         // Explicitly recreate / allocate framebuffer with the active landscape frame
                         var destroyFbMethod = _activeGameView.GetType().GetMethod("DestroyFramebuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
@@ -749,7 +808,7 @@ namespace SDViOS.Loader
                         var cbField = _activeGameView.GetType().GetField("_colorbuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                         var fbId = fbField?.GetValue(_activeGameView);
                         var cbId = cbField?.GetValue(_activeGameView);
-                        EngineLogger.Log($"[GameHost] _activeGameView Framebuffer: _framebuffer={fbId}, _colorbuffer={cbId}, Layer.Bounds={_activeGameView.Layer.Bounds.Width}x{_activeGameView.Layer.Bounds.Height}");
+                        EngineLogger.Log($"[GameHost] _activeGameView Framebuffer: _framebuffer={fbId}, _colorbuffer={cbId}, Layer.Bounds={_activeGameView.Layer.Bounds.Width}x{_activeGameView.Layer.Bounds.Height}, Superview={_activeGameView.Superview?.GetType().Name}, Window={_activeGameView.Window != null}");
                     }
                     catch (Exception ex)
                     {
@@ -934,44 +993,20 @@ namespace SDViOS.Loader
                 // 7. Revive GraphicsDevice, iOSGameWindow, and Game1 instances
                 ReviveGraphicsDeviceAndInstances(runner, plat, vc, _activeGameView);
 
-                // 8. Force View Layout & OpenGL Framebuffer Allocation
+                // 8. Force View Layout, OpenGL Framebuffer Allocation & View Hierarchy Audit
                 if (window != null)
                 {
                     try
                     {
                         window.SetNeedsLayout();
                         window.LayoutIfNeeded();
-                        var subviews = window.Subviews;
-                        EngineLogger.Log($"[GameHost] window.Subviews count: {subviews?.Length ?? 0}");
-                        if (subviews != null)
-                        {
-                            foreach (var sv in subviews)
-                            {
-                                if (sv == null) continue;
-
-                                try
-                                {
-                                    sv.DangerousRetain();
-                                    sv.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
-                                    sv.Frame = landscapeFrame;
-                                    sv.Bounds = landscapeFrame;
-                                    sv.Hidden = false;
-                                    sv.SetNeedsLayout();
-                                    sv.LayoutIfNeeded();
-                                    var lsMethod = sv.GetType().GetMethod("LayoutSubviews", BindingFlags.Public | BindingFlags.Instance);
-                                    lsMethod?.Invoke(sv, null);
-                                    EngineLogger.Log($"[GameHost] Subview {sv.GetType().Name}: Frame={sv.Frame}, Hidden={sv.Hidden}");
-                                }
-                                catch (Exception ex)
-                                {
-                                    EngineLogger.LogWarning($"[GameHost] Subview layout error: {ex.Message}");
-                                }
-                            }
-                        }
+                        EngineLogger.Log($"[GameHost] === Window View Hierarchy Audit (Bounds={window.Bounds}, Frame={window.Frame}, Key={window.IsKeyWindow}) ===");
+                        LogViewHierarchy(window, 0);
+                        EngineLogger.Log("[GameHost] ===================================================================");
                     }
                     catch (Exception ex)
                     {
-                        EngineLogger.LogWarning($"[GameHost] LayoutSubviews error: {ex.Message}");
+                        EngineLogger.LogWarning($"[GameHost] LayoutSubviews / Hierarchy Audit error: {ex.Message}");
                     }
 
                     EngineLogger.Log($"[GameHost] Window: Bounds={window.Bounds}, Frame={window.Frame}, Hidden={window.Hidden}, Key={window.IsKeyWindow}");
@@ -995,6 +1030,26 @@ namespace SDViOS.Loader
             catch (Exception ex)
             {
                 EngineLogger.LogError($"[GameHost] LinkGameWindowToScene failed: {ex}");
+            }
+        }
+
+        private static void LogViewHierarchy(UIView? view, int depth)
+        {
+            if (view == null) return;
+            string indent = new string(' ', depth * 2);
+            string superType = view.Superview != null ? view.Superview.GetType().Name : "none";
+            string winDesc = view.Window != null ? $"Window(Key={view.Window.IsKeyWindow})" : "none";
+            string isGV = (view == _activeGameView) ? " [ACTIVE_GAME_VIEW]" : "";
+            EngineLogger.Log($"[GameHost] {indent}-> [{view.GetType().FullName}]{isGV} Frame={view.Frame}, Bounds={view.Bounds}, Hidden={view.Hidden}, Alpha={view.Alpha}, Opaque={view.Opaque}, Superview={superType}, Window={winDesc}, Subviews={view.Subviews?.Length ?? 0}");
+            if (view.Subviews != null)
+            {
+                foreach (var child in view.Subviews)
+                {
+                    if (child != null)
+                    {
+                        LogViewHierarchy(child, depth + 1);
+                    }
+                }
             }
         }
 
@@ -1035,9 +1090,19 @@ namespace SDViOS.Loader
                 // Revive graphics device, window viewController, and instance options
                 ReviveGraphicsDeviceAndInstances(runner, plat, null, gameView);
 
-                // 2. MakeCurrent on iOSGameView
+                // 2. MakeCurrent on iOSGameView and verify window attachment
                 if (gameView != null && gameView.Handle != IntPtr.Zero)
                 {
+                    var kw = UIApplication.SharedApplication.KeyWindow ?? UIApplication.SharedApplication.Windows.FirstOrDefault(w => w != null);
+                    if (gameView.Window == null && kw != null)
+                    {
+                        if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Direct tick: gameView detached from window! Re-attaching...");
+                        gameView.RemoveFromSuperview();
+                        var targetParent = kw.RootViewController?.View ?? kw;
+                        targetParent.AddSubview(gameView);
+                        targetParent.BringSubviewToFront(gameView);
+                    }
+
                     if (_makeCurrentMethod == null)
                     {
                         _makeCurrentMethod = gameView.GetType().GetMethod("MakeCurrent", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
@@ -1405,11 +1470,15 @@ namespace SDViOS.Loader
                         var lmwField = instType.GetField("localMultiplayerWindow", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                         if (lmwField != null)
                         {
+                            var currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
+                            int targetW = (currentGD != null && currentGD.PresentationParameters.BackBufferWidth > 0) ? currentGD.PresentationParameters.BackBufferWidth : 1792;
+                            int targetH = (currentGD != null && currentGD.PresentationParameters.BackBufferHeight > 0) ? currentGD.PresentationParameters.BackBufferHeight : 828;
+
                             var rect = (Rectangle)(lmwField.GetValue(inst) ?? Rectangle.Empty);
-                            if (rect.Width <= 0 || rect.Height <= 0)
+                            if (rect.Width <= 0 || rect.Height <= 0 || (rect.Width == 896 && targetW > 896))
                             {
-                                lmwField.SetValue(inst, new Rectangle(0, 0, 896, 414));
-                                EngineLogger.Log("[GameHost] Initialized instance localMultiplayerWindow to 896x414");
+                                lmwField.SetValue(inst, new Rectangle(0, 0, targetW, targetH));
+                                EngineLogger.Log($"[GameHost] Initialized instance localMultiplayerWindow to {targetW}x{targetH}");
                             }
                         }
 
