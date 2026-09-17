@@ -1470,7 +1470,7 @@ namespace SDViOS.Loader
                         var lmwField = instType.GetField("localMultiplayerWindow", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                         if (lmwField != null)
                         {
-                            var currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
+                            currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
                             int targetW = (currentGD != null && currentGD.PresentationParameters.BackBufferWidth > 0) ? currentGD.PresentationParameters.BackBufferWidth : 1792;
                             int targetH = (currentGD != null && currentGD.PresentationParameters.BackBufferHeight > 0) ? currentGD.PresentationParameters.BackBufferHeight : 828;
 
@@ -1534,7 +1534,7 @@ namespace SDViOS.Loader
                         }
 
                         // Ensure instance _screen and _uiScreen render targets are allocated
-                        var currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
+                        currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
                         if (currentGD != null)
                         {
                             int targetW = currentGD.PresentationParameters.BackBufferWidth > 0 ? currentGD.PresentationParameters.BackBufferWidth : 1792;
@@ -1600,7 +1600,7 @@ namespace SDViOS.Loader
                             var sbObj = sbField.GetValue(null);
                             if (sbObj == null)
                             {
-                                var currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
+                                currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
                                 if (currentGD != null)
                                 {
                                     var sb = new Microsoft.Xna.Framework.Graphics.SpriteBatch(currentGD);
@@ -1626,7 +1626,7 @@ namespace SDViOS.Loader
                     var ddvField = game1Type.GetField("defaultDeviceViewport", BindingFlags.Static | BindingFlags.Public);
                     if (ddvField != null)
                     {
-                        var currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
+                        currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
                         int vpW = (currentGD != null && currentGD.PresentationParameters.BackBufferWidth > 0) ? currentGD.PresentationParameters.BackBufferWidth : 1792;
                         int vpH = (currentGD != null && currentGD.PresentationParameters.BackBufferHeight > 0) ? currentGD.PresentationParameters.BackBufferHeight : 828;
 
