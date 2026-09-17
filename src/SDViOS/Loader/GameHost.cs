@@ -511,14 +511,9 @@ namespace SDViOS.Loader
                 }
 
                 // 2. Locate UIWindow and UIViewController
+                // 2. Locate or instantiate UIViewController and iOSGameView
                 UIWindow? window = null;
                 UIViewController? vc = null;
-
-                if (runner != null)
-                {
-                    window = runner.Services.GetService(typeof(UIWindow)) as UIWindow;
-                    vc = runner.Services.GetService(typeof(UIViewController)) as UIViewController;
-                }
 
                 if (plat != null)
                 {
@@ -537,45 +532,66 @@ namespace SDViOS.Loader
                     }
                 }
 
-                if (window == null)
+                if (runner != null)
                 {
-                    foreach (var w in UIApplication.SharedApplication.Windows)
-                    {
-                        if (w != null)
-                        {
-                            window = w;
-                            if (vc == null) vc = w.RootViewController;
-                            break;
-                        }
-                    }
+                    if (window == null) window = runner.Services.GetService(typeof(UIWindow)) as UIWindow;
+                    if (vc == null) vc = runner.Services.GetService(typeof(UIViewController)) as UIViewController;
                 }
 
-                if (vc == null && window?.RootViewController != null)
+                // If vc is still null on plat, instantiate iOSGameViewController(plat)
+                if (plat != null && vc == null)
                 {
-                    vc = window.RootViewController;
-                }
-
-                // Discover _activeGameView if not yet cached
-                if (_activeGameView == null || _activeGameView.Handle == IntPtr.Zero)
-                {
-                    if (window?.Subviews != null)
+                    for (Type? t = plat.GetType(); t != null; t = t.BaseType)
                     {
-                        foreach (var sv in window.Subviews)
+                        var vcf = t.GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        if (vcf != null)
                         {
-                            if (sv != null && (sv.GetType().Name.Contains("GameView") || sv.GetType().FullName.Contains("iOSGameView")))
+                            try
                             {
-                                _activeGameView = sv;
-                                EngineLogger.Log($"[GameHost] Discovered _activeGameView in window.Subviews: {sv.GetType().FullName}");
-                                break;
+                                var newVC = Activator.CreateInstance(vcf.FieldType, new object[] { plat }) as UIViewController;
+                                if (newVC != null)
+                                {
+                                    vcf.SetValue(plat, newVC);
+                                    vc = newVC;
+                                    EngineLogger.Log($"[GameHost] Instantiated and assigned new {vcf.FieldType.FullName} to plat._viewController");
+                                    break;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                EngineLogger.LogWarning($"[GameHost] Could not instantiate {vcf.FieldType.FullName}: {ex.Message}");
                             }
                         }
                     }
-                    if (_activeGameView == null && vc?.View != null)
+                }
+
+                // Discover _activeGameView from vc.View
+                if (vc != null)
+                {
+                    try
                     {
-                        if (vc.View.GetType().Name.Contains("GameView") || vc.View.GetType().FullName.Contains("iOSGameView"))
+                        var gv = vc.View;
+                        if (gv != null && (gv.GetType().Name.Contains("GameView") || gv.GetType().FullName.Contains("iOSGameView")))
                         {
-                            _activeGameView = vc.View;
-                            EngineLogger.Log($"[GameHost] Discovered _activeGameView in vc.View: {vc.View.GetType().FullName}");
+                            _activeGameView = gv;
+                            EngineLogger.Log($"[GameHost] Discovered _activeGameView from vc.View: {gv.GetType().FullName}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] Querying vc.View: {ex.Message}");
+                    }
+                }
+
+                if (_activeGameView == null && window?.Subviews != null)
+                {
+                    foreach (var sv in window.Subviews)
+                    {
+                        if (sv != null && (sv.GetType().Name.Contains("GameView") || sv.GetType().FullName.Contains("iOSGameView")))
+                        {
+                            _activeGameView = sv;
+                            EngineLogger.Log($"[GameHost] Discovered _activeGameView in window.Subviews: {sv.GetType().FullName}");
+                            break;
                         }
                     }
                 }
@@ -623,15 +639,6 @@ namespace SDViOS.Loader
                         {
                             try { vc.DangerousRetain(); } catch { }
                             newWindow.RootViewController = vc;
-                            if (vc.View != null)
-                            {
-                                try { vc.View.DangerousRetain(); } catch { }
-                                vc.View.Frame = landscapeFrame;
-                                vc.View.Bounds = landscapeFrame;
-                                vc.View.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
-                                vc.View.Hidden = false;
-                                newWindow.AddSubview(vc.View);
-                            }
                         }
 
                         newWindow.MakeKeyAndVisible();
@@ -642,6 +649,11 @@ namespace SDViOS.Loader
                         {
                             try { runner.Services.RemoveService(typeof(UIWindow)); } catch { }
                             runner.Services.AddService(typeof(UIWindow), newWindow);
+                            if (vc != null)
+                            {
+                                try { runner.Services.RemoveService(typeof(UIViewController)); } catch { }
+                                runner.Services.AddService(typeof(UIViewController), vc);
+                            }
                         }
 
                         // Update plat._mainWindow
@@ -674,32 +686,29 @@ namespace SDViOS.Loader
                     window.Frame = landscapeFrame;
                     window.Bounds = landscapeFrame;
                     window.Hidden = false;
-                    window.MakeKeyAndVisible();
 
                     if (vc != null)
                     {
                         try { vc.DangerousRetain(); } catch { }
-                        if (window.RootViewController == null)
+                        if (window.RootViewController != vc)
                         {
                             window.RootViewController = vc;
                         }
-                        if (vc.View != null)
-                        {
-                            try { vc.View.DangerousRetain(); } catch { }
-                            vc.View.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
-                            vc.View.Frame = landscapeFrame;
-                            vc.View.Bounds = landscapeFrame;
-                            vc.View.Hidden = false;
-                            if (!window.Subviews.Contains(vc.View))
-                            {
-                                window.AddSubview(vc.View);
-                            }
-                        }
+                    }
+                    window.MakeKeyAndVisible();
+                }
+
+                if (window != null && UIApplication.SharedApplication.Delegate is AppDelegate appDelegate)
+                {
+                    if (appDelegate.Window != window)
+                    {
+                        appDelegate.Window = window;
+                        EngineLogger.Log("[GameHost] Set AppDelegate.Window to UIWindow.");
                     }
                 }
 
-                // Ensure _activeGameView is in window hierarchy and brought to front
-                if (window != null && _activeGameView != null)
+                // Ensure _activeGameView is sized, visible, and has its OpenGL framebuffer allocated
+                if (_activeGameView != null)
                 {
                     try
                     {
@@ -709,24 +718,22 @@ namespace SDViOS.Loader
                         _activeGameView.Bounds = landscapeFrame;
                         _activeGameView.Hidden = false;
                         _activeGameView.Opaque = true;
-                        if (!window.Subviews.Contains(_activeGameView))
-                        {
-                            window.AddSubview(_activeGameView);
-                        }
-                        window.BringSubviewToFront(_activeGameView);
+
+                        // Explicitly recreate / allocate framebuffer with the active landscape frame
+                        var destroyFbMethod = _activeGameView.GetType().GetMethod("DestroyFramebuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        var createFbMethod = _activeGameView.GetType().GetMethod("CreateFramebuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        destroyFbMethod?.Invoke(_activeGameView, null);
+                        createFbMethod?.Invoke(_activeGameView, null);
+
+                        var fbField = _activeGameView.GetType().GetField("_framebuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        var cbField = _activeGameView.GetType().GetField("_colorbuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        var fbId = fbField?.GetValue(_activeGameView);
+                        var cbId = cbField?.GetValue(_activeGameView);
+                        EngineLogger.Log($"[GameHost] _activeGameView Framebuffer: _framebuffer={fbId}, _colorbuffer={cbId}, Layer.Bounds={_activeGameView.Layer.Bounds.Width}x{_activeGameView.Layer.Bounds.Height}");
                     }
                     catch (Exception ex)
                     {
-                        EngineLogger.LogWarning($"[GameHost] _activeGameView window attachment warning: {ex.Message}");
-                    }
-                }
-
-                if (window != null && UIApplication.SharedApplication.Delegate is AppDelegate appDelegate)
-                {
-                    if (appDelegate.Window != window)
-                    {
-                        appDelegate.Window = window;
-                        EngineLogger.Log("[GameHost] Set AppDelegate.Window to UIWindow.");
+                        EngineLogger.LogWarning($"[GameHost] _activeGameView layout / framebuffer error: {ex.Message}");
                     }
                 }
 
@@ -777,86 +784,25 @@ namespace SDViOS.Loader
                         }
                     }
 
-                    // Inspect and repair _viewController on plat
-                    FieldInfo? vcf = null;
-                    for (Type? t = plat.GetType(); t != null; t = t.BaseType)
+                    // Synchronize iOSGameWindow._viewController if present
+                    try
                     {
-                        vcf = t.GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                        if (vcf != null) break;
-                    }
-
-                    object? platVC = vcf?.GetValue(plat);
-                    EngineLogger.Log($"[GameHost] Current plat._viewController: {platVC?.GetType().FullName ?? "null"}");
-
-                    if (platVC == null)
-                    {
-                        if (vc != null && vcf != null && vcf.FieldType.IsInstanceOfType(vc))
+                        var winField = plat.GetType().GetField("_window", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)
+                                    ?? plat.GetType().BaseType?.GetField("_window", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                        var pWindow = winField?.GetValue(plat);
+                        if (pWindow != null)
                         {
-                            vcf.SetValue(plat, vc);
-                            platVC = vc;
-                            EngineLogger.Log($"[GameHost] Assigned vc to plat._viewController ({vc.GetType().FullName})");
-                        }
-                        else if (vcf != null)
-                        {
-                            try
+                            var wVcf = pWindow.GetType().GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            if (wVcf != null && vc != null && wVcf.GetValue(pWindow) != vc)
                             {
-                                var newVC = Activator.CreateInstance(vcf.FieldType, new object[] { plat });
-                                if (newVC != null)
-                                {
-                                    vcf.SetValue(plat, newVC);
-                                    platVC = newVC;
-                                    EngineLogger.Log($"[GameHost] Created and assigned new {vcf.FieldType.FullName} to plat._viewController");
-                                    if (newVC is UIViewController createdUIVC && window != null)
-                                    {
-                                        window.RootViewController = createdUIVC;
-                                    }
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                EngineLogger.LogWarning($"[GameHost] Could not instantiate {vcf.FieldType.FullName}: {ex.Message}");
+                                wVcf.SetValue(pWindow, vc);
+                                EngineLogger.Log($"[GameHost] Synchronized iOSGameWindow._viewController to {vc.GetType().FullName}");
                             }
                         }
                     }
-
-                    // If platVC is a UIViewController, make sure its View points to _activeGameView
-                    if (platVC is UIViewController pvc)
+                    catch (Exception ex)
                     {
-                        try
-                        {
-                            if (_activeGameView != null && pvc.View != _activeGameView)
-                            {
-                                pvc.View = _activeGameView;
-                                EngineLogger.Log("[GameHost] Connected _activeGameView to plat._viewController.View");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            EngineLogger.LogWarning($"[GameHost] Set plat._viewController.View warning: {ex.Message}");
-                        }
-
-                        // Also synchronize iOSGameWindow._viewController if present
-                        try
-                        {
-                            var winField = plat.GetType().GetField("_window", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)
-                                        ?? plat.GetType().BaseType?.GetField("_window", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                            var pWindow = winField?.GetValue(plat);
-                            if (pWindow != null)
-                            {
-                                var wVcf = pWindow.GetType().GetField("_viewController", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                                if (wVcf != null && wVcf.GetValue(pWindow) == null)
-                                {
-                                    wVcf.SetValue(pWindow, pvc);
-                                    EngineLogger.Log($"[GameHost] Synchronized iOSGameWindow._viewController to {pvc.GetType().FullName}");
-                                }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            EngineLogger.LogWarning($"[GameHost] Set iOSGameWindow._viewController warning: {ex.Message}");
-                        }
-                    }
-
+                        EngineLogger.LogWarning($"[GameHost] Set iOSGameWindow._viewController warning: {ex.Message}");
                     try
                     {
                         var didBecomeAct = plat.GetType().GetMethod("Application_DidBecomeActive", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
@@ -937,7 +883,7 @@ namespace SDViOS.Loader
                             if (_tickLogCount < 10)
                             {
                                 _tickLogCount++;
-                                EngineLogger.LogWarning($"[GameHost] plat.Tick() threw: {ex.InnerException?.GetType().Name}: {ex.InnerException?.Message}. Engaging direct render pipeline.");
+                                EngineLogger.LogWarning($"[GameHost] plat.Tick() threw: {ex.InnerException ?? ex}. Engaging direct render pipeline.");
                             }
                         }
 
@@ -979,6 +925,14 @@ namespace SDViOS.Loader
                         {
                             foreach (var sv in subviews)
                             {
+                                if (sv == null) continue;
+                                if (sv != _activeGameView && sv != vc?.View && sv.GetType() == typeof(UIView))
+                                {
+                                    sv.RemoveFromSuperview();
+                                    EngineLogger.Log($"[GameHost] Removed obscuring dummy {sv.GetType().FullName} subview from window.");
+                                    continue;
+                                }
+
                                 try
                                 {
                                     sv.DangerousRetain();
@@ -1536,20 +1490,28 @@ namespace SDViOS.Loader
                     }
                 }
 
-                // 5. Ensure Game1.spriteBatch is valid
+                // 5. Ensure Game1.spriteBatch is valid and reset if left begun
                 if (game1Type != null)
                 {
                     try
                     {
                         var sbField = game1Type.GetField("spriteBatch", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-                        if (sbField != null && sbField.GetValue(null) == null)
+                        if (sbField != null)
                         {
-                            var currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
-                            if (currentGD != null)
+                            var sbObj = sbField.GetValue(null);
+                            if (sbObj == null)
                             {
-                                var sb = new Microsoft.Xna.Framework.Graphics.SpriteBatch(currentGD);
-                                sbField.SetValue(null, sb);
-                                EngineLogger.Log("[GameHost] Initialized Game1.spriteBatch static instance.");
+                                var currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
+                                if (currentGD != null)
+                                {
+                                    var sb = new Microsoft.Xna.Framework.Graphics.SpriteBatch(currentGD);
+                                    sbField.SetValue(null, sb);
+                                    EngineLogger.Log("[GameHost] Initialized Game1.spriteBatch static instance.");
+                                }
+                            }
+                            else if (sbObj is Microsoft.Xna.Framework.Graphics.SpriteBatch sbInstance)
+                            {
+                                Input.TouchOverlay.SafeResetSpriteBatch(sbInstance);
                             }
                         }
                     }
@@ -1559,17 +1521,21 @@ namespace SDViOS.Loader
                     }
                 }
 
-                // 6. Ensure Game1.defaultDeviceViewport is valid
+                // 6. Ensure Game1.defaultDeviceViewport is valid and matches graphics backbuffer
                 if (game1Type != null)
                 {
                     var ddvField = game1Type.GetField("defaultDeviceViewport", BindingFlags.Static | BindingFlags.Public);
                     if (ddvField != null)
                     {
+                        var currentGD = runner.GraphicsDevice ?? (gdm as GraphicsDeviceManager)?.GraphicsDevice;
+                        int vpW = (currentGD != null && currentGD.PresentationParameters.BackBufferWidth > 0) ? currentGD.PresentationParameters.BackBufferWidth : 1792;
+                        int vpH = (currentGD != null && currentGD.PresentationParameters.BackBufferHeight > 0) ? currentGD.PresentationParameters.BackBufferHeight : 828;
+
                         var vp = (Microsoft.Xna.Framework.Graphics.Viewport)(ddvField.GetValue(null) ?? default(Microsoft.Xna.Framework.Graphics.Viewport));
                         if (vp.Width <= 0 || vp.Height <= 0)
                         {
-                            ddvField.SetValue(null, new Microsoft.Xna.Framework.Graphics.Viewport(0, 0, 896, 414));
-                            EngineLogger.Log("[GameHost] Initialized Game1.defaultDeviceViewport to 896x414");
+                            ddvField.SetValue(null, new Microsoft.Xna.Framework.Graphics.Viewport(0, 0, vpW, vpH));
+                            EngineLogger.Log($"[GameHost] Initialized Game1.defaultDeviceViewport to {vpW}x{vpH}");
                         }
                     }
                 }

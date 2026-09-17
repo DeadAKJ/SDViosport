@@ -1,4 +1,4 @@
-using System;
+using System.Reflection;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using SDViOS.Diagnostics;
@@ -9,6 +9,26 @@ namespace SDViOS.Input
     {
         private SpriteBatch? _spriteBatch;
         private bool _padInitialized;
+        private static FieldInfo? _sbBeginCalledField;
+
+        public static void SafeResetSpriteBatch(SpriteBatch? sb)
+        {
+            if (sb == null) return;
+            try
+            {
+                if (_sbBeginCalledField == null)
+                {
+                    _sbBeginCalledField = typeof(SpriteBatch).GetField("_beginCalled", BindingFlags.NonPublic | BindingFlags.Instance);
+                }
+
+                if (_sbBeginCalledField != null && (bool)(_sbBeginCalledField.GetValue(sb) ?? false))
+                {
+                    try { sb.End(); } catch { }
+                    _sbBeginCalledField.SetValue(sb, false);
+                }
+            }
+            catch { }
+        }
 
         public TouchOverlay(Game game) : base(game)
         {
@@ -84,15 +104,31 @@ namespace SDViOS.Input
 
             if (_spriteBatch != null && _padInitialized)
             {
+                SafeResetSpriteBatch(_spriteBatch);
+                bool began = false;
                 try
                 {
                     _spriteBatch.Begin(SpriteSortMode.Deferred, BlendState.AlphaBlend);
+                    began = true;
                     TouchVirtualPad.Instance.Draw(_spriteBatch);
-                    _spriteBatch.End();
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Ignore transient draw errors during scene transitions
+                    EngineLogger.LogWarning($"[TouchOverlay] Error in Draw: {ex.Message}");
+                }
+                finally
+                {
+                    if (began)
+                    {
+                        try
+                        {
+                            _spriteBatch.End();
+                        }
+                        catch
+                        {
+                            SafeResetSpriteBatch(_spriteBatch);
+                        }
+                    }
                 }
             }
 
