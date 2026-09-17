@@ -645,14 +645,25 @@ namespace SDViOS.Loader
                 // 4. Scene attachment, Window Recreation & GameView Hierarchy Attachment
                 if (_activeGameView != null && _activeGameView.Superview != null)
                 {
-                    try
+                    // CRITICAL: NEVER detach _activeGameView if it is already in the active window hierarchy!
+                    // Detaching it when window.RootViewController.View is _activeGameView rips it out of UIDropShadowView,
+                    // leaving it orphaned with Superview=null and Window=null.
+                    bool belongsToCurrentWindow = window != null && _activeGameView.Window != null && (_activeGameView.Window == window || _activeGameView.Window.Handle == window.Handle);
+                    if (!belongsToCurrentWindow)
                     {
-                        _activeGameView.RemoveFromSuperview();
-                        EngineLogger.Log("[GameHost] Detached _activeGameView from previous superview.");
+                        try
+                        {
+                            _activeGameView.RemoveFromSuperview();
+                            EngineLogger.Log("[GameHost] Detached _activeGameView from stale/foreign superview.");
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] Detach _activeGameView: {ex.Message}");
+                        }
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        EngineLogger.LogWarning($"[GameHost] Detach _activeGameView: {ex.Message}");
+                        EngineLogger.Log($"[GameHost] Preserving _activeGameView hierarchy inside current window (Superview={_activeGameView.Superview.GetType().Name}).");
                     }
                 }
 
@@ -786,7 +797,15 @@ namespace SDViOS.Loader
 
                         if (isRootView)
                         {
-                            EngineLogger.Log($"[GameHost] _activeGameView is already RootViewController.View. (Window={_activeGameView.Window != null})");
+                            EngineLogger.Log($"[GameHost] _activeGameView is already RootViewController.View. (Window={_activeGameView.Window != null}, Superview={_activeGameView.Superview?.GetType().Name})");
+                            if (_activeGameView.Superview == null || _activeGameView.Window == null)
+                            {
+                                // If UIKit detached the root view or hasn't embedded it into window yet, ensure window has it or re-trigger RootViewController assignment
+                                EngineLogger.LogWarning("[GameHost] _activeGameView is RootViewController.View but has NO Superview/Window! Re-linking window.RootViewController...");
+                                window.RootViewController = null;
+                                window.RootViewController = vc;
+                                window.MakeKeyAndVisible();
+                            }
                             _activeGameView.Superview?.BringSubviewToFront(_activeGameView);
                         }
                         else if (_activeGameView.Superview != targetParent)
@@ -1120,10 +1139,16 @@ namespace SDViOS.Loader
                         var targetParent = kw.RootViewController?.View ?? kw;
                         if (targetParent != null && targetParent != gameView && targetParent.Handle != gameView.Handle)
                         {
-                            if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Direct tick: gameView detached from window! Re-attaching...");
+                            if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Direct tick: gameView detached from window! Re-attaching to targetParent...");
                             gameView.RemoveFromSuperview();
                             targetParent.AddSubview(gameView);
                             targetParent.BringSubviewToFront(gameView);
+                        }
+                        else if (gameView.Superview == null)
+                        {
+                            if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Direct tick: gameView has no superview! Adding directly to key window...");
+                            kw.AddSubview(gameView);
+                            kw.BringSubviewToFront(gameView);
                         }
                     }
 

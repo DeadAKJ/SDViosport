@@ -18,22 +18,19 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.31-fix-self-subview-and-landscape-framebuffer'
+version_name = 'v1.0.32-fix-view-hierarchy-detachment'
 
-changelog_content = """Version: v1.0.31-fix-self-subview-and-landscape-framebuffer
+changelog_content = """Version: v1.0.32-fix-view-hierarchy-detachment
 Date: 2026-09-17
 
 Changes:
-1. Fix NSInvalidArgumentException 'Can't add self as subview':
-   - Guarded targetParent.AddSubview(_activeGameView) by checking both object and native handle identity (`targetParent != _activeGameView && targetParent.Handle != _activeGameView.Handle`).
-   - Prevented fatal UIKit exception that aborted framebuffer allocation and left OpenGLES drawing into framebuffer 0.
-2. Force Landscape Orientations on iOSGameViewController:
-   - Configured `SupportedOrientations = DisplayOrientation.LandscapeLeft | DisplayOrientation.LandscapeRight`.
-   - Prevented portrait (828x1792) viewport orientation on initial view layout.
-3. Synchronize Landscape Viewport & Display Dimensions:
-   - Forced landscape width and height (1792x828) into GraphicsDevice.Viewport and MonoGame internal fields.
-4. Enhanced View Hierarchy Diagnostic Logging:
-   - Added native Objective-C ClassName printing and handle comparison to pinpoint active game view attachment.
+1. Fix iOSGameView Ripping/Detachment from Active UIWindow:
+   - Prevented `_activeGameView.RemoveFromSuperview()` from executing if `_activeGameView` is already attached to the active window hierarchy.
+   - Prevents ripping `_activeGameView` out of `UIDropShadowView` and leaving it floating in unattached limbo with `Window=False`.
+2. Guard RootViewController.View Attachment:
+   - If `_activeGameView` is `RootViewController.View` but lost its superview or window connection, re-links `window.RootViewController = vc` and calls `window.MakeKeyAndVisible()`.
+3. Fallback KeyWindow Attachment in Direct Game Tick:
+   - Added direct attachment fallback in `ExecuteDirectGameTick()` to attach `gameView` directly to the key window if `gameView.Superview == null`.
 """
 
 headers = {
