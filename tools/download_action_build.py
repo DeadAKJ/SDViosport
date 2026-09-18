@@ -18,20 +18,20 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.40-smapi-platform-and-viewport-guard'
+version_name = 'v1.0.41-fix-console-color-platform-not-supported'
 
-changelog_content = """Version: v1.0.40-smapi-platform-and-viewport-guard
+changelog_content = """Version: v1.0.41-fix-console-color-platform-not-supported
 Date: 2026-09-18
 
 Changes:
-1. SMAPI Platform Override:
-   - Overrode Constants.Platform, Constants.TargetPlatform, and EarlyConstants.Platform to Platform.Windows (3) via reflection.
-   - Bypasses SMAPI's OS platform check ("Oops! You're running Windows, but this version of SMAPI is for Linux or macOS. Please reinstall SMAPI to fix this.") which caused SCore to halt immediately on iOS.
-2. Viewport & Window Size Sync Guard:
-   - Guarded SetWindowSize(1792, 828) to run once at startup rather than repeatedly at 60 FPS in the render loop.
-   - Guarded activeClickableMenu gameWindowSizeChanged layout sync to run once upon menu initialization.
-   - Hardened RenderTarget2D screen and uiScreen checks so render targets are never repeatedly reallocated.
+1. Fix Console.BackgroundColor PlatformNotSupportedException:
+   - When SMAPI was set to Platform.Windows, ColorfulConsoleWriter attempted to detect the terminal background color via Console.BackgroundColor when ConsoleColorScheme was AutoDetect.
+   - On iOS, Console.BackgroundColor throws PlatformNotSupportedException, crashing SMAPI initialization during SCore constructor.
+   - Fixed by setting ConsoleColorScheme to 'DarkBackground' across config.json, config.user.json, and Mods/SMAPI-config.json, which bypasses Console.BackgroundColor entirely.
+2. Fix Constants.InternalFilesPath Redirection:
+   - Corrected reflection field lookup from 'InternalPath' to 'InternalFilesPath' on both Constants and EarlyConstants so SMAPI correctly resolves smapi-internal in DocumentsDir.
 """
+
 
 
 headers = {

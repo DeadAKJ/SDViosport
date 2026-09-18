@@ -263,7 +263,7 @@ namespace SDViOS.Loader
                     var smapiAsm = Assembly.LoadFrom(smapiPath);
                     System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
 
-                    // Redirect SMAPI Constants.InternalPath and Constants.LogDir to Documents to prevent sandbox violations
+                    // Redirect SMAPI Constants.InternalFilesPath and Constants.LogDir to Documents to prevent sandbox violations
                     try
                     {
                         var constType = smapiAsm.GetType("StardewModdingAPI.Constants");
@@ -271,13 +271,15 @@ namespace SDViOS.Loader
                         {
                             for (Type? t = constType; t != null; t = t.BaseType)
                             {
-                                var ipf = t.GetField("<InternalPath>k__BackingField", BindingFlags.NonPublic | BindingFlags.Static)
+                                var ipf = t.GetField("InternalFilesPath", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                                       ?? t.GetField("<InternalFilesPath>k__BackingField", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                                       ?? t.GetField("<InternalPath>k__BackingField", BindingFlags.NonPublic | BindingFlags.Static)
                                        ?? t.GetField("_internalPath", BindingFlags.NonPublic | BindingFlags.Static)
                                        ?? t.GetField("InternalPath", BindingFlags.NonPublic | BindingFlags.Static);
                                 if (ipf != null)
                                 {
                                     ipf.SetValue(null, smapiInternalDir);
-                                    EngineLogger.Log($"[GameHost] Overrode Constants.InternalPath = {smapiInternalDir}");
+                                    EngineLogger.Log($"[GameHost] Overrode Constants.{ipf.Name} = {smapiInternalDir}");
                                 }
                             }
 
@@ -328,6 +330,14 @@ namespace SDViOS.Loader
                         {
                             for (Type? t = earlyConstType; t != null; t = t.BaseType)
                             {
+                                var eipf = t.GetField("InternalFilesPath", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                                        ?? t.GetField("<InternalFilesPath>k__BackingField", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                                if (eipf != null)
+                                {
+                                    eipf.SetValue(null, smapiInternalDir);
+                                    EngineLogger.Log($"[GameHost] Overrode EarlyConstants.{eipf.Name} = {smapiInternalDir}");
+                                }
+
                                 var epf = t.GetField("<Platform>k__BackingField", BindingFlags.NonPublic | BindingFlags.Static)
                                        ?? t.GetField("_platform", BindingFlags.NonPublic | BindingFlags.Static)
                                        ?? t.GetField("Platform", BindingFlags.NonPublic | BindingFlags.Static);
@@ -339,11 +349,55 @@ namespace SDViOS.Loader
                                 }
                             }
                         }
+
+                        // Ensure SMAPI config uses ConsoleColorScheme = DarkBackground.
+                        // When Platform is Windows, AutoDetect calls Console.BackgroundColor which throws PlatformNotSupportedException on iOS.
+                        string[] internalDirs = new string[]
+                        {
+                            smapiInternalDir,
+                            Path.Combine(DocumentsDir, "smapi-internal"),
+                            Path.Combine(GameRootDir, "smapi-internal"),
+                            Path.Combine(BundleDir, "smapi-internal")
+                        };
+                        foreach (var dir in internalDirs)
+                        {
+                            if (string.IsNullOrEmpty(dir)) continue;
+                            try
+                            {
+                                Directory.CreateDirectory(dir);
+                                string userConfigPath = Path.Combine(dir, "config.user.json");
+                                File.WriteAllText(userConfigPath, "{\"ConsoleColorScheme\":\"DarkBackground\",\"ListenForConsoleInput\":false,\"CheckForUpdates\":false,\"CheckForBlacklistUpdates\":false}");
+
+                                string configPath = Path.Combine(dir, "config.json");
+                                if (File.Exists(configPath))
+                                {
+                                    string cfg = File.ReadAllText(configPath);
+                                    if (cfg.Contains("\"AutoDetect\""))
+                                    {
+                                        cfg = cfg.Replace("\"AutoDetect\"", "\"DarkBackground\"");
+                                        File.WriteAllText(configPath, cfg);
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+
+                        if (!string.IsNullOrEmpty(ModsDir))
+                        {
+                            try
+                            {
+                                Directory.CreateDirectory(ModsDir);
+                                string smapiConfigPath = Path.Combine(ModsDir, "SMAPI-config.json");
+                                File.WriteAllText(smapiConfigPath, "{\"ConsoleColorScheme\":\"DarkBackground\",\"ListenForConsoleInput\":false,\"CheckForUpdates\":false,\"CheckForBlacklistUpdates\":false}");
+                            }
+                            catch { }
+                        }
                     }
                     catch (Exception ex)
                     {
                         EngineLogger.LogWarning($"[GameHost] Constants redirect warning: {ex.Message}");
                     }
+
 
 
                     // Register SMAPI internal assembly resolver if available
