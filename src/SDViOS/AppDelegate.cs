@@ -34,8 +34,19 @@ namespace SDViOS
 
                 if (GameHost.TryFindGameBinary(out string sdvPath, out _))
                 {
-                    EngineLogger.Log($"Game files located at: {sdvPath}. Launching...");
-                    GameHost.Launch(Array.Empty<string>());
+                    EngineLogger.Log($"Game files located at: {sdvPath}. Scheduling launch on main runloop...");
+                    UIApplication.SharedApplication.BeginInvokeOnMainThread(() =>
+                    {
+                        try
+                        {
+                            GameHost.Launch(Array.Empty<string>());
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogFatal("GameHost Launch on MainThread", ex);
+                            ShowErrorScreen(ex);
+                        }
+                    });
                 }
                 else
                 {

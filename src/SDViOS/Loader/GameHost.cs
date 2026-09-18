@@ -8,6 +8,16 @@ using UIKit;
 using SDViOS.Diagnostics;
 using SDViOS.Input;
 
+// Global-namespace HarmonySharedState to satisfy 0Harmony.dll Type.GetType("HarmonySharedState", false).
+// If this type is present, Harmony completely skips dynamic module emission via Mono.Cecil and Assembly.Load(byte[]),
+// which otherwise crashes on iOS AOT / W^X environment.
+public static class HarmonySharedState
+{
+    public static int version = 102;
+    public static System.Collections.Generic.Dictionary<System.Reflection.MethodBase, byte[]> state = new();
+    public static System.Collections.Generic.Dictionary<System.Reflection.MethodInfo, System.Reflection.MethodBase> originals = new();
+}
+
 namespace SDViOS.Loader
 {
     public static class GameHost
@@ -172,6 +182,12 @@ namespace SDViOS.Loader
                 if (args.Name == "Mono.Runtime" || args.Name.StartsWith("Mono.Runtime,"))
                 {
                     return typeof(GameHost).Assembly;
+                }
+
+                if (args.Name == "HarmonySharedState" || args.Name.StartsWith("HarmonySharedState,"))
+                {
+                    EngineLogger.Log($"[TypeResolve] Resolved '{args.Name}' -> returning typeof(HarmonySharedState).Assembly ({typeof(HarmonySharedState).Assembly.GetName().Name})");
+                    return typeof(HarmonySharedState).Assembly;
                 }
 
                 // If a type failed to resolve because of a trimmed or forwarded assembly,

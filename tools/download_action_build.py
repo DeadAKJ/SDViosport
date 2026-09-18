@@ -18,18 +18,18 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.41-fix-console-color-platform-not-supported'
+version_name = 'v1.0.42-fix-harmony-shared-state'
 
-changelog_content = """Version: v1.0.41-fix-console-color-platform-not-supported
+changelog_content = """Version: v1.0.42-fix-harmony-shared-state
 Date: 2026-09-18
 
 Changes:
-1. Fix Console.BackgroundColor PlatformNotSupportedException:
-   - When SMAPI was set to Platform.Windows, ColorfulConsoleWriter attempted to detect the terminal background color via Console.BackgroundColor when ConsoleColorScheme was AutoDetect.
-   - On iOS, Console.BackgroundColor throws PlatformNotSupportedException, crashing SMAPI initialization during SCore constructor.
-   - Fixed by setting ConsoleColorScheme to 'DarkBackground' across config.json, config.user.json, and Mods/SMAPI-config.json, which bypasses Console.BackgroundColor entirely.
-2. Fix Constants.InternalFilesPath Redirection:
-   - Corrected reflection field lookup from 'InternalPath' to 'InternalFilesPath' on both Constants and EarlyConstants so SMAPI correctly resolves smapi-internal in DocumentsDir.
+1. Provide Pre-defined HarmonySharedState:
+   - HarmonyLib uses Type.GetType("HarmonySharedState", false) to share state across patchers.
+   - When unresolved, Harmony falls back to dynamic assembly emission via Mono.Cecil and Assembly.Load(byte[]), which crashes or triggers runtime aborts on iOS AOT/W^X environment.
+   - Defined HarmonySharedState in the global namespace with version=102, state, and originals dictionaries, and resolved it in AppDomain.CurrentDomain.TypeResolve, bypassing Cecil dynamic module generation completely.
+2. iOS Watchdog Launch Protection:
+   - Dispatched GameHost.Launch onto the main runloop via UIApplication.SharedApplication.BeginInvokeOnMainThread, allowing FinishedLaunching to return true immediately and eliminating the 15-second iOS SpringBoard watchdog termination (0x8badf00d).
 """
 
 
