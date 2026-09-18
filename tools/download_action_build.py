@@ -18,22 +18,24 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.34-unblock-game1-loop'
+version_name = 'v1.0.35-smapi-echo-clean-present'
 
-changelog_content = """Version: v1.0.34-unblock-game1-loop
+changelog_content = """Version: v1.0.35-smapi-echo-clean-present
 Date: 2026-09-18
 
 Changes:
-1. Move Diagnostic Clear Post-Tick:
-   - Cornflower Blue clear (`Color(100, 149, 237)`) on frames 1-30 now executes immediately BEFORE `GraphicsDevice.Present()`.
-   - Prevents `GameRunner.Draw()` from overwriting the diagnostic clear with black during initial loading.
-2. SMAPI Log Echo & Direct Path Redirection:
-   - `NonDisposingStreamWriter.WriteLine` now echoes every SMAPI log line directly to `EngineLogger.Log("[SMAPI] ...")`.
-   - Redirected `SMAPI-latest.txt` to visible `Documents/ErrorLogs/` instead of hidden `.config/`.
-3. Game State Introspection:
-   - On frame 1, dumps `SCore` flags, `GameRunner.gameInstances.Count`, instance types, and `Game1` state (`gameMode`, `activeClickableMenu`).
-4. Resilient `GetGame1Ticks()`:
-   - Supports reading `ticks` as either static or instance field from `gameInstances[0]`.
+1. Complete SMAPI Log Capture:
+   - Implemented buffered stream intercepts on `Write(string)`, `Write(char[])`, and `Write(char)`.
+   - Captures all SMAPI internal logs (`Stream.Write` calls) and flushes them directly into `engine-latest.log`.
+2. SCore Revival & ExitState Reset:
+   - Pre-sets `Program._sdk = NullSDKHelper` to prevent Steam/Galaxy native crashes during initialization.
+   - Resets `SCore.ExitState = None (0)`, `IsGameRunning = true`, and `IsDisposed = false` post-launch.
+   - Automatically invokes `SCore.InitializeBeforeFirstAssetLoaded()` if initialization was interrupted.
+3. Clean Single Double-Buffer Presentation:
+   - Replaced duplicate triple `Present` calls with a single `runner.GraphicsDevice.Present()`.
+   - Fixes OpenGL backbuffer flickering and presentation corruption.
+4. CoreLib Forwarding:
+   - Added AssemblyResolve forwarding for `System.Private.CoreLib` to eliminate unresolved type warnings.
 """
 
 headers = {

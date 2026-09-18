@@ -162,6 +162,11 @@ namespace SDViOS.Loader
 
             AppDomain.CurrentDomain.TypeResolve += (sender, args) =>
             {
+                if (args.Name == "System.Private.CoreLib" || args.Name.StartsWith("System.Private.CoreLib,"))
+                {
+                    return typeof(object).Assembly;
+                }
+
                 // If a type failed to resolve because of a trimmed or forwarded assembly,
                 // scan loaded assemblies (like System.Private.Xml) for the type.
                 foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
@@ -251,7 +256,7 @@ namespace SDViOS.Loader
                     var smapiAsm = Assembly.LoadFrom(smapiPath);
                     System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
 
-                    // Redirect SMAPI Constants.InternalPath to Documents to prevent sandbox violations
+                    // Redirect SMAPI Constants.InternalPath and Constants.LogDir to Documents to prevent sandbox violations
                     try
                     {
                         var constType = smapiAsm.GetType("StardewModdingAPI.Constants");
@@ -270,11 +275,28 @@ namespace SDViOS.Loader
                                     EngineLogger.Log($"[GameHost] Overrode Constants.InternalPath = {smapiInternalDir}");
                                 }
                             }
+
+                            if (!string.IsNullOrEmpty(LogsDir))
+                            {
+                                var logProp = constType.GetProperty("LogDir", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                                logProp?.SetValue(null, LogsDir);
+                                for (Type? t = constType; t != null; t = t.BaseType)
+                                {
+                                    var lpf = t.GetField("<LogDir>k__BackingField", BindingFlags.NonPublic | BindingFlags.Static)
+                                           ?? t.GetField("_logDir", BindingFlags.NonPublic | BindingFlags.Static)
+                                           ?? t.GetField("LogDir", BindingFlags.NonPublic | BindingFlags.Static);
+                                    if (lpf != null)
+                                    {
+                                        lpf.SetValue(null, LogsDir);
+                                        EngineLogger.Log($"[GameHost] Overrode Constants.LogDir = {LogsDir}");
+                                    }
+                                }
+                            }
                         }
                     }
                     catch (Exception ex)
                     {
-                        EngineLogger.LogWarning($"[GameHost] InternalPath redirect warning: {ex.Message}");
+                        EngineLogger.LogWarning($"[GameHost] Constants redirect warning: {ex.Message}");
                     }
 
                     // Register SMAPI internal assembly resolver if available
@@ -328,6 +350,28 @@ namespace SDViOS.Loader
                         // 2. Install NonDisposingStreamWriter on SMAPI LogFileManager before launch
                         ReviveSMAPILogFile(core);
 
+                        // Pre-set Program._sdk to NullSDKHelper to prevent Steam/Galaxy native crashes during initialization
+                        try
+                        {
+                            var sdvAsm = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "Stardew Valley");
+                            var progType = sdvAsm?.GetType("StardewValley.Program");
+                            var nullSdkType = sdvAsm?.GetType("StardewValley.SDKs.NullSDKHelper");
+                            if (progType != null && nullSdkType != null)
+                            {
+                                var sdkField = progType.GetField("_sdk", BindingFlags.NonPublic | BindingFlags.Static);
+                                if (sdkField != null)
+                                {
+                                    var nullSdk = Activator.CreateInstance(nullSdkType);
+                                    sdkField.SetValue(null, nullSdk);
+                                    EngineLogger.Log("[GameHost] Pre-initialized Program._sdk to NullSDKHelper.");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] Failed to pre-set NullSDKHelper: {ex.Message}");
+                        }
+
                         var runMethod = scoreType.GetMethod("RunInteractively", BindingFlags.Public | BindingFlags.Instance);
                         runMethod?.Invoke(core, null);
                         EngineLogger.Log("[GameHost] SMAPI SCore.RunInteractively launched successfully.");
@@ -351,11 +395,43 @@ namespace SDViOS.Loader
                                 }
                             }
 
+                            // Check and log SCore fields
+                            var exitStateField = scoreType.GetField("ExitState", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            var exitVal = exitStateField?.GetValue(core);
+                            var isInitField = scoreType.GetField("IsInitialized", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            var initVal = isInitField?.GetValue(core);
+                            EngineLogger.Log($"[GameHost] Post-RunInteractively SCore: ExitState={exitVal}, IsInitialized={initVal}");
+
+                            // If ExitState was set to Crash or GameExit, reset it to None (0) so game loop and asset interception aren't aborted!
+                            if (exitStateField != null && exitVal != null && (int)exitVal != 0)
+                            {
+                                exitStateField.SetValue(core, 0); // 0 = ExitState.None
+                                EngineLogger.Log($"[GameHost] Reset SCore.ExitState from {exitVal} to ExitState.None (0).");
+                            }
+
                             var isDispField = scoreType.GetField("IsDisposed", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                             isDispField?.SetValue(core, false);
 
                             var isRunningField = scoreType.GetField("IsGameRunning", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                             isRunningField?.SetValue(core, true);
+
+                            // If not initialized, trigger InitializeBeforeFirstAssetLoaded
+                            if (isInitField != null && false.Equals(initVal))
+                            {
+                                var initMethod = scoreType.GetMethod("InitializeBeforeFirstAssetLoaded", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                                if (initMethod != null)
+                                {
+                                    try
+                                    {
+                                        initMethod.Invoke(core, null);
+                                        EngineLogger.Log($"[GameHost] Invoked SCore.InitializeBeforeFirstAssetLoaded(). IsInitialized is now {isInitField.GetValue(core)}.");
+                                    }
+                                    catch (Exception initEx)
+                                    {
+                                        EngineLogger.LogWarning($"[GameHost] InitializeBeforeFirstAssetLoaded invocation warning: {initEx.Message}");
+                                    }
+                                }
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -1355,57 +1431,35 @@ namespace SDViOS.Loader
                     }
                 }
 
-                // 7. Present GraphicsDevice
+                // 7. Present cleanly (MonoGame GraphicsDevice.Present calls iOSGameView.Present -> SwapBuffers)
                 bool gdPresentSuccess = false;
                 try
                 {
-                    runner.GraphicsDevice?.Present();
-                    gdPresentSuccess = true;
-                }
-                catch (Exception ex)
-                {
-                    if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Direct GraphicsDevice.Present error: {ex.Message}");
-                }
-
-                // 8. Present iOSGameView (SwapBuffers)
-                bool viewPresentSuccess = false;
-                if (gameView != null && gameView.Handle != IntPtr.Zero)
-                {
-                    if (_presentMethod == null)
+                    if (runner.GraphicsDevice != null)
                     {
-                        _presentMethod = gameView.GetType().GetMethod("Present", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-                                      ?? gameView.GetType().GetMethod("SwapBuffers", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        runner.GraphicsDevice.Present();
+                        gdPresentSuccess = true;
                     }
-                    try
+                    else if (gameView != null && gameView.Handle != IntPtr.Zero)
                     {
+                        if (_presentMethod == null)
+                        {
+                            _presentMethod = gameView.GetType().GetMethod("Present", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                          ?? gameView.GetType().GetMethod("SwapBuffers", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        }
                         _presentMethod?.Invoke(gameView, null);
-                        viewPresentSuccess = true;
-                    }
-                    catch (Exception ex)
-                    {
-                        if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Direct iOSGameView.Present error: {ex.Message}");
-                    }
-                }
-
-                // 9. EAGLContext native renderbuffer presentation
-                bool eaglPresented = false;
-                try
-                {
-                    var currentCtx = OpenGLES.EAGLContext.CurrentContext;
-                    if (currentCtx != null)
-                    {
-                        eaglPresented = currentCtx.PresentRenderBuffer(36161); // 36161 = 0x8D41 = GL_RENDERBUFFER
+                        gdPresentSuccess = true;
                     }
                 }
                 catch (Exception ex)
                 {
-                    if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Direct EAGLContext.PresentRenderBuffer error: {ex.Message}");
+                    if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Presentation error: {ex.Message}");
                 }
 
                 if (_directTickCount < 10)
                 {
                     _directTickCount++;
-                    EngineLogger.Log($"[GameHost] Frame #{_directTickCount}: MC={makeCurrentSuccess}, DiagClear={diagClearSuccess}, PlatTick={platTickRan}, RunnerTick={runnerTickRan}, G1.ticks={finalTicks}, GDPresent={gdPresentSuccess}, ViewPresent={viewPresentSuccess}, EAGLPresent={eaglPresented}, GD={runner.GraphicsDevice != null}, View={gameView != null}");
+                    EngineLogger.Log($"[GameHost] Frame #{_directTickCount}: MC={makeCurrentSuccess}, DiagClear={diagClearSuccess}, PlatTick={platTickRan}, RunnerTick={runnerTickRan}, G1.ticks={finalTicks}, Present={gdPresentSuccess}, GD={runner.GraphicsDevice != null}, View={gameView != null}");
                 }
             }
             catch (Exception ex)
@@ -1932,6 +1986,8 @@ namespace SDViOS.Loader
 
         public class NonDisposingStreamWriter : StreamWriter
         {
+            private readonly System.Text.StringBuilder _buffer = new System.Text.StringBuilder();
+
             public NonDisposingStreamWriter(Stream stream, System.Text.Encoding encoding) : base(stream, encoding) { }
 
             public override void WriteLine(string? value)
@@ -1939,9 +1995,23 @@ namespace SDViOS.Loader
                 base.WriteLine(value);
                 try
                 {
-                    if (!string.IsNullOrEmpty(value))
+                    string fullLine;
+                    lock (_buffer)
                     {
-                        EngineLogger.Log($"[SMAPI] {value}");
+                        if (_buffer.Length > 0)
+                        {
+                            _buffer.Append(value ?? string.Empty);
+                            fullLine = _buffer.ToString();
+                            _buffer.Clear();
+                        }
+                        else
+                        {
+                            fullLine = value ?? string.Empty;
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(fullLine))
+                    {
+                        EngineLogger.Log($"[SMAPI] {fullLine}");
                     }
                 }
                 catch { }
@@ -1950,6 +2020,45 @@ namespace SDViOS.Loader
             public override void Write(string? value)
             {
                 base.Write(value);
+                if (string.IsNullOrEmpty(value)) return;
+                try
+                {
+                    lock (_buffer)
+                    {
+                        _buffer.Append(value);
+                        string str = _buffer.ToString();
+                        int lastNewline = str.LastIndexOf('\n');
+                        if (lastNewline >= 0)
+                        {
+                            string ready = str.Substring(0, lastNewline).TrimEnd('\r');
+                            _buffer.Remove(0, lastNewline + 1);
+                            foreach (var line in ready.Split('\n'))
+                            {
+                                string trimmed = line.TrimEnd('\r');
+                                if (!string.IsNullOrEmpty(trimmed))
+                                {
+                                    EngineLogger.Log($"[SMAPI] {trimmed}");
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            public override void Write(char[] buffer, int index, int count)
+            {
+                base.Write(buffer, index, count);
+                if (buffer != null && count > 0)
+                {
+                    Write(new string(buffer, index, count));
+                }
+            }
+
+            public override void Write(char value)
+            {
+                base.Write(value);
+                Write(value.ToString());
             }
 
             protected override void Dispose(bool disposing)
