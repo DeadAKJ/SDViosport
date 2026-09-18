@@ -167,6 +167,11 @@ namespace SDViOS.Loader
                     return typeof(object).Assembly;
                 }
 
+                if (args.Name == "Mono.Runtime" || args.Name.StartsWith("Mono.Runtime,"))
+                {
+                    return typeof(GameHost).Assembly;
+                }
+
                 // If a type failed to resolve because of a trimmed or forwarded assembly,
                 // scan loaded assemblies (like System.Private.Xml) for the type.
                 foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
@@ -262,8 +267,6 @@ namespace SDViOS.Loader
                         var constType = smapiAsm.GetType("StardewModdingAPI.Constants");
                         if (constType != null)
                         {
-                            var intProp = constType.GetProperty("InternalPath", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                            intProp?.SetValue(null, smapiInternalDir);
                             for (Type? t = constType; t != null; t = t.BaseType)
                             {
                                 var ipf = t.GetField("<InternalPath>k__BackingField", BindingFlags.NonPublic | BindingFlags.Static)
@@ -278,8 +281,6 @@ namespace SDViOS.Loader
 
                             if (!string.IsNullOrEmpty(LogsDir))
                             {
-                                var logProp = constType.GetProperty("LogDir", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                                logProp?.SetValue(null, LogsDir);
                                 for (Type? t = constType; t != null; t = t.BaseType)
                                 {
                                     var lpf = t.GetField("<LogDir>k__BackingField", BindingFlags.NonPublic | BindingFlags.Static)
@@ -2095,20 +2096,30 @@ namespace SDViOS.Loader
 
                         // Redirect SMAPI log from hidden .config folder to visible Documents/ErrorLogs/SMAPI-latest.txt
                         string visibleLogPath = Path.Combine(LogsDir, "SMAPI-latest.txt");
-                        if (logPath != visibleLogPath && !string.IsNullOrEmpty(LogsDir))
+                        if (!string.IsNullOrEmpty(LogsDir))
                         {
                             try
                             {
-                                pathProp?.SetValue(lfm, visibleLogPath);
+                                if (pathProp != null && pathProp.CanWrite)
+                                {
+                                    pathProp.SetValue(lfm, visibleLogPath);
+                                }
+                            }
+                            catch { }
+
+                            try
+                            {
                                 for (Type? t = lfm.GetType(); t != null; t = t.BaseType)
                                 {
                                     var pf = t.GetField("<Path>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance)
-                                          ?? t.GetField("_path", BindingFlags.NonPublic | BindingFlags.Instance);
+                                          ?? t.GetField("_path", BindingFlags.NonPublic | BindingFlags.Instance)
+                                          ?? t.GetField("Path", BindingFlags.NonPublic | BindingFlags.Instance);
                                     pf?.SetValue(lfm, visibleLogPath);
                                 }
-                                logPath = visibleLogPath;
                             }
                             catch { }
+
+                            logPath = visibleLogPath;
                         }
 
                         bool needsRevival = false;
@@ -2151,5 +2162,13 @@ namespace SDViOS.Loader
                 EngineLogger.LogWarning($"[GameHost] ReviveSMAPILogFile error: {ex.Message}");
             }
         }
+    }
+}
+
+namespace Mono
+{
+    public static class Runtime
+    {
+        public static string GetDisplayName() => "Mono on .NET 8 (iOS)";
     }
 }

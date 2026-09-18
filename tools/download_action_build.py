@@ -18,24 +18,24 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.35-smapi-echo-clean-present'
+version_name = 'v1.0.36-fix-missingmethod-textinput'
 
-changelog_content = """Version: v1.0.35-smapi-echo-clean-present
+changelog_content = """Version: v1.0.36-fix-missingmethod-textinput
 Date: 2026-09-18
 
 Changes:
-1. Complete SMAPI Log Capture:
-   - Implemented buffered stream intercepts on `Write(string)`, `Write(char[])`, and `Write(char)`.
-   - Captures all SMAPI internal logs (`Stream.Write` calls) and flushes them directly into `engine-latest.log`.
-2. SCore Revival & ExitState Reset:
-   - Pre-sets `Program._sdk = NullSDKHelper` to prevent Steam/Galaxy native crashes during initialization.
-   - Resets `SCore.ExitState = None (0)`, `IsGameRunning = true`, and `IsDisposed = false` post-launch.
-   - Automatically invokes `SCore.InitializeBeforeFirstAssetLoaded()` if initialization was interrupted.
-3. Clean Single Double-Buffer Presentation:
-   - Replaced duplicate triple `Present` calls with a single `runner.GraphicsDevice.Present()`.
-   - Fixes OpenGL backbuffer flickering and presentation corruption.
-4. CoreLib Forwarding:
-   - Added AssemblyResolve forwarding for `System.Private.CoreLib` to eliminate unresolved type warnings.
+1. Fixed 15-Version Root Cause Bug:
+   - Patched `lib/MonoGame.Framework.dll` to inject `GameWindow.TextInput` (`add_TextInput` / `remove_TextInput`) event!
+   - Eliminates `MissingMethodException: void GameWindow.add_TextInput(...)` which was killing `Game1.Initialize()` on line 1 for the past 15 versions!
+2. Patched All Missing MonoGame API Surface:
+   - Injected `SoundEffect.FromStream(Stream, bool)`.
+   - Injected `CueDefinition.SetSound(SoundEffect[], int, bool, bool)`.
+   - Injected `OggStreamSoundEffect` class.
+   - Total missing MonoGame calls from Stardew Valley & SMAPI is now ZERO!
+3. Visible SMAPI Log Redirection:
+   - Fixed property setter bypass in `ReviveSMAPILogFile` so `SMAPI-latest.txt` is always saved directly to visible `Documents/ErrorLogs/SMAPI-latest.txt` (not hidden `.config/`).
+4. Harmony Mono.Runtime Resolution:
+   - Added `Mono.Runtime` class with `GetDisplayName()` for Harmony runtime introspection.
 """
 
 headers = {
