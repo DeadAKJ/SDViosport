@@ -28,7 +28,8 @@ namespace SDViOS.Loader
         private static MethodInfo? _presentMethod;
         private static MethodInfo? _threadingRunMethod;
         private static int _directTickCount = 0;
-        private static FieldInfo? _game1TicksField;
+        private static bool _windowSizeSynchronized = false;
+        private static bool _menuLayoutSynchronized = false;
 
         public static void InitializeFileSystem()
         {
@@ -293,12 +294,56 @@ namespace SDViOS.Loader
                                     }
                                 }
                             }
+
+                            // Override Platform and TargetPlatform to Windows (3) to prevent SMAPI
+                            // from halting with "Oops! You're running Windows, but this version of SMAPI is for Linux or macOS."
+                            // when bundled Windows SMAPI runs in iOS Unix environment.
+                            for (Type? t = constType; t != null; t = t.BaseType)
+                            {
+                                var pf = t.GetField("<Platform>k__BackingField", BindingFlags.NonPublic | BindingFlags.Static)
+                                      ?? t.GetField("_platform", BindingFlags.NonPublic | BindingFlags.Static)
+                                      ?? t.GetField("Platform", BindingFlags.NonPublic | BindingFlags.Static);
+                                if (pf != null)
+                                {
+                                    var val = Enum.ToObject(pf.FieldType, 3);
+                                    pf.SetValue(null, val);
+                                    EngineLogger.Log($"[GameHost] Overrode Constants.Platform = {val} ({pf.FieldType.FullName})");
+                                }
+
+                                var tpf = t.GetField("<TargetPlatform>k__BackingField", BindingFlags.NonPublic | BindingFlags.Static)
+                                       ?? t.GetField("_targetPlatform", BindingFlags.NonPublic | BindingFlags.Static)
+                                       ?? t.GetField("TargetPlatform", BindingFlags.NonPublic | BindingFlags.Static);
+                                if (tpf != null)
+                                {
+                                    var val = Enum.ToObject(tpf.FieldType, 3);
+                                    tpf.SetValue(null, val);
+                                    EngineLogger.Log($"[GameHost] Overrode Constants.TargetPlatform = {val} ({tpf.FieldType.FullName})");
+                                }
+                            }
+                        }
+
+                        var earlyConstType = smapiAsm.GetType("StardewModdingAPI.EarlyConstants");
+                        if (earlyConstType != null)
+                        {
+                            for (Type? t = earlyConstType; t != null; t = t.BaseType)
+                            {
+                                var epf = t.GetField("<Platform>k__BackingField", BindingFlags.NonPublic | BindingFlags.Static)
+                                       ?? t.GetField("_platform", BindingFlags.NonPublic | BindingFlags.Static)
+                                       ?? t.GetField("Platform", BindingFlags.NonPublic | BindingFlags.Static);
+                                if (epf != null)
+                                {
+                                    var val = Enum.ToObject(epf.FieldType, 3);
+                                    epf.SetValue(null, val);
+                                    EngineLogger.Log($"[GameHost] Overrode EarlyConstants.Platform = {val} ({epf.FieldType.FullName})");
+                                }
+                            }
                         }
                     }
                     catch (Exception ex)
                     {
                         EngineLogger.LogWarning($"[GameHost] Constants redirect warning: {ex.Message}");
                     }
+
 
                     // Register SMAPI internal assembly resolver if available
                     try
@@ -1848,8 +1893,10 @@ namespace SDViOS.Loader
                             int targetH = currentGD.PresentationParameters.BackBufferHeight > 0 ? currentGD.PresentationParameters.BackBufferHeight : 828;
 
                             var screenProp = instType.GetProperty("screen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                            var screenField = instType.GetField("_screen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                            if ((screenProp != null && screenProp.GetValue(inst) == null) || (screenField != null && screenField.GetValue(inst) == null))
+                            var screenField = instType.GetField("_screen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                           ?? instType.GetField("screen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            var currentScreen = screenProp?.GetValue(inst) ?? screenField?.GetValue(inst);
+                            if (currentScreen == null)
                             {
                                 try
                                 {
@@ -1871,8 +1918,10 @@ namespace SDViOS.Loader
                             }
 
                             var uiScreenProp = instType.GetProperty("uiScreen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                            var uiScreenField = instType.GetField("_uiScreen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                            if ((uiScreenProp != null && uiScreenProp.GetValue(inst) == null) || (uiScreenField != null && uiScreenField.GetValue(inst) == null))
+                            var uiScreenField = instType.GetField("_uiScreen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                             ?? instType.GetField("uiScreen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            var currentUiScreen = uiScreenProp?.GetValue(inst) ?? uiScreenField?.GetValue(inst);
+                            if (currentUiScreen == null)
                             {
                                 try
                                 {
@@ -1896,23 +1945,13 @@ namespace SDViOS.Loader
                             // 4b. Synchronize Game1.viewport, Game1.uiViewport, and activeClickableMenu to full Retina resolution (1792x828)
                             if (game1Type != null)
                             {
-                                try
+                                if (!_windowSizeSynchronized)
                                 {
-                                    var vpField = game1Type.GetField("viewport", BindingFlags.Static | BindingFlags.Public);
-                                    var uiVpField = game1Type.GetField("uiViewport", BindingFlags.Static | BindingFlags.Public);
-                                    if (vpField != null)
+                                    try
                                     {
-                                        var currentVp = vpField.GetValue(null);
-                                        int currentW = 0, currentH = 0;
-                                        if (currentVp != null)
-                                        {
-                                            var wProp = currentVp.GetType().GetProperty("Width", BindingFlags.Public | BindingFlags.Instance);
-                                            var hProp = currentVp.GetType().GetProperty("Height", BindingFlags.Public | BindingFlags.Instance);
-                                            currentW = Convert.ToInt32(wProp?.GetValue(currentVp) ?? 0);
-                                            currentH = Convert.ToInt32(hProp?.GetValue(currentVp) ?? 0);
-                                        }
-
-                                        if (currentW != targetW || currentH != targetH)
+                                        var vpField = game1Type.GetField("viewport", BindingFlags.Static | BindingFlags.Public);
+                                        var uiVpField = game1Type.GetField("uiViewport", BindingFlags.Static | BindingFlags.Public);
+                                        if (vpField != null)
                                         {
                                             var newVpObj = Activator.CreateInstance(vpField.FieldType, new object[] { 0, 0, targetW, targetH });
                                             vpField.SetValue(null, newVpObj);
@@ -1920,23 +1959,38 @@ namespace SDViOS.Loader
 
                                             var swsMethod = inst.GetType().GetMethod("SetWindowSize", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                                             swsMethod?.Invoke(inst, new object[] { targetW, targetH });
-
-                                            var menuProp = game1Type.GetProperty("activeClickableMenu", BindingFlags.Static | BindingFlags.Public);
-                                            var menu = menuProp?.GetValue(null);
-                                            if (menu != null)
-                                            {
-                                                var gwscMethod = menu.GetType().GetMethod("gameWindowSizeChanged", BindingFlags.Public | BindingFlags.Instance);
-                                                gwscMethod?.Invoke(menu, new object[] { new Rectangle(0, 0, targetW, targetH), new Rectangle(0, 0, targetW, targetH) });
-                                                EngineLogger.Log($"[GameHost] Synchronized activeClickableMenu ({menu.GetType().Name}) to {targetW}x{targetH}.");
-                                            }
+                                            _windowSizeSynchronized = true;
+                                            EngineLogger.Log($"[GameHost] Initial window and viewport size synchronized to {targetW}x{targetH}.");
                                         }
                                     }
+                                    catch (Exception vpEx)
+                                    {
+                                        EngineLogger.LogWarning($"[GameHost] Viewport sync warning: {vpEx.Message}");
+                                        _windowSizeSynchronized = true;
+                                    }
                                 }
-                                catch (Exception vpEx)
+
+                                if (!_menuLayoutSynchronized)
                                 {
-                                    EngineLogger.LogWarning($"[GameHost] Viewport sync warning: {vpEx.Message}");
+                                    try
+                                    {
+                                        var menuProp = game1Type.GetProperty("activeClickableMenu", BindingFlags.Static | BindingFlags.Public);
+                                        var menu = menuProp?.GetValue(null);
+                                        if (menu != null)
+                                        {
+                                            var gwscMethod = menu.GetType().GetMethod("gameWindowSizeChanged", BindingFlags.Public | BindingFlags.Instance);
+                                            gwscMethod?.Invoke(menu, new object[] { new Rectangle(0, 0, targetW, targetH), new Rectangle(0, 0, targetW, targetH) });
+                                            EngineLogger.Log($"[GameHost] Synchronized activeClickableMenu ({menu.GetType().Name}) to {targetW}x{targetH}.");
+                                            _menuLayoutSynchronized = true;
+                                        }
+                                    }
+                                    catch (Exception mEx)
+                                    {
+                                        EngineLogger.LogWarning($"[GameHost] Menu sync warning: {mEx.Message}");
+                                    }
                                 }
                             }
+
                         }
                     }
                 }

@@ -18,22 +18,21 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.39-touch-tap-and-viewport-fix'
+version_name = 'v1.0.40-smapi-platform-and-viewport-guard'
 
-changelog_content = """Version: v1.0.39-touch-tap-and-viewport-fix
+changelog_content = """Version: v1.0.40-smapi-platform-and-viewport-guard
 Date: 2026-09-18
 
 Changes:
-1. Touch Tapping & Input Forwarding:
-   - Direct screen taps anywhere on screen are immediately forwarded to MonoGame (Mouse.PrimaryWindow.MouseState) and Stardew Valley (Game1.input._currentMouseState).
-   - Any tap on title menu buttons (Load, New, Co-op) registers as a native Left Click.
-   - Virtual pad buttons forward GamePad buttons (A, B, X, Y, Start) and keyboard keys (E, Esc).
-   - Added on-screen toggle button to easily hide/show the virtual pad overlay.
-2. Viewport & Resolution Scaling:
-   - Fixed viewport clamping in Game1.SetWindowSize by setting GraphicsDeviceManager.IsFullScreen = true and PreferredBackBuffer to 1792x828.
-   - Synchronized Game1.viewport and Game1.uiViewport to the full 1792x828 Retina landscape resolution.
-   - Re-sized TitleMenu so the ConcernedApe splash and menus fill the entire display without letterboxing or black borders.
+1. SMAPI Platform Override:
+   - Overrode Constants.Platform, Constants.TargetPlatform, and EarlyConstants.Platform to Platform.Windows (3) via reflection.
+   - Bypasses SMAPI's OS platform check ("Oops! You're running Windows, but this version of SMAPI is for Linux or macOS. Please reinstall SMAPI to fix this.") which caused SCore to halt immediately on iOS.
+2. Viewport & Window Size Sync Guard:
+   - Guarded SetWindowSize(1792, 828) to run once at startup rather than repeatedly at 60 FPS in the render loop.
+   - Guarded activeClickableMenu gameWindowSizeChanged layout sync to run once upon menu initialization.
+   - Hardened RenderTarget2D screen and uiScreen checks so render targets are never repeatedly reallocated.
 """
+
 
 headers = {
     'Accept': 'application/vnd.github.v3+json',
