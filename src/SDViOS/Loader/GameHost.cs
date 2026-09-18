@@ -1312,6 +1312,10 @@ namespace SDViOS.Loader
                 // Revive graphics device, window viewController, and instance options
                 ReviveGraphicsDeviceAndInstances(runner, plat, null, gameView);
 
+                // Ensure TouchOverlay is attached and input forwarded every frame
+                AttachTouchOverlayToGameRunner();
+                TouchVirtualPad.Instance.ForwardInputToGame();
+
                 // 2. Introspect gameView and game state on tick 0
                 if (_directTickCount == 0)
                 {
@@ -1416,10 +1420,9 @@ namespace SDViOS.Loader
                 }
                 catch { }
 
-                // 6. Diagnostic visual clear: on first 30 ticks, clear to CornflowerBlue AFTER runner.Tick()
-                // so GameRunner.Draw's initial black clear cannot overwrite it before presentation!
+                // 6. Diagnostic visual clear: only on first 2 frames during cold boot
                 bool diagClearSuccess = false;
-                if (_directTickCount < 30 && runner.GraphicsDevice != null)
+                if (_directTickCount < 2 && runner.GraphicsDevice != null)
                 {
                     try
                     {
@@ -1428,7 +1431,7 @@ namespace SDViOS.Loader
                     }
                     catch (Exception ex)
                     {
-                        if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Diagnostic Clear error: {ex.Message}");
+                        if (_directTickCount < 2) EngineLogger.LogWarning($"[GameHost] Diagnostic Clear error: {ex.Message}");
                     }
                 }
 
@@ -1601,6 +1604,19 @@ namespace SDViOS.Loader
                         EngineLogger.Log("[GameHost] Cleared GraphicsDeviceManager.disposed = false");
                     }
 
+                    try
+                    {
+                        var isFsProp = gdmType.GetProperty("IsFullScreen", BindingFlags.Public | BindingFlags.Instance);
+                        isFsProp?.SetValue(gdm, true);
+
+                        var pbbwProp = gdmType.GetProperty("PreferredBackBufferWidth", BindingFlags.Public | BindingFlags.Instance);
+                        pbbwProp?.SetValue(gdm, 1792);
+
+                        var pbbhProp = gdmType.GetProperty("PreferredBackBufferHeight", BindingFlags.Public | BindingFlags.Instance);
+                        pbbhProp?.SetValue(gdm, 828);
+                    }
+                    catch { }
+
                     var gdField = gdmType.GetField("_graphicsDevice", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                     currentGD = (gdField?.GetValue(gdm) as Microsoft.Xna.Framework.Graphics.GraphicsDevice) ?? currentGD;
 
@@ -1659,8 +1675,8 @@ namespace SDViOS.Loader
 
                                 if (pp != null)
                                 {
-                                    pp.BackBufferWidth = 896;
-                                    pp.BackBufferHeight = 414;
+                                    pp.BackBufferWidth = 1792;
+                                    pp.BackBufferHeight = 828;
                                     pp.BackBufferFormat = Microsoft.Xna.Framework.Graphics.SurfaceFormat.Color;
                                     pp.DepthStencilFormat = Microsoft.Xna.Framework.Graphics.DepthFormat.Depth24Stencil8;
                                     pp.IsFullScreen = true;
@@ -1874,6 +1890,51 @@ namespace SDViOS.Loader
                                 catch (Exception uiEx)
                                 {
                                     EngineLogger.LogWarning($"[GameHost] Failed to initialize instance uiScreen: {uiEx.Message}");
+                                }
+                            }
+
+                            // 4b. Synchronize Game1.viewport, Game1.uiViewport, and activeClickableMenu to full Retina resolution (1792x828)
+                            if (game1Type != null)
+                            {
+                                try
+                                {
+                                    var vpField = game1Type.GetField("viewport", BindingFlags.Static | BindingFlags.Public);
+                                    var uiVpField = game1Type.GetField("uiViewport", BindingFlags.Static | BindingFlags.Public);
+                                    if (vpField != null)
+                                    {
+                                        var currentVp = vpField.GetValue(null);
+                                        int currentW = 0, currentH = 0;
+                                        if (currentVp != null)
+                                        {
+                                            var wProp = currentVp.GetType().GetProperty("Width", BindingFlags.Public | BindingFlags.Instance);
+                                            var hProp = currentVp.GetType().GetProperty("Height", BindingFlags.Public | BindingFlags.Instance);
+                                            currentW = Convert.ToInt32(wProp?.GetValue(currentVp) ?? 0);
+                                            currentH = Convert.ToInt32(hProp?.GetValue(currentVp) ?? 0);
+                                        }
+
+                                        if (currentW != targetW || currentH != targetH)
+                                        {
+                                            var newVpObj = Activator.CreateInstance(vpField.FieldType, new object[] { 0, 0, targetW, targetH });
+                                            vpField.SetValue(null, newVpObj);
+                                            if (uiVpField != null) uiVpField.SetValue(null, newVpObj);
+
+                                            var swsMethod = inst.GetType().GetMethod("SetWindowSize", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                                            swsMethod?.Invoke(inst, new object[] { targetW, targetH });
+
+                                            var menuProp = game1Type.GetProperty("activeClickableMenu", BindingFlags.Static | BindingFlags.Public);
+                                            var menu = menuProp?.GetValue(null);
+                                            if (menu != null)
+                                            {
+                                                var gwscMethod = menu.GetType().GetMethod("gameWindowSizeChanged", BindingFlags.Public | BindingFlags.Instance);
+                                                gwscMethod?.Invoke(menu, new object[] { new Rectangle(0, 0, targetW, targetH), new Rectangle(0, 0, targetW, targetH) });
+                                                EngineLogger.Log($"[GameHost] Synchronized activeClickableMenu ({menu.GetType().Name}) to {targetW}x{targetH}.");
+                                            }
+                                        }
+                                    }
+                                }
+                                catch (Exception vpEx)
+                                {
+                                    EngineLogger.LogWarning($"[GameHost] Viewport sync warning: {vpEx.Message}");
                                 }
                             }
                         }

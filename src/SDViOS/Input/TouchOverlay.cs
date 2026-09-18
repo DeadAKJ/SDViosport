@@ -39,6 +39,12 @@ namespace SDViOS.Input
         public override void Initialize()
         {
             base.Initialize();
+            try
+            {
+                TouchPanel.EnableMouseTouchPoint = true;
+                TouchPanel.EnableMouseGestures = true;
+            }
+            catch { }
             TryInitializePad();
         }
 
@@ -74,6 +80,10 @@ namespace SDViOS.Input
                     EngineLogger.LogWarning($"[TouchOverlay] Error initializing TouchVirtualPad: {ex.Message}");
                 }
             }
+            else if (_padInitialized && GraphicsDevice != null)
+            {
+                TouchVirtualPad.Instance.UpdateLayout(GraphicsDevice.Viewport.Width, GraphicsDevice.Viewport.Height);
+            }
         }
 
         public override void Update(GameTime gameTime)
@@ -82,6 +92,7 @@ namespace SDViOS.Input
             if (_padInitialized)
             {
                 TouchVirtualPad.Instance.Update(gameTime);
+                TouchVirtualPad.Instance.ForwardInputToGame();
             }
             base.Update(gameTime);
         }
