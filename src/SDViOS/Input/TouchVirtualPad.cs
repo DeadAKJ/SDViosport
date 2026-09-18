@@ -62,6 +62,7 @@ namespace SDViOS.Input
         private static FieldInfo? _oldMouseStateField = null;
         private static MethodInfo? _setMousePositionMethod = null;
         private static FieldInfo? _mousePrimaryWindowField = null;
+        private static FieldInfo? _gameWindowMouseStateField = null;
 
         public void Initialize(GraphicsDevice graphicsDevice)
         {
@@ -227,9 +228,15 @@ namespace SDViOS.Input
                     {
                         _mousePrimaryWindowField = typeof(Mouse).GetField("PrimaryWindow", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                     }
-                    if (_mousePrimaryWindowField?.GetValue(null) is GameWindow win)
+                    var win = _mousePrimaryWindowField?.GetValue(null);
+                    if (win != null)
                     {
-                        win.MouseState = mouseState;
+                        if (_gameWindowMouseStateField == null)
+                        {
+                            _gameWindowMouseStateField = win.GetType().GetField("MouseState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                                                      ?? typeof(GameWindow).GetField("MouseState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        }
+                        _gameWindowMouseStateField?.SetValue(win, mouseState);
                     }
                 }
                 catch { }
