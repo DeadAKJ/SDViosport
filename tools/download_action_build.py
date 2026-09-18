@@ -18,9 +18,9 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.44-patch-harmony-and-disable-trimming'
+version_name = 'v1.0.45-patched-0harmony-and-link-none'
 
-changelog_content = """Version: v1.0.44-patch-harmony-and-disable-trimming
+changelog_content = """Version: v1.0.45-patched-0harmony-and-link-none
 Date: 2026-09-19
 
 Changes:
@@ -28,10 +28,10 @@ Changes:
    - 0Harmony.dll now has HarmonySharedState defined directly inside the assembly so Type.GetType("HarmonySharedState", false) resolves immediately from the calling assembly without relying on external AppDomain.TypeResolve.
    - Patched GetOrCreateSharedStateType() to return typeof(HarmonySharedState) directly, skipping Cecil dynamic code emission and Assembly.Load(byte[]).
    - Neutralized DetourHelper.Runtime.add_OnMethodCompiled in HarmonySharedState..cctor with 'ret', ensuring DetourHelper._Runtime, _HookSelftest(), and PrepareMethod() are never called during startup.
-2. Disabled PublishTrimmed:
-   - Changed <PublishTrimmed> from true to false in SDViOS.csproj to prevent IL trimming from stripping dynamically-loaded reflection types and fields.
-3. Automated Harmony Patcher:
+2. Automated Harmony Patcher:
    - Created tools/PatchHarmony tool and integrated into tools/inject_game.py so 0Harmony.dll is always verified and patched before packaging.
+3. Preserved PublishTrimmed=true with MtouchLink=None:
+   - Reverted PublishTrimmed=true as strictly required by Microsoft.iOS.Sdk with MtouchLink=None to prevent stripping.
 """
 
 
