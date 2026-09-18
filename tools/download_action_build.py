@@ -18,16 +18,21 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.38-fix-titlemenu-badil'
+version_name = 'v1.0.39-touch-tap-and-viewport-fix'
 
-changelog_content = """Version: v1.0.38-fix-titlemenu-badil
+changelog_content = """Version: v1.0.39-touch-tap-and-viewport-fix
 Date: 2026-09-18
 
 Changes:
-1. Fix BadImageFormatException in TitleMenu.update:
-   - In `lib/MonoGame.Framework.dll`, patched `Microsoft.Xna.Framework.GameWindow::GetDisplayBounds`.
-   - Changed invalid opcode `OpCodes.Call` on abstract method `get_ClientBounds` to `OpCodes.Callvirt`.
-   - Eliminates `BadImageFormatException: Bad IL format` which was crashing `TitleMenu.update(GameTime)` every single frame, unfreezing the title screen animation and menu buttons.
+1. Touch Tapping & Input Forwarding:
+   - Direct screen taps anywhere on screen are immediately forwarded to MonoGame (Mouse.PrimaryWindow.MouseState) and Stardew Valley (Game1.input._currentMouseState).
+   - Any tap on title menu buttons (Load, New, Co-op) registers as a native Left Click.
+   - Virtual pad buttons forward GamePad buttons (A, B, X, Y, Start) and keyboard keys (E, Esc).
+   - Added on-screen toggle button to easily hide/show the virtual pad overlay.
+2. Viewport & Resolution Scaling:
+   - Fixed viewport clamping in Game1.SetWindowSize by setting GraphicsDeviceManager.IsFullScreen = true and PreferredBackBuffer to 1792x828.
+   - Synchronized Game1.viewport and Game1.uiViewport to the full 1792x828 Retina landscape resolution.
+   - Re-sized TitleMenu so the ConcernedApe splash and menus fill the entire display without letterboxing or black borders.
 """
 
 headers = {

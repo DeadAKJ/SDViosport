@@ -61,6 +61,7 @@ namespace SDViOS.Input
         private static FieldInfo? _lastCursorMotionWasMouseField = null;
         private static FieldInfo? _oldMouseStateField = null;
         private static MethodInfo? _setMousePositionMethod = null;
+        private static FieldInfo? _mousePrimaryWindowField = null;
 
         public void Initialize(GraphicsDevice graphicsDevice)
         {
@@ -222,25 +223,18 @@ namespace SDViOS.Input
                 // 1. Update MonoGame PrimaryWindow.MouseState
                 try
                 {
-                    if (Mouse.PrimaryWindow != null)
+                    if (_mousePrimaryWindowField == null)
                     {
-                        Mouse.PrimaryWindow.MouseState = mouseState;
+                        _mousePrimaryWindowField = typeof(Mouse).GetField("PrimaryWindow", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                    }
+                    if (_mousePrimaryWindowField?.GetValue(null) is GameWindow win)
+                    {
+                        win.MouseState = mouseState;
                     }
                 }
                 catch { }
 
-                // 2. Update GameRunner.instance?.Window.MouseState
-                try
-                {
-                    var runnerWindow = Microsoft.Xna.Framework.Input.Mouse.PrimaryWindow;
-                    if (runnerWindow != null)
-                    {
-                        runnerWindow.MouseState = mouseState;
-                    }
-                }
-                catch { }
-
-                // 3. Update Stardew Valley Game1.input directly
+                // 2. Update Stardew Valley Game1.input directly
                 if (_inputInstance != null)
                 {
                     if (_currentMouseStateField != null)

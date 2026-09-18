@@ -1,6 +1,7 @@
 using System.Reflection;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using Microsoft.Xna.Framework.Input.Touch;
 using SDViOS.Diagnostics;
 
 namespace SDViOS.Input
