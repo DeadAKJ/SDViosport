@@ -34,6 +34,9 @@
     <Reference Include="MonoGame.Framework">
       <HintPath>..\..\lib\MonoGame.Framework.dll</HintPath>
     </Reference>
+    <Reference Include="MonoMod.Common">
+      <HintPath>..\..\lib\MonoMod.Common.dll</HintPath>
+    </Reference>
     <PackageReference Include="SkiaSharp" Version="2.88.8" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="Mono.Cecil" Version="0.11.5" />

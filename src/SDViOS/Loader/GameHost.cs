@@ -7,6 +7,7 @@ using Microsoft.Xna.Framework;
 using UIKit;
 using SDViOS.Diagnostics;
 using SDViOS.Input;
+using MonoMod.RuntimeDetour;
 
 // Global-namespace HarmonySharedState to satisfy 0Harmony.dll Type.GetType("HarmonySharedState", false).
 // If this type is present, Harmony completely skips dynamic module emission via Mono.Cecil and Assembly.Load(byte[]),
@@ -16,6 +17,32 @@ public static class HarmonySharedState
     public static int version = 102;
     public static System.Collections.Generic.Dictionary<System.Reflection.MethodBase, byte[]> state = new();
     public static System.Collections.Generic.Dictionary<System.Reflection.MethodInfo, System.Reflection.MethodBase> originals = new();
+}
+
+// Custom safe IDetourRuntimePlatform to satisfy MonoMod.RuntimeDetour.DetourHelper.Runtime.
+// MonoMod's default platforms run _HookSelftest() and RuntimeHelpers.PrepareMethod() which crash
+// on iOS AOT/W^X. Providing this safe platform bypasses self-testing and allows Harmony to run stably.
+public class SafeDetourRuntimePlatform : IDetourRuntimePlatform
+{
+    public bool OnMethodCompiledWillBeCalled => false;
+    public event OnMethodCompiledEvent? OnMethodCompiled { add { } remove { } }
+
+    public MethodBase GetIdentifiable(MethodBase method) => method;
+    public IntPtr GetNativeStart(MethodBase method) => method.MethodHandle.GetFunctionPointer();
+    public MethodInfo CreateCopy(MethodBase method) => (method as MethodInfo) ?? throw new NotSupportedException();
+    public bool TryCreateCopy(MethodBase method, out MethodInfo dm)
+    {
+        dm = (method as MethodInfo)!;
+        return dm != null;
+    }
+    public void Pin(MethodBase method) { }
+    public void Unpin(MethodBase method) { }
+    public MethodBase GetDetourTarget(MethodBase from, MethodBase to) => to;
+    public uint TryMemAllocScratchCloseTo(IntPtr target, out IntPtr allocated, int size)
+    {
+        allocated = IntPtr.Zero;
+        return 0;
+    }
 }
 
 namespace SDViOS.Loader
@@ -209,6 +236,16 @@ namespace SDViOS.Loader
                 EngineLogger.LogWarning($"[TypeResolve] Unresolved type: {args.Name}");
                 return null;
             };
+
+            try
+            {
+                MonoMod.RuntimeDetour.DetourHelper.Runtime = new SafeDetourRuntimePlatform();
+                EngineLogger.Log("[GameHost] Pre-initialized DetourHelper.Runtime to SafeDetourRuntimePlatform.");
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[GameHost] Failed to pre-initialize DetourHelper.Runtime: {ex.Message}");
+            }
         }
 
         public static void AttachTouchOverlay(Game game)
@@ -278,6 +315,16 @@ namespace SDViOS.Loader
                     string[] smapiArgs = new string[] { "--no-terminal", "--mods-path", ModsDir };
                     var smapiAsm = Assembly.LoadFrom(smapiPath);
                     System.Threading.Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+
+                    try
+                    {
+                        MonoMod.RuntimeDetour.DetourHelper.Runtime = new SafeDetourRuntimePlatform();
+                        EngineLogger.Log("[GameHost] Confirmed DetourHelper.Runtime set to SafeDetourRuntimePlatform.");
+                    }
+                    catch (Exception ex)
+                    {
+                        EngineLogger.LogWarning($"[GameHost] Could not confirm DetourHelper.Runtime: {ex.Message}");
+                    }
 
                     // Redirect SMAPI Constants.InternalFilesPath and Constants.LogDir to Documents to prevent sandbox violations
                     try

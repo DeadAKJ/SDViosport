@@ -18,18 +18,20 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.42-fix-harmony-shared-state'
+version_name = 'v1.0.43-safe-detour-runtime-platform'
 
-changelog_content = """Version: v1.0.42-fix-harmony-shared-state
-Date: 2026-09-18
+changelog_content = """Version: v1.0.43-safe-detour-runtime-platform
+Date: 2026-09-19
 
 Changes:
-1. Provide Pre-defined HarmonySharedState:
-   - HarmonyLib uses Type.GetType("HarmonySharedState", false) to share state across patchers.
-   - When unresolved, Harmony falls back to dynamic assembly emission via Mono.Cecil and Assembly.Load(byte[]), which crashes or triggers runtime aborts on iOS AOT/W^X environment.
-   - Defined HarmonySharedState in the global namespace with version=102, state, and originals dictionaries, and resolved it in AppDomain.CurrentDomain.TypeResolve, bypassing Cecil dynamic module generation completely.
-2. iOS Watchdog Launch Protection:
-   - Dispatched GameHost.Launch onto the main runloop via UIApplication.SharedApplication.BeginInvokeOnMainThread, allowing FinishedLaunching to return true immediately and eliminating the 15-second iOS SpringBoard watchdog termination (0x8badf00d).
+1. Provide SafeDetourRuntimePlatform:
+   - In HarmonySharedState..cctor, MonoMod DetourHelper.get_Runtime() is called.
+   - When DetourHelper._Runtime was unset, MonoMod attempted to create DetourRuntimeILPlatform, whose constructor runs _HookSelftest() and RuntimeHelpers.PrepareMethod().
+   - On iOS (AOT / W^X environment), writing native detours to executable memory and invoking PrepareMethod triggers an immediate crash / internal CLR error (0x80131506).
+   - Implemented SafeDetourRuntimePlatform implementing MonoMod.RuntimeDetour.IDetourRuntimePlatform with safe no-op hooks, method pointer retrieval, and no JIT selftests.
+   - Pre-initialized DetourHelper.Runtime to SafeDetourRuntimePlatform, completely bypassing native hook self-testing on iOS.
+2. Referenced MonoMod.Common:
+   - Included lib/MonoMod.Common.dll in SDViOS.csproj to cleanly implement IDetourRuntimePlatform.
 """
 
 
