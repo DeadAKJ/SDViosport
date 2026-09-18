@@ -18,24 +18,19 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.36-fix-missingmethod-textinput'
+version_name = 'v1.0.37-fix-audiocategory-reverb'
 
-changelog_content = """Version: v1.0.36-fix-missingmethod-textinput
+changelog_content = """Version: v1.0.37-fix-audiocategory-reverb
 Date: 2026-09-18
 
 Changes:
-1. Fixed 15-Version Root Cause Bug:
-   - Patched `lib/MonoGame.Framework.dll` to inject `GameWindow.TextInput` (`add_TextInput` / `remove_TextInput`) event!
-   - Eliminates `MissingMethodException: void GameWindow.add_TextInput(...)` which was killing `Game1.Initialize()` on line 1 for the past 15 versions!
-2. Patched All Missing MonoGame API Surface:
-   - Injected `SoundEffect.FromStream(Stream, bool)`.
-   - Injected `CueDefinition.SetSound(SoundEffect[], int, bool, bool)`.
-   - Injected `OggStreamSoundEffect` class.
-   - Total missing MonoGame calls from Stardew Valley & SMAPI is now ZERO!
-3. Visible SMAPI Log Redirection:
-   - Fixed property setter bypass in `ReviveSMAPILogFile` so `SMAPI-latest.txt` is always saved directly to visible `Documents/ErrorLogs/SMAPI-latest.txt` (not hidden `.config/`).
-4. Harmony Mono.Runtime Resolution:
-   - Added `Mono.Runtime` class with `GetDisplayName()` for Harmony runtime introspection.
+1. Fix AudioCategory TypeLoadException (Asset Load & SMAPI AssemblyLoader Fix):
+   - Converted `Microsoft.Xna.Framework.Audio.AudioCategory` from struct (ValueType) to class (reference type) in `lib/MonoGame.Framework.dll`.
+   - Eliminates `TypeLoadException: Could not load type of field 'StardewValley.Audio.AudioCategoryWrapper:audioCategory' due to: Expected reference type but got type kind 17`.
+   - Unblocks `DataLoader.BigCraftables` and SMAPI `InitializeBeforeFirstAssetLoaded()`.
+2. Fix ReverbSettings MethodAccessException:
+   - Made `Microsoft.Xna.Framework.Audio.ReverbSettings` class public in `lib/MonoGame.Framework.dll`.
+   - Eliminates `MethodAccessException: Method ReverbSettings.set_Item is inaccessible from method StardewValley.Game1.InitializeSounds()`.
 """
 
 headers = {
