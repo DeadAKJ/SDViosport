@@ -28,6 +28,7 @@ namespace SDViOS.Loader
         private static MethodInfo? _presentMethod;
         private static MethodInfo? _threadingRunMethod;
         private static int _directTickCount = 0;
+        private static FieldInfo? _game1TicksField;
         private static bool _windowSizeSynchronized = false;
         private static bool _menuLayoutSynchronized = false;
 
