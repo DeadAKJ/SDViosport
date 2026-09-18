@@ -18,20 +18,20 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.43-safe-detour-runtime-platform'
+version_name = 'v1.0.44-patch-harmony-and-disable-trimming'
 
-changelog_content = """Version: v1.0.43-safe-detour-runtime-platform
+changelog_content = """Version: v1.0.44-patch-harmony-and-disable-trimming
 Date: 2026-09-19
 
 Changes:
-1. Provide SafeDetourRuntimePlatform:
-   - In HarmonySharedState..cctor, MonoMod DetourHelper.get_Runtime() is called.
-   - When DetourHelper._Runtime was unset, MonoMod attempted to create DetourRuntimeILPlatform, whose constructor runs _HookSelftest() and RuntimeHelpers.PrepareMethod().
-   - On iOS (AOT / W^X environment), writing native detours to executable memory and invoking PrepareMethod triggers an immediate crash / internal CLR error (0x80131506).
-   - Implemented SafeDetourRuntimePlatform implementing MonoMod.RuntimeDetour.IDetourRuntimePlatform with safe no-op hooks, method pointer retrieval, and no JIT selftests.
-   - Pre-initialized DetourHelper.Runtime to SafeDetourRuntimePlatform, completely bypassing native hook self-testing on iOS.
-2. Referenced MonoMod.Common:
-   - Included lib/MonoMod.Common.dll in SDViOS.csproj to cleanly implement IDetourRuntimePlatform.
+1. Injected HarmonySharedState and Neutralized DetourHelper in 0Harmony.dll:
+   - 0Harmony.dll now has HarmonySharedState defined directly inside the assembly so Type.GetType("HarmonySharedState", false) resolves immediately from the calling assembly without relying on external AppDomain.TypeResolve.
+   - Patched GetOrCreateSharedStateType() to return typeof(HarmonySharedState) directly, skipping Cecil dynamic code emission and Assembly.Load(byte[]).
+   - Neutralized DetourHelper.Runtime.add_OnMethodCompiled in HarmonySharedState..cctor with 'ret', ensuring DetourHelper._Runtime, _HookSelftest(), and PrepareMethod() are never called during startup.
+2. Disabled PublishTrimmed:
+   - Changed <PublishTrimmed> from true to false in SDViOS.csproj to prevent IL trimming from stripping dynamically-loaded reflection types and fields.
+3. Automated Harmony Patcher:
+   - Created tools/PatchHarmony tool and integrated into tools/inject_game.py so 0Harmony.dll is always verified and patched before packaging.
 """
 
 

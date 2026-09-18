@@ -2,6 +2,7 @@ import os
 import sys
 import zipfile
 import shutil
+import subprocess
 
 def inject_game(ipa_path, game_files_dir, output_ipa_path):
     print(f"=== Injecting Game Files into IPA ===")
@@ -15,6 +16,14 @@ def inject_game(ipa_path, game_files_dir, output_ipa_path):
     if not os.path.exists(game_files_dir):
         print(f"Error: Game files dir not found: {game_files_dir}")
         return False
+
+    # Ensure 0Harmony.dll is patched for iOS
+    harmony_dll = os.path.join(game_files_dir, "smapi-internal", "0Harmony.dll")
+    if os.path.exists(harmony_dll):
+        patcher_csproj = os.path.join(os.path.dirname(__file__), "PatchHarmony", "PatchHarmony.csproj")
+        if os.path.exists(patcher_csproj):
+            print("Ensuring 0Harmony.dll is patched for iOS...")
+            subprocess.run(["dotnet", "run", "--project", patcher_csproj, harmony_dll], check=False)
 
     temp_dir = os.path.join(os.path.dirname(output_ipa_path), "temp_inject")
     if os.path.exists(temp_dir):
