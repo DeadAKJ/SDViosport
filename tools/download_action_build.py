@@ -18,19 +18,16 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.37-fix-audiocategory-reverb'
+version_name = 'v1.0.38-fix-titlemenu-badil'
 
-changelog_content = """Version: v1.0.37-fix-audiocategory-reverb
+changelog_content = """Version: v1.0.38-fix-titlemenu-badil
 Date: 2026-09-18
 
 Changes:
-1. Fix AudioCategory TypeLoadException (Asset Load & SMAPI AssemblyLoader Fix):
-   - Converted `Microsoft.Xna.Framework.Audio.AudioCategory` from struct (ValueType) to class (reference type) in `lib/MonoGame.Framework.dll`.
-   - Eliminates `TypeLoadException: Could not load type of field 'StardewValley.Audio.AudioCategoryWrapper:audioCategory' due to: Expected reference type but got type kind 17`.
-   - Unblocks `DataLoader.BigCraftables` and SMAPI `InitializeBeforeFirstAssetLoaded()`.
-2. Fix ReverbSettings MethodAccessException:
-   - Made `Microsoft.Xna.Framework.Audio.ReverbSettings` class public in `lib/MonoGame.Framework.dll`.
-   - Eliminates `MethodAccessException: Method ReverbSettings.set_Item is inaccessible from method StardewValley.Game1.InitializeSounds()`.
+1. Fix BadImageFormatException in TitleMenu.update:
+   - In `lib/MonoGame.Framework.dll`, patched `Microsoft.Xna.Framework.GameWindow::GetDisplayBounds`.
+   - Changed invalid opcode `OpCodes.Call` on abstract method `get_ClientBounds` to `OpCodes.Callvirt`.
+   - Eliminates `BadImageFormatException: Bad IL format` which was crashing `TitleMenu.update(GameTime)` every single frame, unfreezing the title screen animation and menu buttons.
 """
 
 headers = {
