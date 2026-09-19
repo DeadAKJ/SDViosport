@@ -113,6 +113,26 @@ class Program
             }
         }
 
+        var pp = mod.GetType("HarmonyLib.PatchProcessor");
+        if (pp != null)
+        {
+            var patchMethod = pp.Methods.FirstOrDefault(m => m.Name == "Patch" && m.Parameters.Count == 0);
+            var origField = pp.Fields.FirstOrDefault(f => f.Name == "original");
+            if (patchMethod != null && origField != null)
+            {
+                Console.WriteLine("  Neutralizing PatchProcessor.Patch() for iOS W^X safety...");
+                patchMethod.Body.Instructions.Clear();
+                patchMethod.Body.Variables.Clear();
+                patchMethod.Body.ExceptionHandlers.Clear();
+                var il = patchMethod.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldfld, origField);
+                var methodInfoRef = mod.ImportReference(typeof(MethodInfo));
+                il.Emit(OpCodes.Isinst, methodInfoRef);
+                il.Emit(OpCodes.Ret);
+            }
+        }
+
         asm.Write();
         asm.Dispose();
         Console.WriteLine("=== Successfully patched 0Harmony.dll for iOS compatibility! ===");

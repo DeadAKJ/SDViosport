@@ -19,19 +19,19 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.49-embedded-harmony-fix'
+version_name = 'v1.0.50-neutralize-harmony-patchprocessor-detour'
 
-changelog_content = """Version: v1.0.49-embedded-harmony-fix
+changelog_content = """Version: v1.0.50-neutralize-harmony-patchprocessor-detour
 Date: 2026-09-19
 
 Changes:
-1. Embedded Pre-Patched 0Harmony.dll:
-   - Root Cause: In unbundled IPAs, Documents/smapi-internal/0Harmony.dll is not bundled in the IPA. The stale copy in Documents/ threw VerificationException and runtime Cecil patching threw NullReferenceException on iOS due to missing Framework references.
-   - Fix: Embedded a verified, pre-patched 0Harmony.dll directly inside SDViOS.dll as an EmbeddedResource.
-   - RuntimeHarmonyPatcher now extracts and deploys this tested 0Harmony.dll directly to Documents/smapi-internal/ on launch.
-   - Neutralized RefreshMethodStarts in HarmonySharedState to prevent MonoMod detour compilation hooks.
-2. Unbundled IPA Delivery:
-   - Delivers unbundled StardewValley-iOS.ipa directly to root folder and version folder.
+1. Neutralized HarmonyLib.PatchProcessor.Patch():
+   - Root Cause: SMAPI's MiniMonoModHotfix called Harmony.Patch(), which created dynamic native trampolines in heap memory. Non-jailbroken iOS strictly enforces W^X (AMFI), causing SIGKILL (CODESIGNING Invalid Page, EXC_BAD_ACCESS / KERN_PROTECTION_FAILURE at dynamic trampoline page).
+   - Fix: Patched 0Harmony.dll to replace PatchProcessor.Patch() body with returning `this.original as MethodInfo`. Bypasses dynamic native detour generation entirely while satisfying SMAPI's reflection call.
+2. Embedded Pre-Patched 0Harmony.dll:
+   - Embedded the updated 0Harmony.dll inside SDViOS.dll as EmbeddedResource and deployed to Documents/smapi-internal/0Harmony.dll on startup.
+3. Standalone Unbundled IPA Delivery:
+   - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """
 
 
