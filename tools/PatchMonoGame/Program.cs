@@ -31,7 +31,13 @@ class Program
         var titleContainerType = module.GetType("Microsoft.Xna.Framework.TitleContainer");
         if (titleContainerType != null)
         {
-            // 0a. Make set_Location public
+            // 0a. Make get_Location and set_Location public
+            var getLocMethod = titleContainerType.Methods.FirstOrDefault(m => m.Name == "get_Location");
+            if (getLocMethod != null)
+            {
+                getLocMethod.Attributes = (getLocMethod.Attributes & ~MethodAttributes.MemberAccessMask) | MethodAttributes.Public;
+                Console.WriteLine("Made TitleContainer.get_Location public.");
+            }
             var setLocMethod = titleContainerType.Methods.FirstOrDefault(m => m.Name == "set_Location");
             if (setLocMethod != null)
             {
@@ -42,7 +48,6 @@ class Program
             // 0b. Patch PlatformOpenStream to search Location, Documents, Documents/StardewValley, and App Bundle
             var platOpenMethod = titleContainerType.Methods.FirstOrDefault(m => m.Name == "PlatformOpenStream");
             var platInitMethod = titleContainerType.Methods.FirstOrDefault(m => m.Name == "PlatformInit");
-            var getLocMethod = titleContainerType.Methods.FirstOrDefault(m => m.Name == "get_Location");
 
             if (platOpenMethod != null && platInitMethod != null && getLocMethod != null)
             {

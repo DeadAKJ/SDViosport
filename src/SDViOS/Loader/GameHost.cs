@@ -145,8 +145,10 @@ namespace SDViOS.Loader
 
             try
             {
-                TitleContainer.Location = GameRootDir;
-                EngineLogger.Log($"[GameHost] Configured TitleContainer.Location = '{TitleContainer.Location}'");
+                var locProp = typeof(Microsoft.Xna.Framework.TitleContainer).GetProperty("Location", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                locProp?.SetValue(null, GameRootDir);
+                var val = locProp?.GetValue(null);
+                EngineLogger.Log($"[GameHost] Configured TitleContainer.Location = '{val}'");
             }
             catch (Exception ex)
             {
