@@ -45,5 +45,6 @@
   <ItemGroup>
     <None Include="Info.plist" />
     <None Include="Entitlements.plist" />
+    <EmbeddedResource Include="Resources\0Harmony.dll" />
   </ItemGroup>
 </Project>

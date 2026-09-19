@@ -19,20 +19,19 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.48-fix-harmony-verification-exception'
+version_name = 'v1.0.49-embedded-harmony-fix'
 
-changelog_content = """Version: v1.0.48-fix-harmony-verification-exception
+changelog_content = """Version: v1.0.49-embedded-harmony-fix
 Date: 2026-09-19
 
 Changes:
-1. Fix 0Harmony VerificationException / Black Screen:
-   - Root Cause: In v1.0.47, RuntimeHarmonyPatcher emptied GetOrCreateSharedStateType instructions without clearing ExceptionHandlers. The leftover exception handler pointed to non-existent instruction offset 39, triggering System.Security.VerificationException: Invalid instruction target 39, which aborted SMAPI initialization before Stardew Valley launched.
-   - Fix: RuntimeHarmonyPatcher now explicitly clears ExceptionHandlers and Variables when replacing GetOrCreateSharedStateType and neutralizing .cctor.
-   - Cleaned any existing corrupted exception handlers in already-patched 0Harmony.dll instances.
-2. Forced Sync of smapi-internal:
-   - SyncBundledDirectory now forces overwriting of Documents/smapi-internal from app bundle so clean pre-patched assemblies always replace stale copies in app container.
-3. VirtualKeyboardManager Cleanups:
-   - Throttled reflection initialization and guarded dispatcher property getters to prevent TargetInvocationException warnings on uninitialized frames.
+1. Embedded Pre-Patched 0Harmony.dll:
+   - Root Cause: In unbundled IPAs, Documents/smapi-internal/0Harmony.dll is not bundled in the IPA. The stale copy in Documents/ threw VerificationException and runtime Cecil patching threw NullReferenceException on iOS due to missing Framework references.
+   - Fix: Embedded a verified, pre-patched 0Harmony.dll directly inside SDViOS.dll as an EmbeddedResource.
+   - RuntimeHarmonyPatcher now extracts and deploys this tested 0Harmony.dll directly to Documents/smapi-internal/ on launch.
+   - Neutralized RefreshMethodStarts in HarmonySharedState to prevent MonoMod detour compilation hooks.
+2. Unbundled IPA Delivery:
+   - Delivers unbundled StardewValley-iOS.ipa directly to root folder and version folder.
 """
 
 

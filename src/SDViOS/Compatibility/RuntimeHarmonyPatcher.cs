@@ -13,6 +13,33 @@ namespace SDViOS.Compatibility
     {
         public static void EnsureHarmonyPatched(string targetDll)
         {
+            try
+            {
+                // 1. Prefer deploying verified embedded pre-patched 0Harmony.dll
+                var currentAsm = Assembly.GetExecutingAssembly();
+                string resourceName = "SDViOS.Resources.0Harmony.dll";
+                using var resStream = currentAsm.GetManifestResourceStream(resourceName);
+                if (resStream != null)
+                {
+                    string? dir = Path.GetDirectoryName(targetDll);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    {
+                        Directory.CreateDirectory(dir);
+                    }
+
+                    using (var fs = new FileStream(targetDll, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        resStream.CopyTo(fs);
+                    }
+                    EngineLogger.Log($"[RuntimeHarmonyPatcher] Successfully deployed verified embedded 0Harmony.dll to '{targetDll}'.");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[RuntimeHarmonyPatcher] Could not deploy embedded 0Harmony.dll: {ex}");
+            }
+
             if (!File.Exists(targetDll)) return;
 
             try
@@ -141,7 +168,7 @@ namespace SDViOS.Compatibility
             }
             catch (Exception ex)
             {
-                EngineLogger.LogWarning($"[RuntimeHarmonyPatcher] Warning while checking '{targetDll}': {ex.Message}");
+                EngineLogger.LogWarning($"[RuntimeHarmonyPatcher] Warning while checking '{targetDll}': {ex}");
             }
         }
     }

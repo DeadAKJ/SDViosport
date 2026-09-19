@@ -70,23 +70,28 @@ class Program
         var t = mod.GetType("HarmonyLib.HarmonySharedState");
         if (t != null)
         {
-            // 2. Neutralize DetourHelper.Runtime.add_OnMethodCompiled in cctor
+            // 2. Neutralize RefreshMethodStarts
+            var refresh = t.Methods.FirstOrDefault(m => m.Name == "RefreshMethodStarts");
+            if (refresh != null)
+            {
+                Console.WriteLine("  Neutralizing RefreshMethodStarts with ret...");
+                refresh.Body.Instructions.Clear();
+                refresh.Body.Variables.Clear();
+                refresh.Body.ExceptionHandlers.Clear();
+                refresh.Body.GetILProcessor().Emit(OpCodes.Ret);
+            }
+
             var cctor = t.Methods.FirstOrDefault(m => m.Name == ".cctor");
             if (cctor != null)
             {
                 for (int i = 0; i < cctor.Body.Instructions.Count; i++)
                 {
                     var ins = cctor.Body.Instructions[i];
-                    if (ins.OpCode == OpCodes.Call && ins.Operand?.ToString()?.Contains("DetourHelper::get_Runtime") == true)
+                    if (ins.OpCode == OpCodes.Call && ins.Operand?.ToString()?.Contains("RefreshMethodStarts") == true)
                     {
-                        Console.WriteLine($"  Neutralizing DetourHelper call in .cctor at offset {ins.Offset:X4}...");
-                        ins.OpCode = OpCodes.Ret;
+                        Console.WriteLine($"  Neutralizing RefreshMethodStarts call in .cctor at offset {ins.Offset:X4}...");
+                        ins.OpCode = OpCodes.Nop;
                         ins.Operand = null;
-                        while (cctor.Body.Instructions.Count > i + 1)
-                        {
-                            cctor.Body.Instructions.RemoveAt(i + 1);
-                        }
-                        break;
                     }
                 }
             }
@@ -109,7 +114,35 @@ class Program
         }
 
         asm.Write();
+        asm.Dispose();
         Console.WriteLine("=== Successfully patched 0Harmony.dll for iOS compatibility! ===");
+
+        try
+        {
+            Console.WriteLine("Verifying patched assembly via Assembly.Load...");
+            var rawBytes = File.ReadAllBytes(targetDll);
+            var loadedAsm = Assembly.Load(rawBytes);
+            var hssType = loadedAsm.GetType("HarmonyLib.HarmonySharedState");
+            if (hssType != null)
+            {
+                var method = hssType.GetMethod("GetOrCreateSharedStateType", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                if (method != null)
+                {
+                    var res = method.Invoke(null, null);
+                    Console.WriteLine($"Verification SUCCESS! GetOrCreateSharedStateType returned: {res}");
+                }
+                else
+                {
+                    Console.WriteLine("GetOrCreateSharedStateType method not found via reflection.");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Verification FAILED: {ex}");
+            return 1;
+        }
+
         return 0;
     }
 }
