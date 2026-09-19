@@ -7,6 +7,7 @@ using Microsoft.Xna.Framework;
 using UIKit;
 using SDViOS.Diagnostics;
 using SDViOS.Input;
+using SDViOS.Compatibility;
 using MonoMod.RuntimeDetour;
 
 // Global-namespace HarmonySharedState to satisfy 0Harmony.dll Type.GetType("HarmonySharedState", false).
@@ -310,6 +311,25 @@ namespace SDViOS.Loader
                 {
                     string smapiInternalDir = Path.Combine(DocumentsDir, "smapi-internal");
                     try { Directory.CreateDirectory(smapiInternalDir); } catch { }
+
+                    string bundledInternal = Path.Combine(BundleDir, "smapi-internal");
+                    if (Directory.Exists(bundledInternal))
+                    {
+                        try
+                        {
+                            SyncBundledDirectory(bundledInternal, smapiInternalDir);
+                            EngineLogger.Log("[GameHost] Synced bundled smapi-internal to Documents/smapi-internal.");
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogWarning($"[GameHost] Could not sync bundled smapi-internal: {ex.Message}");
+                        }
+                    }
+
+                    // Auto-patch 0Harmony.dll in both Documents and Bundle if needed
+                    RuntimeHarmonyPatcher.EnsureHarmonyPatched(Path.Combine(smapiInternalDir, "0Harmony.dll"));
+                    RuntimeHarmonyPatcher.EnsureHarmonyPatched(Path.Combine(bundledInternal, "0Harmony.dll"));
+
                     Environment.SetEnvironmentVariable("SMAPI_INTERNAL_PATH", smapiInternalDir);
                     Environment.SetEnvironmentVariable("SMAPI_MODS_PATH", ModsDir);
                     Environment.SetEnvironmentVariable("SMAPI_NO_TERMINAL", "1");

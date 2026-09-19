@@ -18,28 +18,24 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.46-audio-touchpad-keyboard'
+version_name = 'v1.0.47-runtime-harmony-patch-and-audio-fix'
 
-changelog_content = """Version: v1.0.46-audio-touchpad-keyboard
+changelog_content = """Version: v1.0.47-runtime-harmony-patch-and-audio-fix
 Date: 2026-09-19
 
 Changes:
-1. Audio System Fix:
-   - Patched lib/MonoGame.Framework.dll: AudioEngine.GetReverbSettings() was stubbed to return null, causing StardewValley.Game1.InitializeSounds() to throw NullReferenceException and silently revert to DummyAudioEngine. Replaced with returning a valid ReverbSettings instance.
-   - Configured AVAudioSession with AVAudioSessionCategory.Playback and MixWithOthers so audio plays through speakers regardless of silent switch state.
-   - Pre-initialized OpenALSoundController during GameHost launch.
-2. Virtual Keyboard for Text Input:
-   - Created VirtualKeyboardManager: Monitors Game1.keyboardDispatcher.Subscriber.
-   - Automatically presents native iOS UIAlertController with UITextField when selecting text input boxes (e.g. farmer name, farm name, favorite thing).
-   - Added manual Keyboard summon button on the virtual pad's top utility bar.
-3. Virtual Controls Interactivity:
-   - Mapped on-screen joystick to WASD keys (W/A/S/D) and GamePad thumbsticks/DPad.
-   - Mapped Action button A to Keys.X / Buttons.A / Left Click.
-   - Mapped Tool button X to Keys.C / Buttons.X / Right Click.
-   - Mapped Menu button Y to Keys.E / Buttons.Y.
-   - Mapped Cancel button B to Keys.Escape / Buttons.B.
-   - Injected pressed keys directly into Microsoft.Xna.Framework.Input.Keyboard.SetKeys() and StardewValley.InputState.
-   - Automatically toggles Game1.options.gamepadControls when virtual controls are used.
+1. Runtime 0Harmony Auto-Patcher & smapi-internal Sync:
+   - Synchronizes bundled smapi-internal from SDViOS.app to Documents/smapi-internal on startup.
+   - Built-in RuntimeHarmonyPatcher: Inspects and patches 0Harmony.dll directly on device before SMAPI loads, injecting HarmonySharedState and neutralizing DetourHelper._Runtime call even if stale/unpatched files exist in Documents.
+2. Audio System Fix:
+   - Patched lib/MonoGame.Framework.dll: AudioEngine.GetReverbSettings() returns non-null ReverbSettings, preventing NRE in Game1.InitializeSounds().
+   - Configured AVAudioSession with AVAudioSessionCategory.Playback and pre-initialized OpenAL.
+3. Virtual Keyboard for Text Input:
+   - VirtualKeyboardManager automatically presents native iOS UIAlertController with UITextField for text boxes.
+   - Added manual keyboard button on virtual pad.
+4. Virtual Controls Interactivity:
+   - WASD key injection via Keyboard.SetKeys() and Game1.input.
+   - Action buttons (X/C/E/Esc) mapped and functional.
 """
 
 
