@@ -19,19 +19,22 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.59-fix-wavebank-getsei'
+version_name = 'v1.0.60-prevent-smapi-dispose'
 
-changelog_content = """Version: v1.0.59-fix-wavebank-getsei
+changelog_content = """Version: v1.0.60-prevent-smapi-dispose
 Date: 2026-09-20
 
 Changes:
-1. Fix Root Cause of InvalidProgramException in WaveBank.GetSoundEffectInstance:
-   - Diagnosis: In v1.0.58, audio playback for ambient sounds ('babblingBrook', 'cracklingFire', 'heavyEngine', 'cricketsAmbient', 'waterfall') threw System.InvalidProgramException at Microsoft.Xna.Framework.Audio.WaveBank.GetSoundEffectInstance(Int32 trackIndex, Boolean& streaming).
-   - Root Cause: In PatchMonoGame, WaveBank.LoadSoundEffect(int trackIndex) invoked `AudioEngine.OpenStream(string filePath, bool useMemoryStream)` with only one argument (`this._waveBankFileName`) on the evaluation stack. The missing boolean argument caused an IL stack underflow, triggering immediate rejection by the Mono runtime method verifier with System.InvalidProgramException.
+1. Fix Premature Shutdown / SCore Disposal Immediately After LoadContent():
+   - Diagnosis: In v1.0.59, `Instance_LoadContent()` completed successfully in 2.2s with zero audio errors and zero native crashes. However, exactly 67ms later, SMAPI logged `Disposing...` and `Disposing the content coordinator`, and the app abruptly terminated without rendering the title screen.
+   - Root Cause:
+     a) MonoGame's `Game.DoExiting()` / `Platform_AsyncRunLoopEnded` invoked `Game.OnExiting()`, which raised the `Game.Exiting` event.
+     b) In `Stardew Valley.dll`, `StardewValley.GameRunner..ctor` subscribed `<.ctor>b__11_1` to `Game.Exiting`. This handler invoked `ExecuteForInstances(OnExiting)` (which triggered `SCore.OnGameExiting()` -> `SCore.Dispose(false)`) and immediately executed `Process.GetCurrentProcess().Kill()`, terminating the entire iOS app process with SIGKILL before `RunInteractively` could finish!
    - Fix:
-     a) Added `Ldc_I4_0` (`useMemoryStream = false`) to `LoadSoundEffect` before calling `AudioEngine.OpenStream`, ensuring 100% balanced stack depth across the entire lazy loader.
-     b) Wrapped `WaveBank.GetSoundEffectInstance` non-streaming lazy loader in a robust `try / catch (Exception)` handler that safely catches any audio file or decoding exceptions and returns `null`.
-     c) Patched `PatchMonoGame` to remove any existing/duplicate `LoadSoundEffect` definitions before injecting the verified loader.
+     a) Patched `Microsoft.Xna.Framework.Game.add_Exiting` in `MonoGame.Framework.dll` to a pure no-op (`ret`), preventing `GameRunner` from ever registering the `Process.Kill` shutdown handler.
+     b) Patched `Microsoft.Xna.Framework.Game.remove_Exiting`, `DoExiting`, `OnExiting`, and `Platform_AsyncRunLoopEnded` in `MonoGame.Framework.dll` to pure no-ops (`ret`).
+     c) Created `RuntimeSmapiPatcher` in `SDViOS.Compatibility` to neutralize `SCore.OnGameExiting` and `SGameRunner.OnExiting` in `StardewModdingAPI.dll`, and `Process.Kill` in `Stardew Valley.dll`.
+     d) Wrapped `SCore.RunInteractively` invocation in `GameHost.cs` with detailed try/catch and exception diagnostics.
 2. Standalone Unbundled IPA Delivery:
    - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """

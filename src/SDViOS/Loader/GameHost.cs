@@ -342,6 +342,10 @@ namespace SDViOS.Loader
                     RuntimeHarmonyPatcher.EnsureHarmonyPatched(Path.Combine(smapiInternalDir, "0Harmony.dll"));
                     RuntimeHarmonyPatcher.EnsureHarmonyPatched(Path.Combine(bundledInternal, "0Harmony.dll"));
 
+                    // Auto-patch SMAPI and Stardew Valley dlls if in writable location to prevent premature disposal / kill
+                    RuntimeSmapiPatcher.EnsureGameRunnerPatched(sdvPath);
+                    RuntimeSmapiPatcher.EnsureSmapiPatched(smapiPath);
+
                     Environment.SetEnvironmentVariable("SMAPI_INTERNAL_PATH", smapiInternalDir);
                     Environment.SetEnvironmentVariable("SMAPI_MODS_PATH", ModsDir);
                     Environment.SetEnvironmentVariable("SMAPI_NO_TERMINAL", "1");
@@ -571,9 +575,21 @@ namespace SDViOS.Loader
                             EngineLogger.LogWarning($"[GameHost] Failed to pre-set NullSDKHelper: {ex.Message}");
                         }
 
-                        var runMethod = scoreType.GetMethod("RunInteractively", BindingFlags.Public | BindingFlags.Instance);
-                        runMethod?.Invoke(core, null);
-                        EngineLogger.Log("[GameHost] SMAPI SCore.RunInteractively launched successfully.");
+                        try
+                        {
+                            var runMethod = scoreType.GetMethod("RunInteractively", BindingFlags.Public | BindingFlags.Instance);
+                            runMethod?.Invoke(core, null);
+                            EngineLogger.Log("[GameHost] SMAPI SCore.RunInteractively launched successfully.");
+                        }
+                        catch (TargetInvocationException tie)
+                        {
+                            var inner = tie.InnerException ?? tie;
+                            EngineLogger.LogError($"[GameHost] SCore.RunInteractively caught TargetInvocationException: {inner.GetType().FullName}: {inner.Message}\n{inner.StackTrace}");
+                        }
+                        catch (Exception ex)
+                        {
+                            EngineLogger.LogError($"[GameHost] SCore.RunInteractively exception: {ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}");
+                        }
 
                         // 3. Post-RunInteractively: Neutralize SGameRunner.OnGameExiting and revive SCore state
                         try
@@ -673,6 +689,7 @@ namespace SDViOS.Loader
             EngineLogger.Log("Launching Pure Vanilla Stardew Valley from: " + sdvPath);
             try
             {
+                RuntimeSmapiPatcher.EnsureGameRunnerPatched(sdvPath);
                 var sdvAsm = Assembly.LoadFrom(sdvPath);
                 var runnerType = sdvAsm.GetType("StardewValley.GameRunner");
                 if (runnerType != null)

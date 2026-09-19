@@ -24,6 +24,8 @@ class Program
             return 1;
         }
 
+
+
         if (args.Contains("--inspect-sei"))
         {
             var asm = AssemblyDefinition.ReadAssembly(dllPath);
@@ -874,6 +876,66 @@ class Program
                 il.Emit(OpCodes.Ldnull);
                 il.Emit(OpCodes.Ret);
                 Console.WriteLine("Safeguarded AudioCategory.GetOldestInstance (returns null).");
+            }
+        }
+
+        // 8. Neutralize Game exiting and shutdown hooks (iOS must NEVER exit or kill process on startup)
+        var gameType = module.GetType("Microsoft.Xna.Framework.Game");
+        if (gameType != null)
+        {
+            var addExiting = gameType.Methods.FirstOrDefault(m => m.Name == "add_Exiting");
+            if (addExiting != null)
+            {
+                addExiting.Body.Instructions.Clear();
+                addExiting.Body.Variables.Clear();
+                addExiting.Body.ExceptionHandlers.Clear();
+                var il = addExiting.Body.GetILProcessor();
+                il.Emit(OpCodes.Ret);
+                Console.WriteLine("Neutralized Game.add_Exiting (prevents Process.Kill registration).");
+            }
+
+            var removeExiting = gameType.Methods.FirstOrDefault(m => m.Name == "remove_Exiting");
+            if (removeExiting != null)
+            {
+                removeExiting.Body.Instructions.Clear();
+                removeExiting.Body.Variables.Clear();
+                removeExiting.Body.ExceptionHandlers.Clear();
+                var il = removeExiting.Body.GetILProcessor();
+                il.Emit(OpCodes.Ret);
+                Console.WriteLine("Neutralized Game.remove_Exiting.");
+            }
+
+            var doExiting = gameType.Methods.FirstOrDefault(m => m.Name == "DoExiting");
+            if (doExiting != null)
+            {
+                doExiting.Body.Instructions.Clear();
+                doExiting.Body.Variables.Clear();
+                doExiting.Body.ExceptionHandlers.Clear();
+                var il = doExiting.Body.GetILProcessor();
+                il.Emit(OpCodes.Ret);
+                Console.WriteLine("Neutralized Game.DoExiting (pure no-op ret).");
+            }
+
+            var onExiting = gameType.Methods.FirstOrDefault(m => m.Name == "OnExiting");
+            if (onExiting != null)
+            {
+                onExiting.Body.Instructions.Clear();
+                onExiting.Body.Variables.Clear();
+                onExiting.Body.ExceptionHandlers.Clear();
+                var il = onExiting.Body.GetILProcessor();
+                il.Emit(OpCodes.Ret);
+                Console.WriteLine("Neutralized Game.OnExiting (pure no-op ret).");
+            }
+
+            var asyncLoopEnded = gameType.Methods.FirstOrDefault(m => m.Name == "Platform_AsyncRunLoopEnded");
+            if (asyncLoopEnded != null)
+            {
+                asyncLoopEnded.Body.Instructions.Clear();
+                asyncLoopEnded.Body.Variables.Clear();
+                asyncLoopEnded.Body.ExceptionHandlers.Clear();
+                var il = asyncLoopEnded.Body.GetILProcessor();
+                il.Emit(OpCodes.Ret);
+                Console.WriteLine("Neutralized Game.Platform_AsyncRunLoopEnded (pure no-op ret).");
             }
         }
 
