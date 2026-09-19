@@ -19,19 +19,30 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.57-clean-audiocategory-guard'
+version_name = 'v1.0.58-fix-xactsound-addsound'
 
-changelog_content = """Version: v1.0.57-clean-audiocategory-guard
+changelog_content = """Version: v1.0.58-fix-xactsound-addsound
 Date: 2026-09-19
 
 Changes:
-1. Eliminate Native EXC_BAD_ACCESS / SIGSEGV by Using Pure Non-Allocating Null Guards:
-   - Root Cause: In v1.0.56, attempting to call `new List<XactSound>()` inside `AudioCategory.AddSound` and using `ldelema` on struct array elements inside `XactSound..ctor` caused Mono's Full-AOT / Interpreter runtime on iOS to fail pointer authentication (`0x74737953373256ad`), crashing with EXC_BAD_ACCESS (SIGSEGV) during XACT initialization.
+1. Fix Root Cause of EXC_BAD_ACCESS (SIGSEGV at 0x1d):
+   - Crash Diagnosis: In v1.0.57, SDViOS crashed with EXC_BAD_ACCESS (SIGSEGV) at 0x000000000000001d (offset 28 from pointer 1).
+   - Root Cause: In MonoGame's original IL for `XactSound..ctor (AudioEngine, SoundBank, BinaryReader)`, it contained a broken legacy struct call:
+       ldarg.1 (AudioEngine)
+       callvirt AudioEngine::get_Categories()
+       ldarg.0 (XactSound)
+       ldfld _categoryID
+       ldelem.any AudioCategory
+       stloc.3
+       ldloca.s V_3
+       ldarg.0
+       call AudioCategory::AddSound(XactSound)
+     Because `AudioCategory` is a reference type (class) rather than a value type, using `ldelem.any` and `ldloca.s V_3` loaded a managed pointer to a local stack slot `AudioCategory**` instead of an object reference `AudioCategory*`. In Mono's Full-AOT interpreter loop (`MINT_LDFLD_I4`), dereferencing this stack pointer loaded whatever value was at that slot on the stack (which was boolean `1`), and attempting to read field offset 0x1c resulted in dereferencing `0x1 + 0x1c = 0x1d`, crashing with SIGSEGV. Furthermore, any changes made to `V_3` were immediately discarded at the subsequent `ret`.
    - Fix:
-     a) Reverted `XactSound..ctor` back to its original unmodified implementation (zero IL changes, zero metadata additions).
-     b) In `AudioCategory.AddSound`, implemented pure non-allocating null guard: `if (this._sounds == null) return;` using only existing IL opcodes. If `_sounds` is null, it immediately and safely returns without allocating.
-     c) In `AudioCategory.Pause`, `Resume`, `Stop`, `GetPlayingInstanceCount`, `GetOldestInstance`, and `SetVolume`, guarded against null `_sounds` and null `_volume` with simple early returns.
-     d) Completely avoids dynamic generic instantiations and struct managed pointer instructions under AOT.
+     a) Neutralized the broken `AddSound` invocation at the end of `XactSound..ctor` by replacing the entry instruction with `ret` and removing the remaining dead opcodes. Both earlier branches cleanly terminate at `ret`.
+     b) Rebuilt `AudioCategory.AddSound`, `Pause`, `Resume`, and `Stop` as clean 1-instruction `ret` no-ops with cleared exception handlers and locals.
+     c) Rebuilt `AudioCategory.SetVolume` cleanly: validates non-negative volume, ensures `_volume` is allocated, updates `_volume[0] = volume`, and returns with zero stack/register corruption.
+     d) Rebuilt `AudioCategory.GetPlayingInstanceCount` (returns 0) and `GetOldestInstance` (returns null).
 2. Standalone Unbundled IPA Delivery:
    - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """
