@@ -123,7 +123,6 @@ class Program
 
                 // CHECK_DOCS_SUBDIR: docPath = Path.Combine(docs, "StardewValley", safeName);
                 il.Append(lblCheckDocsSubdir);
-                il.Emit(OpCodes.Ldloc_1);
                 il.Emit(OpCodes.Ldstr, "StardewValley");
                 il.Emit(OpCodes.Ldarg_0);
                 il.Emit(OpCodes.Call, pathCombine3);
@@ -166,7 +165,11 @@ class Program
                 il.Emit(OpCodes.Call, fileOpenRead);
                 il.Emit(OpCodes.Ret);
 
-                Console.WriteLine("Patched TitleContainer.PlatformOpenStream with multi-path resolution (Location -> Documents -> Documents/StardewValley -> App Bundle -> Fallback).");
+                Console.WriteLine("Patched TitleContainer.PlatformOpenStream with multi-path resolution.");
+                foreach (var inst in platOpenMethod.Body.Instructions)
+                {
+                    Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand} (Type: {inst.Operand?.GetType().Name})");
+                }
             }
         }
 
