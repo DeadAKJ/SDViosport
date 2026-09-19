@@ -1,4 +1,4 @@
-﻿name: Build Stardew Valley iOS IPA
+name: Build Stardew Valley iOS IPA
 
 on:
   push:
@@ -28,6 +28,10 @@ jobs:
       - name: Install .NET iOS Workload
         run: |
           dotnet workload install ios --skip-manifest-update
+
+      - name: Patch MonoGame Framework
+        run: |
+          dotnet run --project tools/PatchMonoGame
 
       - name: Restore NuGet Packages
         run: |

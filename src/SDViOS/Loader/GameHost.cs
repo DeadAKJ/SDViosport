@@ -143,6 +143,16 @@ namespace SDViOS.Loader
             Environment.SetEnvironmentVariable("MONO_STRICT_MS_COMPLIANT", "yes");
             Directory.SetCurrentDirectory(GameRootDir);
 
+            try
+            {
+                TitleContainer.Location = GameRootDir;
+                EngineLogger.Log($"[GameHost] Configured TitleContainer.Location = '{TitleContainer.Location}'");
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[GameHost] Could not set TitleContainer.Location: {ex.Message}");
+            }
+
             SetupAssemblyResolver(BundleDir);
         }
 

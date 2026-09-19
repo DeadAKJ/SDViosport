@@ -19,18 +19,21 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.50-neutralize-harmony-patchprocessor-detour'
+version_name = 'v1.0.51-titlecontainer-content-path-fix'
 
-changelog_content = """Version: v1.0.50-neutralize-harmony-patchprocessor-detour
+changelog_content = """Version: v1.0.51-titlecontainer-content-path-fix
 Date: 2026-09-19
 
 Changes:
-1. Neutralized HarmonyLib.PatchProcessor.Patch():
-   - Root Cause: SMAPI's MiniMonoModHotfix called Harmony.Patch(), which created dynamic native trampolines in heap memory. Non-jailbroken iOS strictly enforces W^X (AMFI), causing SIGKILL (CODESIGNING Invalid Page, EXC_BAD_ACCESS / KERN_PROTECTION_FAILURE at dynamic trampoline page).
-   - Fix: Patched 0Harmony.dll to replace PatchProcessor.Patch() body with returning `this.original as MethodInfo`. Bypasses dynamic native detour generation entirely while satisfying SMAPI's reflection call.
-2. Embedded Pre-Patched 0Harmony.dll:
-   - Embedded the updated 0Harmony.dll inside SDViOS.dll as EmbeddedResource and deployed to Documents/smapi-internal/0Harmony.dll on startup.
-3. Standalone Unbundled IPA Delivery:
+1. Multi-Path TitleContainer & Unbundled Content Resolution:
+   - Root Cause: MonoGame on iOS hardcodes TitleContainer.Location to NSBundle.MainBundle.ResourcePath (the .app bundle). In unbundled mode, game content lives in Documents/Content (or Documents/StardewValley/Content), not inside SDViOS.app.
+   - When AudioEngine initialized, it looked for Content/XACT/FarmerSounds.xgs in SDViOS.app, threw FileNotFoundException, and switched to DummyAudioEngine (causing 0 audio).
+   - When Stardew Valley initialized, it looked for Content/Data/BigCraftables.xnb in SDViOS.app, failed with ContentLoadException, and cleanly exited (SMAPI "Game has ended. Press any key to exit"), which resulted in an immediate app exit with NO iOS .ips crash log generated.
+   - Fix:
+     a) Made TitleContainer.set_Location public in MonoGame.Framework.dll and configured TitleContainer.Location to GameRootDir on boot.
+     b) Patched TitleContainer.PlatformOpenStream in MonoGame.Framework.dll to resolve paths hierarchically across: TitleContainer.Location -> Documents/ -> Documents/StardewValley/ -> NSBundle.MainBundle.ResourcePath -> fallback.
+     c) Restores all game content loading (BigCraftables, etc.) and XACT audio engine (FarmerSounds.xgs, Sound Bank.xsb, Wave Bank.xwb).
+2. Standalone Unbundled IPA Delivery:
    - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """
 
