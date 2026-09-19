@@ -19,22 +19,24 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.60-prevent-smapi-dispose'
+version_name = 'v1.0.61-neutralize-smapi-dispose'
 
-changelog_content = """Version: v1.0.60-prevent-smapi-dispose
+changelog_content = """Version: v1.0.61-neutralize-smapi-dispose
 Date: 2026-09-20
 
 Changes:
-1. Fix Premature Shutdown / SCore Disposal Immediately After LoadContent():
-   - Diagnosis: In v1.0.59, `Instance_LoadContent()` completed successfully in 2.2s with zero audio errors and zero native crashes. However, exactly 67ms later, SMAPI logged `Disposing...` and `Disposing the content coordinator`, and the app abruptly terminated without rendering the title screen.
+1. Fix Root Cause of RuntimeSmapiPatcher Cecil AssemblyResolutionException & SCore.Dispose:
+   - Diagnosis: In v1.0.60, SMAPI still logged `Disposing...` and `Disposing the content coordinator` 67ms after `Instance_LoadContent()` completed.
    - Root Cause:
-     a) MonoGame's `Game.DoExiting()` / `Platform_AsyncRunLoopEnded` invoked `Game.OnExiting()`, which raised the `Game.Exiting` event.
-     b) In `Stardew Valley.dll`, `StardewValley.GameRunner..ctor` subscribed `<.ctor>b__11_1` to `Game.Exiting`. This handler invoked `ExecuteForInstances(OnExiting)` (which triggered `SCore.OnGameExiting()` -> `SCore.Dispose(false)`) and immediately executed `Process.GetCurrentProcess().Kill()`, terminating the entire iOS app process with SIGKILL before `RunInteractively` could finish!
+     a) `RuntimeSmapiPatcher` in v1.0.60 used Mono.Cecil without configuring `DefaultAssemblyResolver` with search directories (bundle, Documents, game root). Calling `asm.Write()` caused Cecil to throw `AssemblyResolutionException: Failed to resolve assembly: 'MonoGame.Framework'`, silently failing the patch attempt.
+     b) Furthermore, `RuntimeSmapiPatcher` only neutralized `SCore.OnGameExiting`, but `SCore.Dispose(bool)` itself was not neutralized. If `SCore.Dispose(bool)` runs, it calls `ContentCoordinator.Dispose()` and `Game.Dispose()`, setting `_isDisposed = true`, which immediately crashes `Game.Tick()` on the next CADisplayLink frame with `ObjectDisposedException`.
    - Fix:
-     a) Patched `Microsoft.Xna.Framework.Game.add_Exiting` in `MonoGame.Framework.dll` to a pure no-op (`ret`), preventing `GameRunner` from ever registering the `Process.Kill` shutdown handler.
-     b) Patched `Microsoft.Xna.Framework.Game.remove_Exiting`, `DoExiting`, `OnExiting`, and `Platform_AsyncRunLoopEnded` in `MonoGame.Framework.dll` to pure no-ops (`ret`).
-     c) Created `RuntimeSmapiPatcher` in `SDViOS.Compatibility` to neutralize `SCore.OnGameExiting` and `SGameRunner.OnExiting` in `StardewModdingAPI.dll`, and `Process.Kill` in `Stardew Valley.dll`.
-     d) Wrapped `SCore.RunInteractively` invocation in `GameHost.cs` with detailed try/catch and exception diagnostics.
+     a) Configured `DefaultAssemblyResolver` in `RuntimeSmapiPatcher` with search paths for Bundle, Documents, GameRoot, and smapi-internal.
+     b) In `RuntimeSmapiPatcher`: Neutralized all `SCore.Dispose` methods (both parameterless and bool overloads) to pure no-op (`ret`).
+     c) Neutralized `SCore.OnGameExiting` and `SGameRunner.OnExiting` to pure no-ops (`ret`).
+     d) Neutralized `GameRunner.<.ctor>b__11_1` (`Process.Kill`) and sanitized any `Process.Kill` instructions in `Stardew Valley.dll`.
+     e) In `RuntimeSmapiPatcher`: Read via `MemoryStream`, write via `MemoryStream`, and save with atomic temporary files, falling back to `Documents/smapi-internal/` cache if the original DLL is read-only (e.g., inside the app bundle).
+     f) Updated `GameHost.cs` to use the returned patched paths from `RuntimeSmapiPatcher`.
 2. Standalone Unbundled IPA Delivery:
    - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """

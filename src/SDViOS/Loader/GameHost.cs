@@ -343,8 +343,8 @@ namespace SDViOS.Loader
                     RuntimeHarmonyPatcher.EnsureHarmonyPatched(Path.Combine(bundledInternal, "0Harmony.dll"));
 
                     // Auto-patch SMAPI and Stardew Valley dlls if in writable location to prevent premature disposal / kill
-                    RuntimeSmapiPatcher.EnsureGameRunnerPatched(sdvPath);
-                    RuntimeSmapiPatcher.EnsureSmapiPatched(smapiPath);
+                    sdvPath = RuntimeSmapiPatcher.EnsureGameRunnerPatched(sdvPath);
+                    smapiPath = RuntimeSmapiPatcher.EnsureSmapiPatched(smapiPath);
 
                     Environment.SetEnvironmentVariable("SMAPI_INTERNAL_PATH", smapiInternalDir);
                     Environment.SetEnvironmentVariable("SMAPI_MODS_PATH", ModsDir);
@@ -689,7 +689,7 @@ namespace SDViOS.Loader
             EngineLogger.Log("Launching Pure Vanilla Stardew Valley from: " + sdvPath);
             try
             {
-                RuntimeSmapiPatcher.EnsureGameRunnerPatched(sdvPath);
+                sdvPath = RuntimeSmapiPatcher.EnsureGameRunnerPatched(sdvPath);
                 var sdvAsm = Assembly.LoadFrom(sdvPath);
                 var runnerType = sdvAsm.GetType("StardewValley.GameRunner");
                 if (runnerType != null)

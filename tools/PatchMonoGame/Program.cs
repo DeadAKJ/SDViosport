@@ -25,7 +25,6 @@ class Program
         }
 
 
-
         if (args.Contains("--inspect-sei"))
         {
             var asm = AssemblyDefinition.ReadAssembly(dllPath);
