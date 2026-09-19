@@ -81,9 +81,16 @@ namespace SDViOS.Compatibility
                                 {
                                     cctor.Body.Instructions.RemoveAt(i + 1);
                                 }
+                                cctor.Body.ExceptionHandlers.Clear();
                                 modified = true;
                                 break;
                             }
+                        }
+
+                        if (cctor.Body.ExceptionHandlers.Count > 0 && cctor.Body.Instructions.Any(ins => ins.OpCode == OpCodes.Ret))
+                        {
+                            cctor.Body.ExceptionHandlers.Clear();
+                            modified = true;
                         }
                     }
 
@@ -99,12 +106,29 @@ namespace SDViOS.Compatibility
                         {
                             EngineLogger.Log("[RuntimeHarmonyPatcher] Patching GetOrCreateSharedStateType to directly return HarmonySharedState...");
                             getOrCreate.Body.Instructions.Clear();
+                            getOrCreate.Body.Variables.Clear();
+                            getOrCreate.Body.ExceptionHandlers.Clear();
                             var il = getOrCreate.Body.GetILProcessor();
                             il.Emit(OpCodes.Ldtoken, targetSharedType);
                             var getTypeFromHandle = mod.ImportReference(typeof(Type).GetMethod("GetTypeFromHandle", new[] { typeof(RuntimeTypeHandle) }));
                             il.Emit(OpCodes.Call, getTypeFromHandle);
                             il.Emit(OpCodes.Ret);
                             modified = true;
+                        }
+                        else
+                        {
+                            // Clean up dangling ExceptionHandlers or Variables if left by previous patch
+                            if (getOrCreate.Body.ExceptionHandlers.Count > 0)
+                            {
+                                EngineLogger.Log("[RuntimeHarmonyPatcher] Cleaning dangling ExceptionHandlers from GetOrCreateSharedStateType...");
+                                getOrCreate.Body.ExceptionHandlers.Clear();
+                                modified = true;
+                            }
+                            if (getOrCreate.Body.Variables.Count > 0)
+                            {
+                                getOrCreate.Body.Variables.Clear();
+                                modified = true;
+                            }
                         }
                     }
                 }

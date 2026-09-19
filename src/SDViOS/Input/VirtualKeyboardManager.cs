@@ -256,9 +256,14 @@ namespace SDViOS.Input
             }
         }
 
+        private static DateTime _lastReflectionAttempt = DateTime.MinValue;
+        private static bool _loggedReflectionWarning = false;
+
         private static void EnsureReflection()
         {
             if (_reflectionInitialized && _keyboardDispatcherInstance != null) return;
+            if ((DateTime.UtcNow - _lastReflectionAttempt).TotalSeconds < 2.0) return;
+            _lastReflectionAttempt = DateTime.UtcNow;
 
             try
             {
@@ -271,11 +276,17 @@ namespace SDViOS.Input
                                            ?? g1Type.GetField("keyboardDispatcher", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                         var dispatcherProp = g1Type.GetProperty("keyboardDispatcher", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 
-                        _keyboardDispatcherInstance = dispatcherField?.GetValue(null) ?? dispatcherProp?.GetValue(null);
-
-                        if (_keyboardDispatcherInstance != null)
+                        object? dispatcher = null;
+                        try
                         {
-                            var kdType = _keyboardDispatcherInstance.GetType();
+                            dispatcher = dispatcherField?.GetValue(null) ?? dispatcherProp?.GetValue(null);
+                        }
+                        catch { }
+
+                        if (dispatcher != null)
+                        {
+                            _keyboardDispatcherInstance = dispatcher;
+                            var kdType = dispatcher.GetType();
                             _subscriberProp = kdType.GetProperty("Subscriber", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
                             _reflectionInitialized = true;
                             EngineLogger.Log("[VirtualKeyboardManager] Hooked Stardew Valley keyboardDispatcher successfully.");
@@ -286,7 +297,11 @@ namespace SDViOS.Input
             }
             catch (Exception ex)
             {
-                EngineLogger.LogWarning($"[VirtualKeyboardManager] Reflection hook warning: {ex.Message}");
+                if (!_loggedReflectionWarning)
+                {
+                    _loggedReflectionWarning = true;
+                    EngineLogger.LogWarning($"[VirtualKeyboardManager] Reflection hook warning: {ex.Message}");
+                }
             }
         }
     }

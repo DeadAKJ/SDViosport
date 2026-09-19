@@ -146,7 +146,7 @@ namespace SDViOS.Loader
             SetupAssemblyResolver(BundleDir);
         }
 
-        private static void SyncBundledDirectory(string sourceDir, string targetDir)
+        private static void SyncBundledDirectory(string sourceDir, string targetDir, bool forceOverwrite = false)
         {
             if (!Directory.Exists(sourceDir)) return;
             Directory.CreateDirectory(targetDir);
@@ -161,7 +161,7 @@ namespace SDViOS.Loader
                     Directory.CreateDirectory(destFolder);
                 }
 
-                if (!File.Exists(dest) || File.GetLastWriteTimeUtc(file) > File.GetLastWriteTimeUtc(dest))
+                if (forceOverwrite || !File.Exists(dest) || File.GetLastWriteTimeUtc(file) > File.GetLastWriteTimeUtc(dest))
                 {
                     try { File.Copy(file, dest, true); } catch { }
                 }
@@ -317,7 +317,7 @@ namespace SDViOS.Loader
                     {
                         try
                         {
-                            SyncBundledDirectory(bundledInternal, smapiInternalDir);
+                            SyncBundledDirectory(bundledInternal, smapiInternalDir, forceOverwrite: true);
                             EngineLogger.Log("[GameHost] Synced bundled smapi-internal to Documents/smapi-internal.");
                         }
                         catch (Exception ex)

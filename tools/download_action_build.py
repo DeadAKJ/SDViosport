@@ -18,24 +18,20 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.47-runtime-harmony-patch-and-audio-fix'
+version_name = 'v1.0.48-fix-harmony-verification-exception'
 
-changelog_content = """Version: v1.0.47-runtime-harmony-patch-and-audio-fix
+changelog_content = """Version: v1.0.48-fix-harmony-verification-exception
 Date: 2026-09-19
 
 Changes:
-1. Runtime 0Harmony Auto-Patcher & smapi-internal Sync:
-   - Synchronizes bundled smapi-internal from SDViOS.app to Documents/smapi-internal on startup.
-   - Built-in RuntimeHarmonyPatcher: Inspects and patches 0Harmony.dll directly on device before SMAPI loads, injecting HarmonySharedState and neutralizing DetourHelper._Runtime call even if stale/unpatched files exist in Documents.
-2. Audio System Fix:
-   - Patched lib/MonoGame.Framework.dll: AudioEngine.GetReverbSettings() returns non-null ReverbSettings, preventing NRE in Game1.InitializeSounds().
-   - Configured AVAudioSession with AVAudioSessionCategory.Playback and pre-initialized OpenAL.
-3. Virtual Keyboard for Text Input:
-   - VirtualKeyboardManager automatically presents native iOS UIAlertController with UITextField for text boxes.
-   - Added manual keyboard button on virtual pad.
-4. Virtual Controls Interactivity:
-   - WASD key injection via Keyboard.SetKeys() and Game1.input.
-   - Action buttons (X/C/E/Esc) mapped and functional.
+1. Fix 0Harmony VerificationException / Black Screen:
+   - Root Cause: In v1.0.47, RuntimeHarmonyPatcher emptied GetOrCreateSharedStateType instructions without clearing ExceptionHandlers. The leftover exception handler pointed to non-existent instruction offset 39, triggering System.Security.VerificationException: Invalid instruction target 39, which aborted SMAPI initialization before Stardew Valley launched.
+   - Fix: RuntimeHarmonyPatcher now explicitly clears ExceptionHandlers and Variables when replacing GetOrCreateSharedStateType and neutralizing .cctor.
+   - Cleaned any existing corrupted exception handlers in already-patched 0Harmony.dll instances.
+2. Forced Sync of smapi-internal:
+   - SyncBundledDirectory now forces overwriting of Documents/smapi-internal from app bundle so clean pre-patched assemblies always replace stale copies in app container.
+3. VirtualKeyboardManager Cleanups:
+   - Throttled reflection initialization and guarded dispatcher property getters to prevent TargetInvocationException warnings on uninitialized frames.
 """
 
 
