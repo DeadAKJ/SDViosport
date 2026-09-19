@@ -19,30 +19,19 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.58-fix-xactsound-addsound'
+version_name = 'v1.0.59-fix-wavebank-getsei'
 
-changelog_content = """Version: v1.0.58-fix-xactsound-addsound
-Date: 2026-09-19
+changelog_content = """Version: v1.0.59-fix-wavebank-getsei
+Date: 2026-09-20
 
 Changes:
-1. Fix Root Cause of EXC_BAD_ACCESS (SIGSEGV at 0x1d):
-   - Crash Diagnosis: In v1.0.57, SDViOS crashed with EXC_BAD_ACCESS (SIGSEGV) at 0x000000000000001d (offset 28 from pointer 1).
-   - Root Cause: In MonoGame's original IL for `XactSound..ctor (AudioEngine, SoundBank, BinaryReader)`, it contained a broken legacy struct call:
-       ldarg.1 (AudioEngine)
-       callvirt AudioEngine::get_Categories()
-       ldarg.0 (XactSound)
-       ldfld _categoryID
-       ldelem.any AudioCategory
-       stloc.3
-       ldloca.s V_3
-       ldarg.0
-       call AudioCategory::AddSound(XactSound)
-     Because `AudioCategory` is a reference type (class) rather than a value type, using `ldelem.any` and `ldloca.s V_3` loaded a managed pointer to a local stack slot `AudioCategory**` instead of an object reference `AudioCategory*`. In Mono's Full-AOT interpreter loop (`MINT_LDFLD_I4`), dereferencing this stack pointer loaded whatever value was at that slot on the stack (which was boolean `1`), and attempting to read field offset 0x1c resulted in dereferencing `0x1 + 0x1c = 0x1d`, crashing with SIGSEGV. Furthermore, any changes made to `V_3` were immediately discarded at the subsequent `ret`.
+1. Fix Root Cause of InvalidProgramException in WaveBank.GetSoundEffectInstance:
+   - Diagnosis: In v1.0.58, audio playback for ambient sounds ('babblingBrook', 'cracklingFire', 'heavyEngine', 'cricketsAmbient', 'waterfall') threw System.InvalidProgramException at Microsoft.Xna.Framework.Audio.WaveBank.GetSoundEffectInstance(Int32 trackIndex, Boolean& streaming).
+   - Root Cause: In PatchMonoGame, WaveBank.LoadSoundEffect(int trackIndex) invoked `AudioEngine.OpenStream(string filePath, bool useMemoryStream)` with only one argument (`this._waveBankFileName`) on the evaluation stack. The missing boolean argument caused an IL stack underflow, triggering immediate rejection by the Mono runtime method verifier with System.InvalidProgramException.
    - Fix:
-     a) Neutralized the broken `AddSound` invocation at the end of `XactSound..ctor` by replacing the entry instruction with `ret` and removing the remaining dead opcodes. Both earlier branches cleanly terminate at `ret`.
-     b) Rebuilt `AudioCategory.AddSound`, `Pause`, `Resume`, and `Stop` as clean 1-instruction `ret` no-ops with cleared exception handlers and locals.
-     c) Rebuilt `AudioCategory.SetVolume` cleanly: validates non-negative volume, ensures `_volume` is allocated, updates `_volume[0] = volume`, and returns with zero stack/register corruption.
-     d) Rebuilt `AudioCategory.GetPlayingInstanceCount` (returns 0) and `GetOldestInstance` (returns null).
+     a) Added `Ldc_I4_0` (`useMemoryStream = false`) to `LoadSoundEffect` before calling `AudioEngine.OpenStream`, ensuring 100% balanced stack depth across the entire lazy loader.
+     b) Wrapped `WaveBank.GetSoundEffectInstance` non-streaming lazy loader in a robust `try / catch (Exception)` handler that safely catches any audio file or decoding exceptions and returns `null`.
+     c) Patched `PatchMonoGame` to remove any existing/duplicate `LoadSoundEffect` definitions before injecting the verified loader.
 2. Standalone Unbundled IPA Delivery:
    - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """
