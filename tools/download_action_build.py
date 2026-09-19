@@ -6,6 +6,7 @@ import io
 import os
 import sys
 import subprocess
+import shutil
 
 # Load GitHub Token from environment or local gitignored token.txt
 token = os.environ.get('GITHUB_TOKEN')
@@ -141,9 +142,18 @@ with opener.open(req) as resp:
             print(f"Extracting {filename} to {target_dir}...")
             z.extract(filename, target_dir)
 
-# Purge previous version IPAs to conserve disk space
+# Copy standalone IPA to base directory root
 base_dir = r"C:\Users\User\Desktop\SDVport Version"
-root_bundled = os.path.join(base_dir, "StardewValley-Bundled.ipa")
+root_ipa = os.path.join(base_dir, "StardewValley-iOS.ipa")
+extracted_ipa = os.path.join(target_dir, "StardewValley-iOS.ipa")
+if os.path.exists(extracted_ipa):
+    try:
+        shutil.copy2(extracted_ipa, root_ipa)
+        print(f"Copied standalone IPA to: {root_ipa}")
+    except Exception as e:
+        print(f"Warning: could not copy to root: {e}")
+
+# Purge previous version IPAs to conserve disk space
 freed_bytes = 0
 purged_count = 0
 for r, d, f_list in os.walk(base_dir):
@@ -152,7 +162,7 @@ for r, d, f_list in os.walk(base_dir):
     for f in f_list:
         if f.endswith(".ipa"):
             full_p = os.path.join(r, f)
-            if os.path.abspath(full_p) == os.path.abspath(root_bundled):
+            if os.path.abspath(full_p) == os.path.abspath(root_ipa):
                 continue
             try:
                 freed_bytes += os.path.getsize(full_p)
