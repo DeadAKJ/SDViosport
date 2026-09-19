@@ -320,17 +320,19 @@ class Program
                 var ctor5 = waveBankType.Methods.FirstOrDefault(m => m.IsConstructor && m.Parameters.Count == 5);
                 if (ctor5 != null)
                 {
-                    // Look for `ldarg.0` followed by `ldfld _streaming` followed by `brtrue IL_05aa`
+                    // Look for `ldarg.0` followed by `ldfld _streaming` (or `nop`) followed by branch past synchronous loop
                     for (int i = 0; i < ctor5.Body.Instructions.Count - 2; i++)
                     {
                         var prevInst = ctor5.Body.Instructions[i];
                         var inst = ctor5.Body.Instructions[i + 1];
                         var nextInst = ctor5.Body.Instructions[i + 2];
-                        if (prevInst.OpCode == OpCodes.Ldarg_0 && inst.OpCode == OpCodes.Ldfld && inst.Operand == streamingField)
+                        if (prevInst.OpCode == OpCodes.Ldarg_0 &&
+                            (inst.OpCode == OpCodes.Ldfld && inst.Operand == streamingField || inst.OpCode == OpCodes.Nop) &&
+                            (nextInst.OpCode == OpCodes.Brtrue || nextInst.OpCode == OpCodes.Brtrue_S || nextInst.OpCode == OpCodes.Br))
                         {
-                            if (nextInst.OpCode == OpCodes.Brtrue || nextInst.OpCode == OpCodes.Brtrue_S)
+                            var target = nextInst.Operand as Instruction;
+                            if (target != null && target.Offset >= 0x0590)
                             {
-                                var target = nextInst.Operand as Instruction;
                                 // Nop out ldarg.0 and ldfld so the evaluation stack remains depth 0, then br to target!
                                 prevInst.OpCode = OpCodes.Nop;
                                 prevInst.Operand = null;
@@ -338,7 +340,7 @@ class Program
                                 inst.Operand = null;
                                 nextInst.OpCode = OpCodes.Br;
                                 nextInst.Operand = target;
-                                Console.WriteLine($"Patched WaveBank 5-param ctor to bypass synchronous decoding loop cleanly (balanced stack -> {target?.Offset:X4}).");
+                                Console.WriteLine($"Patched WaveBank 5-param ctor to bypass synchronous decoding loop cleanly (balanced stack -> {target.Offset:X4}).");
                                 break;
                             }
                         }
@@ -346,10 +348,13 @@ class Program
                 }
 
                 // 5b. Add private SoundEffect LoadSoundEffect(int trackIndex) to WaveBank
-                var loadSoundMethod = new MethodDefinition("LoadSoundEffect",
-                    MethodAttributes.Private | MethodAttributes.HideBySig,
-                    soundEffectType);
-                loadSoundMethod.Parameters.Add(new ParameterDefinition("trackIndex", ParameterAttributes.None, module.TypeSystem.Int32));
+                var loadSoundMethod = waveBankType.Methods.FirstOrDefault(m => m.Name == "LoadSoundEffect");
+                if (loadSoundMethod == null)
+                {
+                    loadSoundMethod = new MethodDefinition("LoadSoundEffect",
+                        MethodAttributes.Private | MethodAttributes.HideBySig,
+                        soundEffectType);
+                    loadSoundMethod.Parameters.Add(new ParameterDefinition("trackIndex", ParameterAttributes.None, module.TypeSystem.Int32));
 
                 // Locals:
                 // V_0: StreamInfo stream
@@ -533,10 +538,11 @@ class Program
                 loadSoundMethod.Body.ExceptionHandlers.Add(eh);
                 waveBankType.Methods.Add(loadSoundMethod);
                 Console.WriteLine("Added WaveBank.LoadSoundEffect(int trackIndex) lazy loader.");
+                }
 
                 // 5c. Patch GetSoundEffectInstance to use LoadSoundEffect and handle null
                 var getSEIMethod = waveBankType.Methods.FirstOrDefault(m => m.Name == "GetSoundEffectInstance");
-                if (getSEIMethod != null)
+                if (getSEIMethod != null && !getSEIMethod.Body.Instructions.Any(i => i.Operand == loadSoundMethod))
                 {
                     getSEIMethod.Body.Instructions.Clear();
                     getSEIMethod.Body.Variables.Clear();
@@ -601,7 +607,7 @@ class Program
 
                 // 5d. Patch WaveBank.Dispose(bool) to null-check elements before calling SoundEffect.Dispose()
                 var disposeMethod = waveBankType.Methods.FirstOrDefault(m => m.Name == "Dispose" && m.Parameters.Count == 1);
-                if (disposeMethod != null)
+                if (disposeMethod != null && !disposeMethod.Body.Instructions.Any(i => i.OpCode == OpCodes.Dup))
                 {
                     // In Dispose(bool):
                     //   ldloc.0

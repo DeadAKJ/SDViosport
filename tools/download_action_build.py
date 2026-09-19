@@ -19,16 +19,17 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.54-fix-wavebank-stack'
+version_name = 'v1.0.55-fix-wavebank-il-stack'
 
-changelog_content = """Version: v1.0.54-fix-wavebank-stack
+changelog_content = """Version: v1.0.55-fix-wavebank-il-stack
 Date: 2026-09-19
 
 Changes:
 1. Fix WaveBank Evaluation Stack Imbalance (InvalidProgramException):
-   - Root Cause: In v1.0.53, bypassing the synchronous decoding loop in `WaveBank..ctor` replaced `ldfld _streaming` with `nop`, leaving `ldarg.0` unconsumed on the evaluation stack when branching to `IL_05aa`, causing `System.InvalidProgramException` when `WaveBank..ctor` was verified at runtime.
-   - Fix: Nop out both `ldarg.0` and `ldfld _streaming` before branching to `IL_05aa`, ensuring a perfectly balanced stack (depth 0).
-   - Audio tracks are lazily decoded on demand via `WaveBank.LoadSoundEffect`, keeping startup instantaneous and memory footprint minimal.
+   - Root Cause: In v1.0.53 and v1.0.54, bypassing the synchronous decoding loop in `WaveBank..ctor` left `IL_0509: ldarg.0` unconsumed before branching to `IL_05a6`. The evaluation stack had depth 1 instead of 0 upon entering `IL_05a6`, causing Mono's runtime IL verifier to reject `WaveBank..ctor` with `System.InvalidProgramException`.
+   - Fix: Patched `IL_0509` to `nop` directly in `lib/MonoGame.Framework.dll`, achieving `IL_0509: nop; IL_050a: nop; IL_050b: br IL_05a6` with exact stack depth 0.
+   - Updated `tools/PatchMonoGame/Program.cs` to be completely idempotent across clean and pre-patched assemblies.
+   - Verified with Cecil that `WaveBank..ctor` has a balanced stack depth of 0 at branch target.
 2. Standalone Unbundled IPA Delivery:
    - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """
