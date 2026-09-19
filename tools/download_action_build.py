@@ -19,18 +19,19 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.56-fix-audiocategory-null'
+version_name = 'v1.0.57-clean-audiocategory-guard'
 
-changelog_content = """Version: v1.0.56-fix-audiocategory-null
+changelog_content = """Version: v1.0.57-clean-audiocategory-guard
 Date: 2026-09-19
 
 Changes:
-1. Fix AudioCategory NullReferenceException in SoundBank..ctor / XactSound..ctor:
-   - Root Cause: In XactSound..ctor, audio categories from engine.Categories were loaded into a local copy struct and AudioCategory.AddSound was invoked. If a category struct was default-initialized or had null _sounds, AddSound threw NullReferenceException on this._sounds.Add(sound), causing Game1.InitializeSounds() to catch XACT exception, drop to DummyAudioEngine, and exit upon LoadContent completion.
+1. Eliminate Native EXC_BAD_ACCESS / SIGSEGV by Using Pure Non-Allocating Null Guards:
+   - Root Cause: In v1.0.56, attempting to call `new List<XactSound>()` inside `AudioCategory.AddSound` and using `ldelema` on struct array elements inside `XactSound..ctor` caused Mono's Full-AOT / Interpreter runtime on iOS to fail pointer authentication (`0x74737953373256ad`), crashing with EXC_BAD_ACCESS (SIGSEGV) during XACT initialization.
    - Fix:
-     a) Safeguarded AudioCategory.AddSound in lib/MonoGame.Framework.dll to auto-initialize this._sounds = new List<XactSound>() if null before adding.
-     b) Safeguarded AudioCategory.GetPlayingInstanceCount, GetOldestInstance, Pause, Resume, Stop, and SetVolume against null _sounds and null _volume arrays.
-     c) Patched XactSound..ctor with null-check and unsigned bounds-check on engine.Categories, loading category references via ldelema to mutate the actual AudioEngine category elements directly.
+     a) Reverted `XactSound..ctor` back to its original unmodified implementation (zero IL changes, zero metadata additions).
+     b) In `AudioCategory.AddSound`, implemented pure non-allocating null guard: `if (this._sounds == null) return;` using only existing IL opcodes. If `_sounds` is null, it immediately and safely returns without allocating.
+     c) In `AudioCategory.Pause`, `Resume`, `Stop`, `GetPlayingInstanceCount`, `GetOldestInstance`, and `SetVolume`, guarded against null `_sounds` and null `_volume` with simple early returns.
+     d) Completely avoids dynamic generic instantiations and struct managed pointer instructions under AOT.
 2. Standalone Unbundled IPA Delivery:
    - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """

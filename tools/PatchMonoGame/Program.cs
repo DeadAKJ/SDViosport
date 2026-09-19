@@ -657,220 +657,110 @@ class Program
             }
         }
 
-        // 6. Safeguard AudioCategory and XactSound
+        // 6. Safeguard AudioCategory against null _sounds and null _volume
         var audioCategoryType = module.GetType("Microsoft.Xna.Framework.Audio.AudioCategory");
-        var xactSoundType = module.GetType("Microsoft.Xna.Framework.Audio.XactSound");
         if (audioCategoryType != null)
         {
             var catSoundsField = audioCategoryType.Fields.FirstOrDefault(f => f.Name == "_sounds");
             var catVolumeField = audioCategoryType.Fields.FirstOrDefault(f => f.Name == "_volume");
-            var catNameField = audioCategoryType.Fields.FirstOrDefault(f => f.Name == "_name");
-            var catCtor3 = audioCategoryType.Methods.FirstOrDefault(m => m.IsConstructor && m.Parameters.Count == 3);
 
-            if (catSoundsField != null && catCtor3 != null)
+            // 6a. AudioCategory.AddSound: if (_sounds == null) return;
+            var addSoundMethod = audioCategoryType.Methods.FirstOrDefault(m => m.Name == "AddSound");
+            if (addSoundMethod != null && catSoundsField != null && !addSoundMethod.Body.Instructions.Take(3).Any(i => i.OpCode == OpCodes.Brfalse_S || i.OpCode == OpCodes.Brfalse))
             {
-                var listCtor = catCtor3.Body.Instructions.FirstOrDefault(i => i.OpCode == OpCodes.Newobj && i.Operand.ToString().Contains("List"))?.Operand as MethodReference;
-
-                // 6a. AudioCategory.AddSound: null-safeguard
-                var addSoundMethod = audioCategoryType.Methods.FirstOrDefault(m => m.Name == "AddSound");
-                if (addSoundMethod != null && listCtor != null && !addSoundMethod.Body.Instructions.Any(i => i.OpCode == OpCodes.Newobj && i.Operand == listCtor))
+                var listAdd = addSoundMethod.Body.Instructions.FirstOrDefault(i => i.OpCode == OpCodes.Callvirt && i.Operand.ToString().Contains("Add"))?.Operand as MethodReference;
+                if (listAdd != null)
                 {
-                    var listAdd = addSoundMethod.Body.Instructions.FirstOrDefault(i => i.OpCode == OpCodes.Callvirt && i.Operand.ToString().Contains("Add"))?.Operand as MethodReference;
-                    if (listAdd != null)
-                    {
-                        addSoundMethod.Body.Instructions.Clear();
-                        var ilAdd = addSoundMethod.Body.GetILProcessor();
-                        var lblAdd = ilAdd.Create(OpCodes.Ldarg_0);
+                    addSoundMethod.Body.Instructions.Clear();
+                    var ilAdd = addSoundMethod.Body.GetILProcessor();
+                    var retInst = ilAdd.Create(OpCodes.Ret);
 
-                        // if (this._sounds != null) goto lblAdd;
-                        ilAdd.Emit(OpCodes.Ldarg_0);
-                        ilAdd.Emit(OpCodes.Ldfld, catSoundsField);
-                        ilAdd.Emit(OpCodes.Brtrue_S, lblAdd);
+                    ilAdd.Emit(OpCodes.Ldarg_0);
+                    ilAdd.Emit(OpCodes.Ldfld, catSoundsField);
+                    ilAdd.Emit(OpCodes.Brfalse_S, retInst);
 
-                        // this._sounds = new List<XactSound>();
-                        ilAdd.Emit(OpCodes.Ldarg_0);
-                        ilAdd.Emit(OpCodes.Newobj, listCtor);
-                        ilAdd.Emit(OpCodes.Stfld, catSoundsField);
+                    ilAdd.Emit(OpCodes.Ldarg_0);
+                    ilAdd.Emit(OpCodes.Ldfld, catSoundsField);
+                    ilAdd.Emit(OpCodes.Ldarg_1);
+                    ilAdd.Emit(OpCodes.Callvirt, listAdd);
 
-                        // lblAdd:
-                        ilAdd.Append(lblAdd);
-                        ilAdd.Emit(OpCodes.Ldfld, catSoundsField);
-                        ilAdd.Emit(OpCodes.Ldarg_1);
-                        ilAdd.Emit(OpCodes.Callvirt, listAdd);
-                        ilAdd.Emit(OpCodes.Ret);
-                        Console.WriteLine("Safeguarded AudioCategory.AddSound against null _sounds.");
-                    }
-                }
-
-                // 6b. AudioCategory.GetPlayingInstanceCount: return 0 if _sounds == null
-                var getPlayingMethod = audioCategoryType.Methods.FirstOrDefault(m => m.Name == "GetPlayingInstanceCount");
-                if (getPlayingMethod != null && !getPlayingMethod.Body.Instructions.Take(5).Any(i => i.OpCode == OpCodes.Ldfld && i.Operand == catSoundsField))
-                {
-                    var first = getPlayingMethod.Body.Instructions[0];
-                    var il = getPlayingMethod.Body.GetILProcessor();
-                    il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
-                    il.InsertBefore(first, il.Create(OpCodes.Ldfld, catSoundsField));
-                    il.InsertBefore(first, il.Create(OpCodes.Brtrue_S, first));
-                    il.InsertBefore(first, il.Create(OpCodes.Ldc_I4_0));
-                    il.InsertBefore(first, il.Create(OpCodes.Ret));
-                    Console.WriteLine("Safeguarded AudioCategory.GetPlayingInstanceCount against null _sounds.");
-                }
-
-                // 6c. AudioCategory.GetOldestInstance: return null if _sounds == null
-                var getOldestMethod = audioCategoryType.Methods.FirstOrDefault(m => m.Name == "GetOldestInstance");
-                if (getOldestMethod != null && !getOldestMethod.Body.Instructions.Take(5).Any(i => i.OpCode == OpCodes.Ldfld && i.Operand == catSoundsField))
-                {
-                    var first = getOldestMethod.Body.Instructions[0];
-                    var il = getOldestMethod.Body.GetILProcessor();
-                    il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
-                    il.InsertBefore(first, il.Create(OpCodes.Ldfld, catSoundsField));
-                    il.InsertBefore(first, il.Create(OpCodes.Brtrue_S, first));
-                    il.InsertBefore(first, il.Create(OpCodes.Ldnull));
-                    il.InsertBefore(first, il.Create(OpCodes.Ret));
-                    Console.WriteLine("Safeguarded AudioCategory.GetOldestInstance against null _sounds.");
-                }
-
-                // 6d. AudioCategory.Pause, Resume, Stop: return early if _sounds == null
-                foreach (var name in new[] { "Pause", "Resume", "Stop" })
-                {
-                    var m = audioCategoryType.Methods.FirstOrDefault(meth => meth.Name == name);
-                    if (m != null && !m.Body.Instructions.Take(5).Any(i => i.OpCode == OpCodes.Ldfld && i.Operand == catSoundsField))
-                    {
-                        var first = m.Body.Instructions[0];
-                        var il = m.Body.GetILProcessor();
-                        il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
-                        il.InsertBefore(first, il.Create(OpCodes.Ldfld, catSoundsField));
-                        il.InsertBefore(first, il.Create(OpCodes.Brtrue_S, first));
-                        il.InsertBefore(first, il.Create(OpCodes.Ret));
-                        Console.WriteLine($"Safeguarded AudioCategory.{name} against null _sounds.");
-                    }
-                }
-
-                // 6e. AudioCategory.SetVolume: guard _volume and _sounds against null
-                var setVolMethod = audioCategoryType.Methods.FirstOrDefault(m => m.Name == "SetVolume");
-                if (setVolMethod != null && catVolumeField != null && !setVolMethod.Body.Instructions.Take(15).Any(i => i.OpCode == OpCodes.Newarr))
-                {
-                    // Find the instruction where _volume is read for equality check (IL_0013: ldarg.0; IL_0014: ldfld _volume)
-                    for (int i = 0; i < setVolMethod.Body.Instructions.Count - 1; i++)
-                    {
-                        var inst = setVolMethod.Body.Instructions[i];
-                        var next = setVolMethod.Body.Instructions[i + 1];
-                        if (inst.OpCode == OpCodes.Ldarg_0 && next.OpCode == OpCodes.Ldfld && next.Operand == catVolumeField)
-                        {
-                            var il = setVolMethod.Body.GetILProcessor();
-                            var lblHasVolume = inst;
-
-                            // if (this._volume == null) this._volume = new float[1] { ldarg.1 };
-                            var insLdarg0 = il.Create(OpCodes.Ldarg_0);
-                            il.InsertBefore(lblHasVolume, insLdarg0);
-                            il.InsertBefore(lblHasVolume, il.Create(OpCodes.Ldfld, catVolumeField));
-                            il.InsertBefore(lblHasVolume, il.Create(OpCodes.Brtrue_S, lblHasVolume));
-
-                            il.InsertBefore(lblHasVolume, il.Create(OpCodes.Ldarg_0));
-                            il.InsertBefore(lblHasVolume, il.Create(OpCodes.Ldc_I4_1));
-                            il.InsertBefore(lblHasVolume, il.Create(OpCodes.Newarr, module.TypeSystem.Single));
-                            il.InsertBefore(lblHasVolume, il.Create(OpCodes.Dup));
-                            il.InsertBefore(lblHasVolume, il.Create(OpCodes.Ldc_I4_0));
-                            il.InsertBefore(lblHasVolume, il.Create(OpCodes.Ldarg_1));
-                            il.InsertBefore(lblHasVolume, il.Create(OpCodes.Stelem_R4));
-                            il.InsertBefore(lblHasVolume, il.Create(OpCodes.Stfld, catVolumeField));
-
-                            Console.WriteLine("Safeguarded AudioCategory.SetVolume against null _volume.");
-                            break;
-                        }
-                    }
-
-                    // Also guard against null _sounds before enumerating
-                    for (int i = 0; i < setVolMethod.Body.Instructions.Count - 1; i++)
-                    {
-                        var inst = setVolMethod.Body.Instructions[i];
-                        var next = setVolMethod.Body.Instructions[i + 1];
-                        if (inst.OpCode == OpCodes.Ldarg_0 && next.OpCode == OpCodes.Ldfld && next.Operand == catSoundsField)
-                        {
-                            var il = setVolMethod.Body.GetILProcessor();
-                            var lblHasSounds = inst;
-                            var insLdarg0 = il.Create(OpCodes.Ldarg_0);
-                            il.InsertBefore(lblHasSounds, insLdarg0);
-                            il.InsertBefore(lblHasSounds, il.Create(OpCodes.Ldfld, catSoundsField));
-                            il.InsertBefore(lblHasSounds, il.Create(OpCodes.Brtrue_S, lblHasSounds));
-                            il.InsertBefore(lblHasSounds, il.Create(OpCodes.Ret));
-                            Console.WriteLine("Safeguarded AudioCategory.SetVolume against null _sounds.");
-                            break;
-                        }
-                    }
+                    ilAdd.Append(retInst);
+                    Console.WriteLine("Safeguarded AudioCategory.AddSound (early return if null _sounds).");
                 }
             }
-        }
 
-        // 6f. XactSound constructor: bounds check and ldelema for AudioCategory
-        if (xactSoundType != null && audioCategoryType != null && audioEngineType != null)
-        {
-            var soundCtor = xactSoundType.Methods.FirstOrDefault(m => m.IsConstructor && m.Parameters.Count == 3 && m.Parameters[0].ParameterType.Name == "AudioEngine");
-            var categoryIdField = xactSoundType.Fields.FirstOrDefault(f => f.Name == "_categoryID");
-            var getCategoriesMethod = audioEngineType.Methods.FirstOrDefault(m => m.Name == "get_Categories");
-            var addSoundMethod = audioCategoryType.Methods.FirstOrDefault(m => m.Name == "AddSound");
-
-            if (soundCtor != null && categoryIdField != null && getCategoriesMethod != null && addSoundMethod != null && !soundCtor.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldelema))
+            // 6b. AudioCategory.Pause, Resume, Stop: if (_sounds == null) return;
+            foreach (var name in new[] { "Pause", "Resume", "Stop" })
             {
-                // Find IL_0172: ldarg.1 (engine) -> callvirt get_Categories
-                int startIndex = -1;
-                for (int i = 0; i < soundCtor.Body.Instructions.Count; i++)
+                var m = audioCategoryType.Methods.FirstOrDefault(meth => meth.Name == name);
+                if (m != null && catSoundsField != null && !m.Body.Instructions.Take(3).Any(i => i.OpCode == OpCodes.Brfalse_S || i.OpCode == OpCodes.Brfalse))
                 {
-                    var inst = soundCtor.Body.Instructions[i];
-                    if (inst.OpCode == OpCodes.Callvirt && inst.Operand == getCategoriesMethod)
-                    {
-                        startIndex = i - 1; // ldarg.1
-                        break;
-                    }
+                    var first = m.Body.Instructions[0];
+                    var lastRet = m.Body.Instructions.Last();
+                    var il = m.Body.GetILProcessor();
+                    il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
+                    il.InsertBefore(first, il.Create(OpCodes.Ldfld, catSoundsField));
+                    il.InsertBefore(first, il.Create(OpCodes.Brfalse_S, lastRet));
+                    Console.WriteLine($"Safeguarded AudioCategory.{name} (early return if null _sounds).");
+                }
+            }
+
+            // 6c. AudioCategory.GetPlayingInstanceCount: if (_sounds == null) return 0;
+            var getPlayingMethod = audioCategoryType.Methods.FirstOrDefault(m => m.Name == "GetPlayingInstanceCount");
+            if (getPlayingMethod != null && catSoundsField != null && !getPlayingMethod.Body.Instructions.Take(5).Any(i => i.OpCode == OpCodes.Brtrue_S || i.OpCode == OpCodes.Brtrue))
+            {
+                var first = getPlayingMethod.Body.Instructions[0];
+                var il = getPlayingMethod.Body.GetILProcessor();
+                il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(first, il.Create(OpCodes.Ldfld, catSoundsField));
+                il.InsertBefore(first, il.Create(OpCodes.Brtrue_S, first));
+                il.InsertBefore(first, il.Create(OpCodes.Ldc_I4_0));
+                il.InsertBefore(first, il.Create(OpCodes.Ret));
+                Console.WriteLine("Safeguarded AudioCategory.GetPlayingInstanceCount against null _sounds.");
+            }
+
+            // 6d. AudioCategory.GetOldestInstance: if (_sounds == null) return null;
+            var getOldestMethod = audioCategoryType.Methods.FirstOrDefault(m => m.Name == "GetOldestInstance");
+            if (getOldestMethod != null && catSoundsField != null && !getOldestMethod.Body.Instructions.Take(5).Any(i => i.OpCode == OpCodes.Brtrue_S || i.OpCode == OpCodes.Brtrue))
+            {
+                var first = getOldestMethod.Body.Instructions[0];
+                var il = getOldestMethod.Body.GetILProcessor();
+                il.InsertBefore(first, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(first, il.Create(OpCodes.Ldfld, catSoundsField));
+                il.InsertBefore(first, il.Create(OpCodes.Brtrue_S, first));
+                il.InsertBefore(first, il.Create(OpCodes.Ldnull));
+                il.InsertBefore(first, il.Create(OpCodes.Ret));
+                Console.WriteLine("Safeguarded AudioCategory.GetOldestInstance against null _sounds.");
+            }
+
+            // 6e. AudioCategory.SetVolume: guard _volume and _sounds against null
+            var setVolMethod = audioCategoryType.Methods.FirstOrDefault(m => m.Name == "SetVolume");
+            if (setVolMethod != null && catVolumeField != null && catSoundsField != null && !setVolMethod.Body.Instructions.Take(5).Any(i => i.OpCode == OpCodes.Brfalse_S || i.OpCode == OpCodes.Brfalse))
+            {
+                var lastRetVol = setVolMethod.Body.Instructions.Last();
+                var ilVol = setVolMethod.Body.GetILProcessor();
+
+                // Guard _volume at IL_0013
+                var instVolume = setVolMethod.Body.Instructions.FirstOrDefault(i => i.OpCode == OpCodes.Ldfld && i.Operand == catVolumeField);
+                if (instVolume != null)
+                {
+                    var prevLdarg0 = setVolMethod.Body.Instructions[setVolMethod.Body.Instructions.IndexOf(instVolume) - 1];
+                    ilVol.InsertBefore(prevLdarg0, ilVol.Create(OpCodes.Ldarg_0));
+                    ilVol.InsertBefore(prevLdarg0, ilVol.Create(OpCodes.Ldfld, catVolumeField));
+                    ilVol.InsertBefore(prevLdarg0, ilVol.Create(OpCodes.Brfalse_S, lastRetVol));
                 }
 
-                if (startIndex >= 0)
+                // Guard _sounds before enumerating
+                var instSounds = setVolMethod.Body.Instructions.FirstOrDefault(i => i.OpCode == OpCodes.Ldfld && i.Operand == catSoundsField);
+                if (instSounds != null)
                 {
-                    // Add local for AudioCategory[]
-                    var catsArrayVar = new VariableDefinition(getCategoriesMethod.ReturnType);
-                    soundCtor.Body.Variables.Add(catsArrayVar);
-
-                    var il = soundCtor.Body.GetILProcessor();
-                    var retInst = soundCtor.Body.Instructions.Last(); // ret
-
-                    // Remove all instructions from startIndex up to (not including) ret
-                    while (soundCtor.Body.Instructions[startIndex] != retInst)
-                    {
-                        soundCtor.Body.Instructions.RemoveAt(startIndex);
-                    }
-
-                    // Insert new safe invocation:
-                    // if (engine == null) goto retInst;
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldarg_1));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Brfalse_S, retInst));
-
-                    // cats = engine.Categories;
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldarg_1));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Callvirt, getCategoriesMethod));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Stloc, catsArrayVar));
-
-                    // if (cats == null) goto retInst;
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldloc, catsArrayVar));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Brfalse_S, retInst));
-
-                    // if ((uint)this._categoryID >= (uint)cats.Length) goto retInst;
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldarg_0));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldfld, categoryIdField));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldloc, catsArrayVar));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldlen));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Conv_I4));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Bge_Un_S, retInst));
-
-                    // cats[this._categoryID].AddSound(this);
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldloc, catsArrayVar));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldarg_0));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldfld, categoryIdField));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldelema, audioCategoryType));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Ldarg_0));
-                    il.InsertBefore(retInst, il.Create(OpCodes.Call, addSoundMethod));
-
-                    Console.WriteLine("Safeguarded XactSound..ctor with null-check, bounds-check, and ldelema on Categories.");
+                    var prevLdarg0S = setVolMethod.Body.Instructions[setVolMethod.Body.Instructions.IndexOf(instSounds) - 1];
+                    ilVol.InsertBefore(prevLdarg0S, ilVol.Create(OpCodes.Ldarg_0));
+                    ilVol.InsertBefore(prevLdarg0S, ilVol.Create(OpCodes.Ldfld, catSoundsField));
+                    ilVol.InsertBefore(prevLdarg0S, ilVol.Create(OpCodes.Brfalse_S, lastRetVol));
                 }
+
+                Console.WriteLine("Safeguarded AudioCategory.SetVolume against null _volume and null _sounds.");
             }
         }
 
