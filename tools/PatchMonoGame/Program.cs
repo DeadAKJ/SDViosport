@@ -320,22 +320,25 @@ class Program
                 var ctor5 = waveBankType.Methods.FirstOrDefault(m => m.IsConstructor && m.Parameters.Count == 5);
                 if (ctor5 != null)
                 {
-                    // Look for `ldfld _streaming` followed by `brtrue IL_05aa`
-                    for (int i = 0; i < ctor5.Body.Instructions.Count; i++)
+                    // Look for `ldarg.0` followed by `ldfld _streaming` followed by `brtrue IL_05aa`
+                    for (int i = 0; i < ctor5.Body.Instructions.Count - 2; i++)
                     {
-                        var inst = ctor5.Body.Instructions[i];
-                        if (inst.OpCode == OpCodes.Ldfld && inst.Operand == streamingField)
+                        var prevInst = ctor5.Body.Instructions[i];
+                        var inst = ctor5.Body.Instructions[i + 1];
+                        var nextInst = ctor5.Body.Instructions[i + 2];
+                        if (prevInst.OpCode == OpCodes.Ldarg_0 && inst.OpCode == OpCodes.Ldfld && inst.Operand == streamingField)
                         {
-                            var nextInst = ctor5.Body.Instructions[i + 1];
                             if (nextInst.OpCode == OpCodes.Brtrue || nextInst.OpCode == OpCodes.Brtrue_S)
                             {
                                 var target = nextInst.Operand as Instruction;
-                                // Replace ldfld + brtrue with nop + br target
+                                // Nop out ldarg.0 and ldfld so the evaluation stack remains depth 0, then br to target!
+                                prevInst.OpCode = OpCodes.Nop;
+                                prevInst.Operand = null;
                                 inst.OpCode = OpCodes.Nop;
                                 inst.Operand = null;
                                 nextInst.OpCode = OpCodes.Br;
                                 nextInst.Operand = target;
-                                Console.WriteLine($"Patched WaveBank 5-param ctor to bypass synchronous decoding loop (branching directly to {target?.Offset:X4}).");
+                                Console.WriteLine($"Patched WaveBank 5-param ctor to bypass synchronous decoding loop cleanly (balanced stack -> {target?.Offset:X4}).");
                                 break;
                             }
                         }
@@ -608,8 +611,7 @@ class Program
                     for (int i = 0; i < disposeMethod.Body.Instructions.Count; i++)
                     {
                         var inst = disposeMethod.Body.Instructions[i];
-                        if (inst.OpCode == OpCodes.Callvirt && inst.Operand == disposeMethod.Module.ImportReference(typeof(IDisposable).GetMethod("Dispose")) ||
-                            (inst.OpCode == OpCodes.Callvirt && ((MethodReference)inst.Operand).Name == "Dispose" && ((MethodReference)inst.Operand).DeclaringType.Name == "SoundEffect"))
+                        if (inst.OpCode == OpCodes.Callvirt && inst.Operand is MethodReference mr && mr.Name == "Dispose")
                         {
                             var ldelemInst = disposeMethod.Body.Instructions[i - 1];
                             if (ldelemInst.OpCode == OpCodes.Ldelem_Ref)

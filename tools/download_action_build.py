@@ -19,17 +19,16 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.53-lazy-wavebank-audio-load'
+version_name = 'v1.0.54-fix-wavebank-stack'
 
-changelog_content = """Version: v1.0.53-lazy-wavebank-audio-load
+changelog_content = """Version: v1.0.54-fix-wavebank-stack
 Date: 2026-09-19
 
 Changes:
-1. WaveBank Lazy Audio Decoding (Fix Startup Main Thread Hang / Black Screen):
-   - Root Cause: In WaveBank constructor, non-streaming wave banks (Wave Bank.xwb, 460 MB, 437 tracks) synchronously decoded all audio tracks in a loop at startup. Under the Mono interpreter on iOS, this synchronous loop froze the main thread for 40+ seconds, preventing LinkGameWindowToScene and display link ticks (causing a persistent black screen) and exhausting iOS RAM limits.
-   - Fix: Patched MonoGame.Framework.dll WaveBank constructor to bypass synchronous decoding loop and retain entry metadata in `_streams`. Added `WaveBank.LoadSoundEffect(int trackIndex)` lazy loader that opens the wavebank file via `AudioEngine.OpenStream`, seeks, reads bytes, and decodes format on demand when tracks/effects are requested.
-   - Patched `WaveBank.GetSoundEffectInstance` to invoke lazy loader.
-   - Patched `WaveBank.Dispose(bool)` to safely check for null lazy entries.
+1. Fix WaveBank Evaluation Stack Imbalance (InvalidProgramException):
+   - Root Cause: In v1.0.53, bypassing the synchronous decoding loop in `WaveBank..ctor` replaced `ldfld _streaming` with `nop`, leaving `ldarg.0` unconsumed on the evaluation stack when branching to `IL_05aa`, causing `System.InvalidProgramException` when `WaveBank..ctor` was verified at runtime.
+   - Fix: Nop out both `ldarg.0` and `ldfld _streaming` before branching to `IL_05aa`, ensuring a perfectly balanced stack (depth 0).
+   - Audio tracks are lazily decoded on demand via `WaveBank.LoadSoundEffect`, keeping startup instantaneous and memory footprint minimal.
 2. Standalone Unbundled IPA Delivery:
    - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """
