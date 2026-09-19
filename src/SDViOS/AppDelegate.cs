@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using AVFoundation;
 using Foundation;
 using UIKit;
 using SDViOS.Diagnostics;
@@ -16,6 +17,8 @@ namespace SDViOS
         {
             try
             {
+                ConfigureAudioSession();
+
                 NSNotificationCenter.DefaultCenter.AddObserver(
                     new NSString("UISceneWillConnectNotification"),
                     _ => UIApplication.SharedApplication.BeginInvokeOnMainThread(GameHost.LinkGameWindowToScene)
@@ -26,7 +29,11 @@ namespace SDViOS
                 );
                 NSNotificationCenter.DefaultCenter.AddObserver(
                     UIApplication.DidBecomeActiveNotification,
-                    _ => UIApplication.SharedApplication.BeginInvokeOnMainThread(GameHost.LinkGameWindowToScene)
+                    _ => UIApplication.SharedApplication.BeginInvokeOnMainThread(() =>
+                    {
+                        ConfigureAudioSession();
+                        GameHost.LinkGameWindowToScene();
+                    })
                 );
 
                 GameHost.InitializeFileSystem();
@@ -206,6 +213,28 @@ namespace SDViOS
         public override void WillTerminate(UIApplication application)
         {
             EngineLogger.Log("[AppDelegate] WillTerminate");
+        }
+
+        public static void ConfigureAudioSession()
+        {
+            try
+            {
+                var session = AVAudioSession.SharedInstance();
+                session.SetCategory(AVAudioSessionCategory.Playback, AVAudioSessionCategoryOptions.MixWithOthers);
+                var err = session.SetActive(true);
+                if (err != null)
+                {
+                    EngineLogger.LogWarning($"[AppDelegate] AVAudioSession.SetActive warning: {err.LocalizedDescription}");
+                }
+                else
+                {
+                    EngineLogger.Log("[AppDelegate] AVAudioSession configured successfully (Playback, MixWithOthers).");
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[AppDelegate] Error configuring AVAudioSession: {ex.Message}");
+            }
         }
     }
 }

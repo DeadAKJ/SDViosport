@@ -18,20 +18,28 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.45-patched-0harmony-and-link-none'
+version_name = 'v1.0.46-audio-touchpad-keyboard'
 
-changelog_content = """Version: v1.0.45-patched-0harmony-and-link-none
+changelog_content = """Version: v1.0.46-audio-touchpad-keyboard
 Date: 2026-09-19
 
 Changes:
-1. Injected HarmonySharedState and Neutralized DetourHelper in 0Harmony.dll:
-   - 0Harmony.dll now has HarmonySharedState defined directly inside the assembly so Type.GetType("HarmonySharedState", false) resolves immediately from the calling assembly without relying on external AppDomain.TypeResolve.
-   - Patched GetOrCreateSharedStateType() to return typeof(HarmonySharedState) directly, skipping Cecil dynamic code emission and Assembly.Load(byte[]).
-   - Neutralized DetourHelper.Runtime.add_OnMethodCompiled in HarmonySharedState..cctor with 'ret', ensuring DetourHelper._Runtime, _HookSelftest(), and PrepareMethod() are never called during startup.
-2. Automated Harmony Patcher:
-   - Created tools/PatchHarmony tool and integrated into tools/inject_game.py so 0Harmony.dll is always verified and patched before packaging.
-3. Preserved PublishTrimmed=true with MtouchLink=None:
-   - Reverted PublishTrimmed=true as strictly required by Microsoft.iOS.Sdk with MtouchLink=None to prevent stripping.
+1. Audio System Fix:
+   - Patched lib/MonoGame.Framework.dll: AudioEngine.GetReverbSettings() was stubbed to return null, causing StardewValley.Game1.InitializeSounds() to throw NullReferenceException and silently revert to DummyAudioEngine. Replaced with returning a valid ReverbSettings instance.
+   - Configured AVAudioSession with AVAudioSessionCategory.Playback and MixWithOthers so audio plays through speakers regardless of silent switch state.
+   - Pre-initialized OpenALSoundController during GameHost launch.
+2. Virtual Keyboard for Text Input:
+   - Created VirtualKeyboardManager: Monitors Game1.keyboardDispatcher.Subscriber.
+   - Automatically presents native iOS UIAlertController with UITextField when selecting text input boxes (e.g. farmer name, farm name, favorite thing).
+   - Added manual Keyboard summon button on the virtual pad's top utility bar.
+3. Virtual Controls Interactivity:
+   - Mapped on-screen joystick to WASD keys (W/A/S/D) and GamePad thumbsticks/DPad.
+   - Mapped Action button A to Keys.X / Buttons.A / Left Click.
+   - Mapped Tool button X to Keys.C / Buttons.X / Right Click.
+   - Mapped Menu button Y to Keys.E / Buttons.Y.
+   - Mapped Cancel button B to Keys.Escape / Buttons.B.
+   - Injected pressed keys directly into Microsoft.Xna.Framework.Input.Keyboard.SetKeys() and StardewValley.InputState.
+   - Automatically toggles Game1.options.gamepadControls when virtual controls are used.
 """
 
 

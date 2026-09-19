@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Microsoft.Xna.Framework;
@@ -18,18 +19,17 @@ namespace SDViOS.Input
 
         // Joystick state
         public Vector2 LeftStick { get; private set; } = Vector2.Zero;
-        public bool DPadUp => LeftStick.Y < -0.3f;
-        public bool DPadDown => LeftStick.Y > 0.3f;
-        public bool DPadLeft => LeftStick.X < -0.3f;
-        public bool DPadRight => LeftStick.X > 0.3f;
+        public bool DPadUp => LeftStick.Y < -0.25f;
+        public bool DPadDown => LeftStick.Y > 0.25f;
+        public bool DPadLeft => LeftStick.X < -0.25f;
+        public bool DPadRight => LeftStick.X > 0.25f;
 
         // Action buttons state
-        public bool ButtonA { get; private set; } // Action / Talk / Check (Left Click)
-        public bool ButtonX { get; private set; } // Use Tool (Right Click / C)
-        public bool ButtonY { get; private set; } // Menu / Inventory (E / Esc)
-        public bool ButtonB { get; private set; } // Cancel / Back
-        public bool ButtonMenu { get; private set; }
-        public bool ButtonJournal { get; private set; }
+        public bool ButtonA { get; private set; } // Action / Talk / Check (X / Left Click / A)
+        public bool ButtonX { get; private set; } // Use Tool (C / Right Click / X)
+        public bool ButtonY { get; private set; } // Menu / Inventory (E / Y)
+        public bool ButtonB { get; private set; } // Cancel / Back (Esc / B)
+        public bool ButtonMenu { get; private set; } // Game Menu (Esc / Start)
 
         // Simulated mouse state
         public Point SimulatedMousePosition { get; private set; } = new Point(896, 414);
@@ -39,7 +39,7 @@ namespace SDViOS.Input
         // Layout bounds (calculated dynamically based on viewport)
         private Rectangle _joystickBaseRect;
         private Vector2 _joystickCenter;
-        private float _joystickRadius = 70f;
+        private float _joystickRadius = 75f;
         private Vector2 _currentStickPos;
         private int _stickTouchId = -1;
 
@@ -48,11 +48,12 @@ namespace SDViOS.Input
         private Rectangle _btnYRect;
         private Rectangle _btnBRect;
         private Rectangle _btnMenuRect;
+        private Rectangle _btnKeyboardRect;
         private Rectangle _btnToggleRect;
 
         private Texture2D? _pixelTexture;
 
-        // Reflection caches for Stardew Valley Game1.input
+        // Reflection caches for Stardew Valley Game1.input & options
         private static bool _reflectionInitialized = false;
         private static object? _inputInstance = null;
         private static FieldInfo? _currentMouseStateField = null;
@@ -60,9 +61,12 @@ namespace SDViOS.Input
         private static FieldInfo? _currentKeyboardStateField = null;
         private static FieldInfo? _lastCursorMotionWasMouseField = null;
         private static FieldInfo? _oldMouseStateField = null;
-        private static MethodInfo? _setMousePositionMethod = null;
         private static FieldInfo? _mousePrimaryWindowField = null;
         private static FieldInfo? _gameWindowMouseStateField = null;
+
+        private static Type? _game1Type = null;
+        private static PropertyInfo? _optionsProp = null;
+        private static FieldInfo? _gamepadControlsField = null;
 
         public void Initialize(GraphicsDevice graphicsDevice)
         {
@@ -97,9 +101,10 @@ namespace SDViOS.Input
             _btnYRect = new Rectangle((int)rightCenterX, (int)(rightCenterY - spacing), (int)btnSize, (int)btnSize);          // Top: Menu (Y)
             _btnBRect = new Rectangle((int)(rightCenterX + spacing), (int)rightCenterY, (int)btnSize, (int)btnSize);          // Right: Cancel (B)
 
-            // Top utility buttons
-            _btnMenuRect = new Rectangle(width - (int)(160f * scale), (int)(20f * scale), (int)btnSize, (int)(btnSize * 0.75f));
+            // Top utility buttons (Toggle, Keyboard, Menu)
             _btnToggleRect = new Rectangle(width - (int)(75f * scale), (int)(20f * scale), (int)(55f * scale), (int)(36f * scale));
+            _btnKeyboardRect = new Rectangle(width - (int)(140f * scale), (int)(20f * scale), (int)(55f * scale), (int)(36f * scale));
+            _btnMenuRect = new Rectangle(width - (int)(215f * scale), (int)(20f * scale), (int)(65f * scale), (int)(36f * scale));
         }
 
         public void Update(GameTime gameTime)
@@ -129,9 +134,19 @@ namespace SDViOS.Input
                     continue;
                 }
 
+                // Keyboard manual summon button check
+                if (touch.State == TouchLocationState.Pressed && _btnKeyboardRect.Contains(pt))
+                {
+                    VirtualKeyboardManager.PromptManualInput(text =>
+                    {
+                        FeedTextToGame(text);
+                    });
+                    continue;
+                }
+
                 if (!IsVisible)
                 {
-                    // If overlay hidden, all touches act as pure direct mouse taps/drags
+                    // If overlay hidden, all touches act as direct mouse taps/drags
                     SimulatedMousePosition = pt;
                     SimulatedMouseLeftDown = (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved);
                     continue;
@@ -197,7 +212,7 @@ namespace SDViOS.Input
                 LeftStick = Vector2.Zero;
             }
 
-            // Immediately push mouse & gamepad events to MonoGame and Stardew Valley
+            // Immediately push mouse, keyboard & gamepad events to MonoGame and Stardew Valley
             ForwardInputToGame();
         }
 
@@ -241,7 +256,43 @@ namespace SDViOS.Input
                 }
                 catch { }
 
-                // 2. Update Stardew Valley Game1.input directly
+                // 2. Build active keys for hardware keyboard emulation (WASD, Action, Tool, Menu, Escape)
+                var activeKeys = new List<Keys>();
+                if (LeftStick.Y < -0.25f) activeKeys.Add(Keys.W);
+                if (LeftStick.Y > 0.25f) activeKeys.Add(Keys.S);
+                if (LeftStick.X < -0.25f) activeKeys.Add(Keys.A);
+                if (LeftStick.X > 0.25f) activeKeys.Add(Keys.D);
+
+                if (ButtonA)
+                {
+                    activeKeys.Add(Keys.X);
+                    activeKeys.Add(Keys.Space);
+                }
+                if (ButtonX)
+                {
+                    activeKeys.Add(Keys.C);
+                }
+                if (ButtonY)
+                {
+                    activeKeys.Add(Keys.E);
+                }
+                if (ButtonB)
+                {
+                    activeKeys.Add(Keys.Escape);
+                }
+                if (ButtonMenu)
+                {
+                    activeKeys.Add(Keys.Escape);
+                }
+
+                // Inject into MonoGame's Keyboard engine static cache
+                try
+                {
+                    Microsoft.Xna.Framework.Input.Keyboard.SetKeys(activeKeys);
+                }
+                catch { }
+
+                // 3. Update Stardew Valley Game1.input directly
                 if (_inputInstance != null)
                 {
                     if (_currentMouseStateField != null)
@@ -249,7 +300,12 @@ namespace SDViOS.Input
                         _currentMouseStateField.SetValue(_inputInstance, mouseState);
                     }
 
-                    // Also feed GamePadState if joystick or buttons are active
+                    if (_currentKeyboardStateField != null)
+                    {
+                        _currentKeyboardStateField.SetValue(_inputInstance, new KeyboardState(activeKeys.ToArray()));
+                    }
+
+                    // Feed GamePadState
                     if (_currentGamepadStateField != null)
                     {
                         var buttons = new GamePadButtons(
@@ -260,53 +316,80 @@ namespace SDViOS.Input
                             (ButtonMenu ? Buttons.Start : 0)
                         );
                         var dpad = new GamePadDPad(
-                            DPadUp ? ButtonState.Pressed : ButtonState.Released,
-                            DPadDown ? ButtonState.Pressed : ButtonState.Released,
-                            DPadLeft ? ButtonState.Pressed : ButtonState.Released,
-                            DPadRight ? ButtonState.Pressed : ButtonState.Released
+                            (LeftStick.Y < -0.3f || DPadUp) ? ButtonState.Pressed : ButtonState.Released,
+                            (LeftStick.Y > 0.3f || DPadDown) ? ButtonState.Pressed : ButtonState.Released,
+                            (LeftStick.X < -0.3f || DPadLeft) ? ButtonState.Pressed : ButtonState.Released,
+                            (LeftStick.X > 0.3f || DPadRight) ? ButtonState.Pressed : ButtonState.Released
                         );
-                        var thumbsticks = new GamePadThumbSticks(LeftStick, Vector2.Zero);
+                        var thumbsticks = new GamePadThumbSticks(new Vector2(LeftStick.X, -LeftStick.Y), Vector2.Zero);
                         var gpState = new GamePadState(thumbsticks, new GamePadTriggers(), buttons, dpad);
                         _currentGamepadStateField.SetValue(_inputInstance, gpState);
                     }
-
-                    // Feed KeyboardState for menu buttons (Y = E / Esc, B = Esc)
-                    if (_currentKeyboardStateField != null)
-                    {
-                        if (ButtonY)
-                        {
-                            _currentKeyboardStateField.SetValue(_inputInstance, new KeyboardState(Keys.E, Keys.Escape));
-                        }
-                        else if (ButtonB)
-                        {
-                            _currentKeyboardStateField.SetValue(_inputInstance, new KeyboardState(Keys.Escape));
-                        }
-                    }
                 }
 
-                // 4. Update Game1.lastCursorMotionWasMouse
+                // 4. Update Game1.lastCursorMotionWasMouse & Game1.options.gamepadControls
+                bool controlsActive = (LeftStick != Vector2.Zero || ButtonA || ButtonB || ButtonX || ButtonY || ButtonMenu);
                 if (_lastCursorMotionWasMouseField != null)
                 {
-                    if (SimulatedMouseLeftDown || touchesActive())
+                    if (SimulatedMouseLeftDown)
                     {
                         _lastCursorMotionWasMouseField.SetValue(null, true);
                     }
-                    else if (LeftStick != Vector2.Zero || ButtonA || ButtonB || ButtonX || ButtonY)
+                    else if (controlsActive)
                     {
                         _lastCursorMotionWasMouseField.SetValue(null, false);
+                    }
+                }
+
+                if (_gamepadControlsField != null && _optionsProp != null)
+                {
+                    var options = _optionsProp.GetValue(null);
+                    if (options != null)
+                    {
+                        if (controlsActive)
+                        {
+                            _gamepadControlsField.SetValue(options, true);
+                        }
+                        else if (SimulatedMouseLeftDown)
+                        {
+                            _gamepadControlsField.SetValue(options, false);
+                        }
                     }
                 }
             }
             catch { }
         }
 
-        private bool touchesActive()
+        private void FeedTextToGame(string text)
         {
+            if (string.IsNullOrEmpty(text)) return;
             try
             {
-                return TouchPanel.GetState().Count > 0;
+                EnsureReflection();
+                if (_game1Type != null)
+                {
+                    var dispProp = _game1Type.GetProperty("keyboardDispatcher", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                                ?? _game1Type.GetField("instanceKeyboardDispatcher", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(null) as PropertyInfo;
+                    var dispatcher = dispProp?.GetValue(null);
+                    if (dispatcher != null)
+                    {
+                        var subProp = dispatcher.GetType().GetProperty("Subscriber", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        var subscriber = subProp?.GetValue(dispatcher);
+                        if (subscriber != null)
+                        {
+                            var textProp = subscriber.GetType().GetProperty("Text");
+                            textProp?.SetValue(subscriber, text);
+
+                            var recvMethod = subscriber.GetType().GetMethod("RecieveTextInput", new[] { typeof(string) });
+                            recvMethod?.Invoke(subscriber, new object[] { text });
+                        }
+                    }
+                }
             }
-            catch { return false; }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[TouchVirtualPad] FeedTextToGame warning: {ex.Message}");
+            }
         }
 
         private static void EnsureReflection()
@@ -320,11 +403,19 @@ namespace SDViOS.Input
                     var g1Type = asm.GetType("StardewValley.Game1");
                     if (g1Type != null)
                     {
+                        _game1Type = g1Type;
                         var inputField = g1Type.GetField("input", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                         _inputInstance = inputField?.GetValue(null);
 
                         _lastCursorMotionWasMouseField = g1Type.GetField("lastCursorMotionWasMouse", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                         _oldMouseStateField = g1Type.GetField("oldMouseState", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                        _optionsProp = g1Type.GetProperty("options", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
+                        if (_optionsProp != null)
+                        {
+                            var optType = _optionsProp.PropertyType;
+                            _gamepadControlsField = optType.GetField("gamepadControls", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        }
 
                         if (_inputInstance != null)
                         {
@@ -332,9 +423,8 @@ namespace SDViOS.Input
                             _currentMouseStateField = inputType.GetField("_currentMouseState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                             _currentGamepadStateField = inputType.GetField("_currentGamepadState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                             _currentKeyboardStateField = inputType.GetField("_currentKeyboardState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                            _setMousePositionMethod = inputType.GetMethod("SetMousePosition", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
                             _reflectionInitialized = true;
-                            EngineLogger.Log("[TouchVirtualPad] Successfully hooked Stardew Valley Game1.input fields.");
+                            EngineLogger.Log("[TouchVirtualPad] Successfully hooked Stardew Valley input & options fields.");
                             break;
                         }
                     }
@@ -363,39 +453,29 @@ namespace SDViOS.Input
             }
         }
 
-        private void ResetStates()
-        {
-            LeftStick = Vector2.Zero;
-            _currentStickPos = _joystickCenter;
-            _stickTouchId = -1;
-            ButtonA = false;
-            ButtonX = false;
-            ButtonY = false;
-            ButtonB = false;
-            ButtonMenu = false;
-            SimulatedMouseLeftDown = false;
-        }
-
         public void Draw(SpriteBatch spriteBatch)
         {
             if (_pixelTexture == null) return;
 
             // Draw toggle button (always accessible)
-            DrawRoundedButton(spriteBatch, _btnToggleRect, Color.Black * 0.45f);
+            DrawRoundedButton(spriteBatch, _btnToggleRect, Color.DarkSlateGray * 0.6f);
+
+            // Draw manual keyboard summon button
+            DrawRoundedButton(spriteBatch, _btnKeyboardRect, Color.DarkSlateBlue * 0.6f);
 
             if (!IsVisible) return;
 
             // Draw joystick base & thumb
-            DrawRoundedButton(spriteBatch, _joystickBaseRect, Color.Black * 0.25f);
+            DrawRoundedButton(spriteBatch, _joystickBaseRect, Color.Black * 0.28f);
             Rectangle stickThumbRect = new Rectangle((int)(_currentStickPos.X - 25), (int)(_currentStickPos.Y - 25), 50, 50);
-            DrawRoundedButton(spriteBatch, stickThumbRect, Color.White * 0.5f);
+            DrawRoundedButton(spriteBatch, stickThumbRect, Color.White * 0.55f);
 
             // Draw action buttons
-            DrawRoundedButton(spriteBatch, _btnARect, ButtonA ? Color.Lime * 0.75f : Color.Black * 0.35f);
-            DrawRoundedButton(spriteBatch, _btnXRect, ButtonX ? Color.CornflowerBlue * 0.75f : Color.Black * 0.35f);
-            DrawRoundedButton(spriteBatch, _btnYRect, ButtonY ? Color.Yellow * 0.75f : Color.Black * 0.35f);
-            DrawRoundedButton(spriteBatch, _btnBRect, ButtonB ? Color.Red * 0.75f : Color.Black * 0.35f);
-            DrawRoundedButton(spriteBatch, _btnMenuRect, ButtonMenu ? Color.Orange * 0.75f : Color.Black * 0.35f);
+            DrawRoundedButton(spriteBatch, _btnARect, ButtonA ? Color.Lime * 0.85f : Color.DarkGreen * 0.45f);
+            DrawRoundedButton(spriteBatch, _btnXRect, ButtonX ? Color.CornflowerBlue * 0.85f : Color.DarkBlue * 0.45f);
+            DrawRoundedButton(spriteBatch, _btnYRect, ButtonY ? Color.Yellow * 0.85f : Color.DarkGoldenrod * 0.45f);
+            DrawRoundedButton(spriteBatch, _btnBRect, ButtonB ? Color.Red * 0.85f : Color.DarkRed * 0.45f);
+            DrawRoundedButton(spriteBatch, _btnMenuRect, ButtonMenu ? Color.Orange * 0.85f : Color.SaddleBrown * 0.45f);
         }
 
         private void DrawRoundedButton(SpriteBatch sb, Rectangle rect, Color color)

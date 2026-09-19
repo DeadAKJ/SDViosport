@@ -59,6 +59,14 @@ def inject_game(ipa_path, game_files_dir, output_ipa_path):
 
     print(f"  Total injected: {file_count} files.")
 
+    # Ensure MonoGame.Framework.dll in app is patched for Audio
+    app_mg_dll = os.path.join(app_dir, "MonoGame.Framework.dll")
+    if os.path.exists(app_mg_dll):
+        mg_patcher_csproj = os.path.join(os.path.dirname(__file__), "PatchMonoGame", "PatchMonoGame.csproj")
+        if os.path.exists(mg_patcher_csproj):
+            print("Ensuring MonoGame.Framework.dll is patched for Audio in .app...")
+            subprocess.run(["dotnet", "run", "--project", mg_patcher_csproj, app_mg_dll], check=False)
+
     print(f"[3/3] Repackaging IPA to {output_ipa_path}...")
     if os.path.exists(output_ipa_path):
         os.remove(output_ipa_path)

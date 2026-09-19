@@ -284,6 +284,9 @@ namespace SDViOS.Loader
 
         public static void Launch(string[] args)
         {
+            AppDelegate.ConfigureAudioSession();
+            PreInitAudio();
+
             if (!TryFindGameBinary(out string sdvPath, out string smapiPath))
             {
                 EngineLogger.LogError($"Stardew Valley.dll not found in any search path!");
@@ -1478,6 +1481,7 @@ namespace SDViOS.Loader
                 // Ensure TouchOverlay is attached and input forwarded every frame
                 AttachTouchOverlayToGameRunner();
                 TouchVirtualPad.Instance.ForwardInputToGame();
+                VirtualKeyboardManager.Update();
 
                 // 2. Introspect gameView and game state on tick 0
                 if (_directTickCount == 0)
@@ -2216,6 +2220,34 @@ namespace SDViOS.Loader
             {
                 EngineLogger.LogWarning($"[GameHost] Could not attach TouchOverlay to GameRunner: {ex.Message}");
             }
+        }
+
+        public static void PreInitAudio()
+        {
+            try
+            {
+                AppDelegate.ConfigureAudioSession();
+
+                // Pre-initialize OpenALSoundController if present
+                var mgAsm = typeof(Microsoft.Xna.Framework.Game).Assembly;
+                var oalType = mgAsm.GetType("Microsoft.Xna.Framework.Audio.OpenALSoundController");
+                if (oalType != null)
+                {
+                    var ensureInitMethod = oalType.GetMethod("EnsureInitialized", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                    ensureInitMethod?.Invoke(null, null);
+                    EngineLogger.Log("[GameHost] OpenALSoundController pre-initialized successfully.");
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[GameHost] PreInitAudio warning: {ex.Message}");
+            }
+        }
+
+        public static UIViewController? GetActiveRootViewController()
+        {
+            var kw = UIApplication.SharedApplication.KeyWindow ?? UIApplication.SharedApplication.Windows.FirstOrDefault(w => w != null);
+            return kw?.RootViewController ?? _activeGameVC;
         }
 
         public class NonDisposingStreamWriter : StreamWriter
