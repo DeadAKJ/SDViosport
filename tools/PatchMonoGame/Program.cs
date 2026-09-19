@@ -282,6 +282,373 @@ class Program
             }
         }
 
+        // 5. WaveBank: Lazy SoundEffect loading
+        var waveBankType = module.GetType("Microsoft.Xna.Framework.Audio.WaveBank");
+        var soundEffectType = module.GetType("Microsoft.Xna.Framework.Audio.SoundEffect");
+        if (waveBankType != null && soundEffectType != null)
+        {
+            var streamInfoType = waveBankType.NestedTypes.FirstOrDefault(t => t.Name == "StreamInfo");
+            var soundsField = waveBankType.Fields.FirstOrDefault(f => f.Name == "_sounds");
+            var streamsField = waveBankType.Fields.FirstOrDefault(f => f.Name == "_streams");
+            var streamingField = waveBankType.Fields.FirstOrDefault(f => f.Name == "_streaming");
+            var fileNameField = waveBankType.Fields.FirstOrDefault(f => f.Name == "_waveBankFileName");
+            var playRegionField = waveBankType.Fields.FirstOrDefault(f => f.Name == "_playRegionOffset");
+
+            var decodeFormatMethod = waveBankType.Methods.FirstOrDefault(m => m.Name == "DecodeFormat");
+            var miniFormatTagType = module.GetType("Microsoft.Xna.Framework.Audio.MiniFormatTag");
+
+            var seCtor7 = soundEffectType.Methods.FirstOrDefault(m => m.IsConstructor && m.Parameters.Count == 7 && m.Parameters[1].ParameterType.FullName == "System.Byte[]");
+            var getPooledInstanceMethod = soundEffectType.Methods.FirstOrDefault(m => m.Name == "GetPooledInstance");
+
+            var openStreamMethod = audioEngineType.Methods.FirstOrDefault(m => m.Name == "OpenStream");
+
+            var streamSeekMethod = module.ImportReference(typeof(Stream).GetMethod("Seek", new[] { typeof(long), typeof(SeekOrigin) }));
+            var streamDisposeMethod = module.ImportReference(typeof(IDisposable).GetMethod("Dispose"));
+
+            if (streamInfoType != null && soundsField != null && streamsField != null &&
+                fileNameField != null && playRegionField != null && decodeFormatMethod != null &&
+                miniFormatTagType != null && seCtor7 != null && getPooledInstanceMethod != null &&
+                openStreamMethod != null)
+            {
+                var fileOffsetField = streamInfoType.Fields.FirstOrDefault(f => f.Name == "FileOffset");
+                var fileLengthField = streamInfoType.Fields.FirstOrDefault(f => f.Name == "FileLength");
+                var formatField = streamInfoType.Fields.FirstOrDefault(f => f.Name == "Format");
+                var loopStartField = streamInfoType.Fields.FirstOrDefault(f => f.Name == "LoopStart");
+                var loopLengthField = streamInfoType.Fields.FirstOrDefault(f => f.Name == "LoopLength");
+
+                // 5a. Bypass synchronous decoding loop in 5-param constructor
+                var ctor5 = waveBankType.Methods.FirstOrDefault(m => m.IsConstructor && m.Parameters.Count == 5);
+                if (ctor5 != null)
+                {
+                    // Look for `ldfld _streaming` followed by `brtrue IL_05aa`
+                    for (int i = 0; i < ctor5.Body.Instructions.Count; i++)
+                    {
+                        var inst = ctor5.Body.Instructions[i];
+                        if (inst.OpCode == OpCodes.Ldfld && inst.Operand == streamingField)
+                        {
+                            var nextInst = ctor5.Body.Instructions[i + 1];
+                            if (nextInst.OpCode == OpCodes.Brtrue || nextInst.OpCode == OpCodes.Brtrue_S)
+                            {
+                                var target = nextInst.Operand as Instruction;
+                                // Replace ldfld + brtrue with nop + br target
+                                inst.OpCode = OpCodes.Nop;
+                                inst.Operand = null;
+                                nextInst.OpCode = OpCodes.Br;
+                                nextInst.Operand = target;
+                                Console.WriteLine($"Patched WaveBank 5-param ctor to bypass synchronous decoding loop (branching directly to {target?.Offset:X4}).");
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // 5b. Add private SoundEffect LoadSoundEffect(int trackIndex) to WaveBank
+                var loadSoundMethod = new MethodDefinition("LoadSoundEffect",
+                    MethodAttributes.Private | MethodAttributes.HideBySig,
+                    soundEffectType);
+                loadSoundMethod.Parameters.Add(new ParameterDefinition("trackIndex", ParameterAttributes.None, module.TypeSystem.Int32));
+
+                // Locals:
+                // V_0: StreamInfo stream
+                // V_1: Stream s
+                // V_2: BinaryReader br
+                // V_3: byte[] data
+                // V_4: MiniFormatTag codec
+                // V_5: int channels
+                // V_6: int rate
+                // V_7: int alignment
+                // V_8: SoundEffect se
+                loadSoundMethod.Body.Variables.Add(new VariableDefinition(streamInfoType));
+                loadSoundMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(Stream))));
+                loadSoundMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(BinaryReader))));
+                loadSoundMethod.Body.Variables.Add(new VariableDefinition(module.ImportReference(typeof(byte[]))));
+                loadSoundMethod.Body.Variables.Add(new VariableDefinition(miniFormatTagType));
+                loadSoundMethod.Body.Variables.Add(new VariableDefinition(module.TypeSystem.Int32));
+                loadSoundMethod.Body.Variables.Add(new VariableDefinition(module.TypeSystem.Int32));
+                loadSoundMethod.Body.Variables.Add(new VariableDefinition(module.TypeSystem.Int32));
+                loadSoundMethod.Body.Variables.Add(new VariableDefinition(soundEffectType));
+
+                var brCtor = module.ImportReference(typeof(BinaryReader).GetConstructor(new[] { typeof(Stream) }));
+                var brReadBytes = module.ImportReference(typeof(BinaryReader).GetMethod("ReadBytes", new[] { typeof(int) }));
+
+                var ilLd = loadSoundMethod.Body.GetILProcessor();
+
+                // if (this._sounds == null) return null;
+                var lblCheckTrack = ilLd.Create(OpCodes.Ldarg_1);
+                ilLd.Emit(OpCodes.Ldarg_0);
+                ilLd.Emit(OpCodes.Ldfld, soundsField);
+                ilLd.Emit(OpCodes.Brtrue_S, lblCheckTrack);
+                ilLd.Emit(OpCodes.Ldnull);
+                ilLd.Emit(OpCodes.Ret);
+
+                // if (trackIndex < 0 || trackIndex >= this._sounds.Length) return null;
+                ilLd.Append(lblCheckTrack);
+                ilLd.Emit(OpCodes.Ldc_I4_0);
+                var lblCheckUpperBound = ilLd.Create(OpCodes.Ldarg_1);
+                ilLd.Emit(OpCodes.Bge_S, lblCheckUpperBound);
+                ilLd.Emit(OpCodes.Ldnull);
+                ilLd.Emit(OpCodes.Ret);
+
+                ilLd.Append(lblCheckUpperBound);
+                ilLd.Emit(OpCodes.Ldarg_0);
+                ilLd.Emit(OpCodes.Ldfld, soundsField);
+                ilLd.Emit(OpCodes.Ldlen);
+                ilLd.Emit(OpCodes.Conv_I4);
+                var lblCheckCached = ilLd.Create(OpCodes.Ldarg_0);
+                ilLd.Emit(OpCodes.Blt_S, lblCheckCached);
+                ilLd.Emit(OpCodes.Ldnull);
+                ilLd.Emit(OpCodes.Ret);
+
+                // if (this._sounds[trackIndex] != null) return this._sounds[trackIndex];
+                ilLd.Append(lblCheckCached);
+                ilLd.Emit(OpCodes.Ldfld, soundsField);
+                ilLd.Emit(OpCodes.Ldarg_1);
+                ilLd.Emit(OpCodes.Ldelem_Ref);
+                ilLd.Emit(OpCodes.Stloc_S, loadSoundMethod.Body.Variables[8]);
+                ilLd.Emit(OpCodes.Ldloc_S, loadSoundMethod.Body.Variables[8]);
+                var lblLoadTrack = ilLd.Create(OpCodes.Ldarg_0);
+                ilLd.Emit(OpCodes.Brfalse_S, lblLoadTrack);
+                ilLd.Emit(OpCodes.Ldloc_S, loadSoundMethod.Body.Variables[8]);
+                ilLd.Emit(OpCodes.Ret);
+
+                // Load track:
+                // if (this._streams == null) return null;
+                ilLd.Append(lblLoadTrack);
+                ilLd.Emit(OpCodes.Ldfld, streamsField);
+                var lblHasStreams = ilLd.Create(OpCodes.Ldarg_0);
+                ilLd.Emit(OpCodes.Brtrue_S, lblHasStreams);
+                ilLd.Emit(OpCodes.Ldnull);
+                ilLd.Emit(OpCodes.Ret);
+
+                // V_0 = this._streams[trackIndex];
+                ilLd.Append(lblHasStreams);
+                ilLd.Emit(OpCodes.Ldfld, streamsField);
+                ilLd.Emit(OpCodes.Ldarg_1);
+                ilLd.Emit(OpCodes.Ldelem_Any, streamInfoType);
+                ilLd.Emit(OpCodes.Stloc_0);
+
+                // V_1 = AudioEngine.OpenStream(this._waveBankFileName);
+                ilLd.Emit(OpCodes.Ldarg_0);
+                ilLd.Emit(OpCodes.Ldfld, fileNameField);
+                ilLd.Emit(OpCodes.Call, openStreamMethod);
+                ilLd.Emit(OpCodes.Stloc_1);
+
+                // if (V_1 == null) return null;
+                ilLd.Emit(OpCodes.Ldloc_1);
+                var lblOpenSuccess = ilLd.Create(OpCodes.Ldloc_1);
+                ilLd.Emit(OpCodes.Brtrue_S, lblOpenSuccess);
+                ilLd.Emit(OpCodes.Ldnull);
+                ilLd.Emit(OpCodes.Ret);
+
+                // try {
+                //   V_1.Seek((long)(V_0.FileOffset + this._playRegionOffset), SeekOrigin.Begin);
+                ilLd.Append(lblOpenSuccess);
+                ilLd.Emit(OpCodes.Ldloc_0);
+                ilLd.Emit(OpCodes.Ldfld, fileOffsetField);
+                ilLd.Emit(OpCodes.Ldarg_0);
+                ilLd.Emit(OpCodes.Ldfld, playRegionField);
+                ilLd.Emit(OpCodes.Add);
+                ilLd.Emit(OpCodes.Conv_I8);
+                ilLd.Emit(OpCodes.Ldc_I4_0); // SeekOrigin.Begin
+                ilLd.Emit(OpCodes.Callvirt, streamSeekMethod);
+                ilLd.Emit(OpCodes.Pop);
+
+                //   V_2 = new BinaryReader(V_1);
+                ilLd.Emit(OpCodes.Ldloc_1);
+                ilLd.Emit(OpCodes.Newobj, brCtor);
+                ilLd.Emit(OpCodes.Stloc_2);
+
+                //   V_3 = V_2.ReadBytes(V_0.FileLength);
+                ilLd.Emit(OpCodes.Ldloc_2);
+                ilLd.Emit(OpCodes.Ldloc_0);
+                ilLd.Emit(OpCodes.Ldfld, fileLengthField);
+                ilLd.Emit(OpCodes.Callvirt, brReadBytes);
+                ilLd.Emit(OpCodes.Stloc_3);
+
+                //   this.DecodeFormat(V_0.Format, out V_4, out V_5, out V_6, out V_7);
+                ilLd.Emit(OpCodes.Ldarg_0);
+                ilLd.Emit(OpCodes.Ldloc_0);
+                ilLd.Emit(OpCodes.Ldfld, formatField);
+                ilLd.Emit(OpCodes.Ldloca_S, loadSoundMethod.Body.Variables[4]);
+                ilLd.Emit(OpCodes.Ldloca_S, loadSoundMethod.Body.Variables[5]);
+                ilLd.Emit(OpCodes.Ldloca_S, loadSoundMethod.Body.Variables[6]);
+                ilLd.Emit(OpCodes.Ldloca_S, loadSoundMethod.Body.Variables[7]);
+                ilLd.Emit(OpCodes.Call, decodeFormatMethod);
+
+                //   V_8 = new SoundEffect(V_4, V_3, V_5, V_6, V_7, V_0.LoopStart, V_0.LoopLength);
+                ilLd.Emit(OpCodes.Ldloc_S, loadSoundMethod.Body.Variables[4]);
+                ilLd.Emit(OpCodes.Ldloc_3);
+                ilLd.Emit(OpCodes.Ldloc_S, loadSoundMethod.Body.Variables[5]);
+                ilLd.Emit(OpCodes.Ldloc_S, loadSoundMethod.Body.Variables[6]);
+                ilLd.Emit(OpCodes.Ldloc_S, loadSoundMethod.Body.Variables[7]);
+                ilLd.Emit(OpCodes.Ldloc_0);
+                ilLd.Emit(OpCodes.Ldfld, loopStartField);
+                ilLd.Emit(OpCodes.Ldloc_0);
+                ilLd.Emit(OpCodes.Ldfld, loopLengthField);
+                ilLd.Emit(OpCodes.Newobj, seCtor7);
+                ilLd.Emit(OpCodes.Stloc_S, loadSoundMethod.Body.Variables[8]);
+
+                //   this._sounds[trackIndex] = V_8;
+                ilLd.Emit(OpCodes.Ldarg_0);
+                ilLd.Emit(OpCodes.Ldfld, soundsField);
+                ilLd.Emit(OpCodes.Ldarg_1);
+                ilLd.Emit(OpCodes.Ldloc_S, loadSoundMethod.Body.Variables[8]);
+                ilLd.Emit(OpCodes.Stelem_Ref);
+
+                // } finally {
+                //   if (V_1 != null) ((IDisposable)V_1).Dispose();
+                // }
+                var lblLeave = ilLd.Create(OpCodes.Ldloc_S, loadSoundMethod.Body.Variables[8]);
+                ilLd.Emit(OpCodes.Leave_S, lblLeave);
+
+                // handler start
+                var lblFinallyStart = ilLd.Create(OpCodes.Ldloc_1);
+                ilLd.Append(lblFinallyStart);
+                var lblEndFinally = ilLd.Create(OpCodes.Endfinally);
+                ilLd.Emit(OpCodes.Brfalse_S, lblEndFinally);
+                ilLd.Emit(OpCodes.Ldloc_1);
+                ilLd.Emit(OpCodes.Callvirt, streamDisposeMethod);
+                ilLd.Append(lblEndFinally);
+
+                // return V_8;
+                ilLd.Append(lblLeave);
+                ilLd.Emit(OpCodes.Ret);
+
+                // Add try-finally handler
+                var tryStart = lblOpenSuccess;
+                var tryEnd = lblFinallyStart;
+                var handlerStart = lblFinallyStart;
+                var handlerEnd = lblLeave;
+
+                var eh = new ExceptionHandler(ExceptionHandlerType.Finally)
+                {
+                    TryStart = tryStart,
+                    TryEnd = tryEnd,
+                    HandlerStart = handlerStart,
+                    HandlerEnd = handlerEnd
+                };
+                loadSoundMethod.Body.ExceptionHandlers.Add(eh);
+                waveBankType.Methods.Add(loadSoundMethod);
+                Console.WriteLine("Added WaveBank.LoadSoundEffect(int trackIndex) lazy loader.");
+
+                // 5c. Patch GetSoundEffectInstance to use LoadSoundEffect and handle null
+                var getSEIMethod = waveBankType.Methods.FirstOrDefault(m => m.Name == "GetSoundEffectInstance");
+                if (getSEIMethod != null)
+                {
+                    getSEIMethod.Body.Instructions.Clear();
+                    getSEIMethod.Body.Variables.Clear();
+                    getSEIMethod.Body.Variables.Add(new VariableDefinition(streamInfoType));
+                    getSEIMethod.Body.Variables.Add(new VariableDefinition(soundEffectType));
+
+                    var platformCreateStreamMethod = waveBankType.Methods.FirstOrDefault(m => m.Name == "PlatformCreateStream");
+
+                    var ilSEI = getSEIMethod.Body.GetILProcessor();
+                    var lblNonStreaming = ilSEI.Create(OpCodes.Ldarg_2);
+
+                    // if (this._streaming) {
+                    ilSEI.Emit(OpCodes.Ldarg_0);
+                    ilSEI.Emit(OpCodes.Ldfld, streamingField);
+                    ilSEI.Emit(OpCodes.Brfalse_S, lblNonStreaming);
+
+                    //   streaming = true;
+                    ilSEI.Emit(OpCodes.Ldarg_2);
+                    ilSEI.Emit(OpCodes.Ldc_I4_1);
+                    ilSEI.Emit(OpCodes.Stind_I1);
+
+                    //   StreamInfo stream = this._streams[trackIndex];
+                    ilSEI.Emit(OpCodes.Ldarg_0);
+                    ilSEI.Emit(OpCodes.Ldfld, streamsField);
+                    ilSEI.Emit(OpCodes.Ldarg_1);
+                    ilSEI.Emit(OpCodes.Ldelem_Any, streamInfoType);
+                    ilSEI.Emit(OpCodes.Stloc_0);
+
+                    //   return this.PlatformCreateStream(stream);
+                    ilSEI.Emit(OpCodes.Ldarg_0);
+                    ilSEI.Emit(OpCodes.Ldloc_0);
+                    ilSEI.Emit(OpCodes.Call, platformCreateStreamMethod);
+                    ilSEI.Emit(OpCodes.Ret);
+
+                    // } else {
+                    ilSEI.Append(lblNonStreaming);
+                    //   streaming = false;
+                    ilSEI.Emit(OpCodes.Ldc_I4_0);
+                    ilSEI.Emit(OpCodes.Stind_I1);
+
+                    //   SoundEffect se = this.LoadSoundEffect(trackIndex);
+                    ilSEI.Emit(OpCodes.Ldarg_0);
+                    ilSEI.Emit(OpCodes.Ldarg_1);
+                    ilSEI.Emit(OpCodes.Call, loadSoundMethod);
+                    ilSEI.Emit(OpCodes.Stloc_1);
+
+                    //   if (se == null) return null;
+                    ilSEI.Emit(OpCodes.Ldloc_1);
+                    var lblGetPooled = ilSEI.Create(OpCodes.Ldloc_1);
+                    ilSEI.Emit(OpCodes.Brtrue_S, lblGetPooled);
+                    ilSEI.Emit(OpCodes.Ldnull);
+                    ilSEI.Emit(OpCodes.Ret);
+
+                    //   return se.GetPooledInstance(true);
+                    ilSEI.Append(lblGetPooled);
+                    ilSEI.Emit(OpCodes.Ldc_I4_1);
+                    ilSEI.Emit(OpCodes.Callvirt, getPooledInstanceMethod);
+                    ilSEI.Emit(OpCodes.Ret);
+
+                    Console.WriteLine("Patched WaveBank.GetSoundEffectInstance to use lazy SoundEffect loader.");
+                }
+
+                // 5d. Patch WaveBank.Dispose(bool) to null-check elements before calling SoundEffect.Dispose()
+                var disposeMethod = waveBankType.Methods.FirstOrDefault(m => m.Name == "Dispose" && m.Parameters.Count == 1);
+                if (disposeMethod != null)
+                {
+                    // In Dispose(bool):
+                    //   ldloc.0
+                    //   ldloc.1
+                    //   ldelem.ref
+                    //   callvirt SoundEffect::Dispose()
+                    for (int i = 0; i < disposeMethod.Body.Instructions.Count; i++)
+                    {
+                        var inst = disposeMethod.Body.Instructions[i];
+                        if (inst.OpCode == OpCodes.Callvirt && inst.Operand == disposeMethod.Module.ImportReference(typeof(IDisposable).GetMethod("Dispose")) ||
+                            (inst.OpCode == OpCodes.Callvirt && ((MethodReference)inst.Operand).Name == "Dispose" && ((MethodReference)inst.Operand).DeclaringType.Name == "SoundEffect"))
+                        {
+                            var ldelemInst = disposeMethod.Body.Instructions[i - 1];
+                            if (ldelemInst.OpCode == OpCodes.Ldelem_Ref)
+                            {
+                                // Dup element, check if null, if null pop and skip dispose call
+                                var ilDisp = disposeMethod.Body.GetILProcessor();
+                                var nextAfterDispose = disposeMethod.Body.Instructions[i + 1];
+                                var lblSkip = nextAfterDispose;
+
+                                var dupInst = ilDisp.Create(OpCodes.Dup);
+                                var brnullInst = ilDisp.Create(OpCodes.Brfalse_S, lblSkip);
+                                var popBeforeSkip = ilDisp.Create(OpCodes.Pop);
+
+                                // Replace:
+                                //   ldelem.ref
+                                //   dup
+                                //   brtrue.s lblDoDispose
+                                //   pop
+                                //   br.s lblSkip
+                                // lblDoDispose:
+                                //   callvirt Dispose
+                                // lblSkip:
+                                var lblDoDispose = inst;
+                                var brtrueInst = ilDisp.Create(OpCodes.Brtrue_S, lblDoDispose);
+
+                                ilDisp.InsertAfter(ldelemInst, dupInst);
+                                ilDisp.InsertAfter(dupInst, brtrueInst);
+                                ilDisp.InsertAfter(brtrueInst, popBeforeSkip);
+                                ilDisp.InsertAfter(popBeforeSkip, ilDisp.Create(OpCodes.Br_S, lblSkip));
+
+                                Console.WriteLine("Safeguarded WaveBank.Dispose(bool) against null lazily loaded sounds.");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         assembly.Write();
         Console.WriteLine("Saved patched MonoGame.Framework.dll successfully.");
         return 0;

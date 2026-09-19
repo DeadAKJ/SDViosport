@@ -19,16 +19,17 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.52-fix-titlecontainer-il-stack'
+version_name = 'v1.0.53-lazy-wavebank-audio-load'
 
-changelog_content = """Version: v1.0.52-fix-titlecontainer-il-stack
+changelog_content = """Version: v1.0.53-lazy-wavebank-audio-load
 Date: 2026-09-19
 
 Changes:
-1. Fixed TitleContainer.PlatformOpenStream IL Evaluation Stack Imbalance:
-   - Root Cause: In v1.0.51, lblCheckDocsSubdir instruction was appended as Ldloc_1, followed immediately by an emitted duplicate Ldloc_1. This left an unpopped string argument on the evaluation stack, causing the runtime method verifier to reject the method with System.InvalidProgramException when TitleContainer.OpenStream was called.
-   - Fix: Removed the duplicate Ldloc_1 emission in PatchMonoGame, ensuring 100% balanced stack depth across all branch paths (Location -> Documents -> Documents/StardewValley -> App Bundle -> Fallback).
-   - Allows TitleContainer.OpenStream to cleanly load game Content (BigCraftables.xnb) and XACT audio (FarmerSounds.xgs).
+1. WaveBank Lazy Audio Decoding (Fix Startup Main Thread Hang / Black Screen):
+   - Root Cause: In WaveBank constructor, non-streaming wave banks (Wave Bank.xwb, 460 MB, 437 tracks) synchronously decoded all audio tracks in a loop at startup. Under the Mono interpreter on iOS, this synchronous loop froze the main thread for 40+ seconds, preventing LinkGameWindowToScene and display link ticks (causing a persistent black screen) and exhausting iOS RAM limits.
+   - Fix: Patched MonoGame.Framework.dll WaveBank constructor to bypass synchronous decoding loop and retain entry metadata in `_streams`. Added `WaveBank.LoadSoundEffect(int trackIndex)` lazy loader that opens the wavebank file via `AudioEngine.OpenStream`, seeks, reads bytes, and decodes format on demand when tracks/effects are requested.
+   - Patched `WaveBank.GetSoundEffectInstance` to invoke lazy loader.
+   - Patched `WaveBank.Dispose(bool)` to safely check for null lazy entries.
 2. Standalone Unbundled IPA Delivery:
    - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """
