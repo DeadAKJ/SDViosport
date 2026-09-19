@@ -67,6 +67,7 @@ namespace SDViOS.Input
         private static Type? _game1Type = null;
         private static PropertyInfo? _optionsProp = null;
         private static FieldInfo? _gamepadControlsField = null;
+        private static MethodInfo? _setKeysMethod = null;
 
         public void Initialize(GraphicsDevice graphicsDevice)
         {
@@ -288,7 +289,11 @@ namespace SDViOS.Input
                 // Inject into MonoGame's Keyboard engine static cache
                 try
                 {
-                    Microsoft.Xna.Framework.Input.Keyboard.SetKeys(activeKeys);
+                    if (_setKeysMethod == null)
+                    {
+                        _setKeysMethod = typeof(Microsoft.Xna.Framework.Input.Keyboard).GetMethod("SetKeys", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                    }
+                    _setKeysMethod?.Invoke(null, new object[] { activeKeys });
                 }
                 catch { }
 
