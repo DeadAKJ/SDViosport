@@ -19,17 +19,18 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.55-fix-wavebank-il-stack'
+version_name = 'v1.0.56-fix-audiocategory-null'
 
-changelog_content = """Version: v1.0.55-fix-wavebank-il-stack
+changelog_content = """Version: v1.0.56-fix-audiocategory-null
 Date: 2026-09-19
 
 Changes:
-1. Fix WaveBank Evaluation Stack Imbalance (InvalidProgramException):
-   - Root Cause: In v1.0.53 and v1.0.54, bypassing the synchronous decoding loop in `WaveBank..ctor` left `IL_0509: ldarg.0` unconsumed before branching to `IL_05a6`. The evaluation stack had depth 1 instead of 0 upon entering `IL_05a6`, causing Mono's runtime IL verifier to reject `WaveBank..ctor` with `System.InvalidProgramException`.
-   - Fix: Patched `IL_0509` to `nop` directly in `lib/MonoGame.Framework.dll`, achieving `IL_0509: nop; IL_050a: nop; IL_050b: br IL_05a6` with exact stack depth 0.
-   - Updated `tools/PatchMonoGame/Program.cs` to be completely idempotent across clean and pre-patched assemblies.
-   - Verified with Cecil that `WaveBank..ctor` has a balanced stack depth of 0 at branch target.
+1. Fix AudioCategory NullReferenceException in SoundBank..ctor / XactSound..ctor:
+   - Root Cause: In XactSound..ctor, audio categories from engine.Categories were loaded into a local copy struct and AudioCategory.AddSound was invoked. If a category struct was default-initialized or had null _sounds, AddSound threw NullReferenceException on this._sounds.Add(sound), causing Game1.InitializeSounds() to catch XACT exception, drop to DummyAudioEngine, and exit upon LoadContent completion.
+   - Fix:
+     a) Safeguarded AudioCategory.AddSound in lib/MonoGame.Framework.dll to auto-initialize this._sounds = new List<XactSound>() if null before adding.
+     b) Safeguarded AudioCategory.GetPlayingInstanceCount, GetOldestInstance, Pause, Resume, Stop, and SetVolume against null _sounds and null _volume arrays.
+     c) Patched XactSound..ctor with null-check and unsigned bounds-check on engine.Categories, loading category references via ldelema to mutate the actual AudioEngine category elements directly.
 2. Standalone Unbundled IPA Delivery:
    - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
 """
