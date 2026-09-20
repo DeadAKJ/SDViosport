@@ -95,6 +95,14 @@ namespace SDViOS.Input
                         return;
                     }
 
+                    bool submitted = false;
+                    void DoSubmit()
+                    {
+                        if (submitted) return;
+                        submitted = true;
+                        SubmitText(subscriber, textField?.Text ?? "");
+                    }
+
                     var alert = UIAlertController.Create(title, null, UIAlertControllerStyle.Alert);
                     UITextField? textField = null;
                     alert.AddTextField(tf =>
@@ -108,7 +116,7 @@ namespace SDViOS.Input
                         {
                             alert.DismissViewController(true, () =>
                             {
-                                SubmitText(subscriber, textField?.Text ?? "");
+                                DoSubmit();
                             });
                             return true;
                         };
@@ -116,11 +124,13 @@ namespace SDViOS.Input
 
                     alert.AddAction(UIAlertAction.Create("OK", UIAlertActionStyle.Default, _ =>
                     {
-                        SubmitText(subscriber, textField?.Text ?? "");
+                        DoSubmit();
                     }));
 
                     alert.AddAction(UIAlertAction.Create("Cancel", UIAlertActionStyle.Cancel, _ =>
                     {
+                        if (submitted) return;
+                        submitted = true;
                         CancelInput(subscriber);
                     }));
 
@@ -154,6 +164,15 @@ namespace SDViOS.Input
                         return;
                     }
 
+                    bool submitted = false;
+                    void DoComplete()
+                    {
+                        if (submitted) return;
+                        submitted = true;
+                        _isKeyboardActive = false;
+                        onCompleted?.Invoke(textField?.Text ?? "");
+                    }
+
                     var alert = UIAlertController.Create("Keyboard Input", null, UIAlertControllerStyle.Alert);
                     UITextField? textField = null;
                     alert.AddTextField(tf =>
@@ -164,8 +183,7 @@ namespace SDViOS.Input
                         {
                             alert.DismissViewController(true, () =>
                             {
-                                _isKeyboardActive = false;
-                                onCompleted?.Invoke(textField?.Text ?? "");
+                                DoComplete();
                             });
                             return true;
                         };
@@ -173,12 +191,13 @@ namespace SDViOS.Input
 
                     alert.AddAction(UIAlertAction.Create("OK", UIAlertActionStyle.Default, _ =>
                     {
-                        _isKeyboardActive = false;
-                        onCompleted?.Invoke(textField?.Text ?? "");
+                        DoComplete();
                     }));
 
                     alert.AddAction(UIAlertAction.Create("Cancel", UIAlertActionStyle.Cancel, _ =>
                     {
+                        if (submitted) return;
+                        submitted = true;
                         _isKeyboardActive = false;
                     }));
 
@@ -201,26 +220,21 @@ namespace SDViOS.Input
             {
                 EngineLogger.Log($"[VirtualKeyboardManager] Submitting text: '{newText}'");
 
-                // 1. Direct property assignment
-                if (_textProp != null)
+                // 1. Direct property assignment sets the text value cleanly without appending
+                if (_textProp == null)
                 {
-                    _textProp.SetValue(subscriber, newText);
+                    _textProp = subscriber.GetType().GetProperty("Text");
                 }
+                _textProp?.SetValue(subscriber, newText);
 
-                // 2. Call RecieveTextInput(string)
-                if (_recieveTextInputMethod == null)
+                // 2. Deselect
+                if (_selectedProp == null)
                 {
-                    _recieveTextInputMethod = subscriber.GetType().GetMethod("RecieveTextInput", new[] { typeof(string) });
+                    _selectedProp = subscriber.GetType().GetProperty("Selected");
                 }
-                _recieveTextInputMethod?.Invoke(subscriber, new object[] { newText });
+                _selectedProp?.SetValue(subscriber, false);
 
-                // 3. Deselect
-                if (_selectedProp != null)
-                {
-                    _selectedProp.SetValue(subscriber, false);
-                }
-
-                // 4. Trigger Enter event
+                // 3. Trigger Enter event
                 if (_onEnterPressedField == null)
                 {
                     _onEnterPressedField = subscriber.GetType().GetField("OnEnterPressed", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);

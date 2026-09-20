@@ -384,9 +384,6 @@ namespace SDViOS.Input
                         {
                             var textProp = subscriber.GetType().GetProperty("Text");
                             textProp?.SetValue(subscriber, text);
-
-                            var recvMethod = subscriber.GetType().GetMethod("RecieveTextInput", new[] { typeof(string) });
-                            recvMethod?.Invoke(subscriber, new object[] { text });
                         }
                     }
                 }

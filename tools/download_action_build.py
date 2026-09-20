@@ -19,26 +19,22 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.0.61-neutralize-smapi-dispose'
+version_name = 'v1.1.1-fix-double-text-input'
 
-changelog_content = """Version: v1.0.61-neutralize-smapi-dispose
+changelog_content = """Version: v1.1.1-fix-double-text-input
 Date: 2026-09-20
 
 Changes:
-1. Fix Root Cause of RuntimeSmapiPatcher Cecil AssemblyResolutionException & SCore.Dispose:
-   - Diagnosis: In v1.0.60, SMAPI still logged `Disposing...` and `Disposing the content coordinator` 67ms after `Instance_LoadContent()` completed.
-   - Root Cause:
-     a) `RuntimeSmapiPatcher` in v1.0.60 used Mono.Cecil without configuring `DefaultAssemblyResolver` with search directories (bundle, Documents, game root). Calling `asm.Write()` caused Cecil to throw `AssemblyResolutionException: Failed to resolve assembly: 'MonoGame.Framework'`, silently failing the patch attempt.
-     b) Furthermore, `RuntimeSmapiPatcher` only neutralized `SCore.OnGameExiting`, but `SCore.Dispose(bool)` itself was not neutralized. If `SCore.Dispose(bool)` runs, it calls `ContentCoordinator.Dispose()` and `Game.Dispose()`, setting `_isDisposed = true`, which immediately crashes `Game.Tick()` on the next CADisplayLink frame with `ObjectDisposedException`.
-   - Fix:
-     a) Configured `DefaultAssemblyResolver` in `RuntimeSmapiPatcher` with search paths for Bundle, Documents, GameRoot, and smapi-internal.
-     b) In `RuntimeSmapiPatcher`: Neutralized all `SCore.Dispose` methods (both parameterless and bool overloads) to pure no-op (`ret`).
-     c) Neutralized `SCore.OnGameExiting` and `SGameRunner.OnExiting` to pure no-ops (`ret`).
-     d) Neutralized `GameRunner.<.ctor>b__11_1` (`Process.Kill`) and sanitized any `Process.Kill` instructions in `Stardew Valley.dll`.
-     e) In `RuntimeSmapiPatcher`: Read via `MemoryStream`, write via `MemoryStream`, and save with atomic temporary files, falling back to `Documents/smapi-internal/` cache if the original DLL is read-only (e.g., inside the app bundle).
-     f) Updated `GameHost.cs` to use the returned patched paths from `RuntimeSmapiPatcher`.
+1. Fix Double Text Input on Virtual Keyboard:
+   - In VirtualKeyboardManager.cs:
+     * When confirming keyboard input, the manager previously set `TextBox.Text = newText` AND invoked `TextBox.RecieveTextInput(newText)`.
+     * In Stardew Valley's `TextBox.RecieveTextInput(string text)`, the implementation does `this.Text += text`. Calling both caused the entered text to be typed twice (e.g., 'FarmFarm' or 'AhmadAhmad').
+     * Removed the duplicate `RecieveTextInput` call. `TextBox.Text` property assignment sets the text cleanly.
+     * Added idempotency guard (`submitted`) in `ShowKeyboard` and `PromptManualInput` to ensure Done key and OK button cannot trigger multiple submissions.
+   - In TouchVirtualPad.cs:
+     * Removed redundant `RecieveTextInput` invocation in `FeedTextToGame`.
 2. Standalone Unbundled IPA Delivery:
-   - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and version folder.
+   - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and Post-Audio version folder.
 """
 
 
@@ -130,7 +126,7 @@ print(f"Downloading artifact {ipa_artifact['name']} from {download_url}...")
 opener = urllib.request.build_opener(NoAuthRedirectHandler)
 req = urllib.request.Request(download_url, headers=headers)
 
-target_dir = os.path.join(r"C:\Users\User\Desktop\SDVport Version", version_name)
+target_dir = os.path.join(r"C:\Users\User\Desktop\SDVport Version\Post-Audio", version_name)
 logs_dir = os.path.join(target_dir, "logs")
 os.makedirs(logs_dir, exist_ok=True)
 
