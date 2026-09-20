@@ -172,6 +172,25 @@ namespace SDViOS.Compatibility
                     }
                 }
 
+                var locMgrType = mod.GetType("StardewValley.LocalizedContentManager");
+                if (locMgrType != null)
+                {
+                    var getContentRootMethod = locMgrType.Methods.FirstOrDefault(m => m.Name == "GetContentRoot");
+                    if (getContentRootMethod != null && getContentRootMethod.HasBody)
+                    {
+                        foreach (var inst in getContentRootMethod.Body.Instructions)
+                        {
+                            // Replace ldc.i4.s 40 (Static | NonPublic) with 56 (Static | Public | NonPublic)
+                            if (inst.OpCode == OpCodes.Ldc_I4_S && Convert.ToInt32(inst.Operand) == 40)
+                            {
+                                inst.Operand = (sbyte)56;
+                                modified = true;
+                                EngineLogger.Log("[RuntimeSmapiPatcher] Patched LocalizedContentManager.GetContentRoot BindingFlags 40 -> 56 (Static | Public | NonPublic).");
+                            }
+                        }
+                    }
+                }
+
                 if (!modified)
                 {
                     EngineLogger.Log($"[RuntimeSmapiPatcher] '{sdvDllPath}' is already patched.");

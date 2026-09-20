@@ -94,18 +94,20 @@ class Program
         var titleContainerType = module.GetType("Microsoft.Xna.Framework.TitleContainer");
         if (titleContainerType != null)
         {
-            // 0a. Make get_Location and set_Location public
+            // 0a. Keep get_Location and set_Location internal (Assembly) so Stardew Valley's
+            // typeof(TitleContainer).GetProperty("Location", BindingFlags.Static | BindingFlags.NonPublic)
+            // succeeds instead of throwing "InvalidOperationException: Can't get TitleContainer.Location property from MonoGame"
             var getLocMethod = titleContainerType.Methods.FirstOrDefault(m => m.Name == "get_Location");
             if (getLocMethod != null)
             {
-                getLocMethod.Attributes = (getLocMethod.Attributes & ~MethodAttributes.MemberAccessMask) | MethodAttributes.Public;
-                Console.WriteLine("Made TitleContainer.get_Location public.");
+                getLocMethod.Attributes = (getLocMethod.Attributes & ~MethodAttributes.MemberAccessMask) | MethodAttributes.Assembly;
+                Console.WriteLine("Made TitleContainer.get_Location internal (Assembly).");
             }
             var setLocMethod = titleContainerType.Methods.FirstOrDefault(m => m.Name == "set_Location");
             if (setLocMethod != null)
             {
-                setLocMethod.Attributes = (setLocMethod.Attributes & ~MethodAttributes.MemberAccessMask) | MethodAttributes.Public;
-                Console.WriteLine("Made TitleContainer.set_Location public.");
+                setLocMethod.Attributes = (setLocMethod.Attributes & ~MethodAttributes.MemberAccessMask) | MethodAttributes.Assembly;
+                Console.WriteLine("Made TitleContainer.set_Location internal (Assembly).");
             }
 
             // 0b. Patch PlatformOpenStream to search Location, Documents, Documents/StardewValley, and App Bundle

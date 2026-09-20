@@ -95,6 +95,9 @@ namespace SDViOS.Input
                         return;
                     }
 
+                    var alert = UIAlertController.Create(title, null, UIAlertControllerStyle.Alert);
+                    UITextField? textField = null;
+
                     bool submitted = false;
                     void DoSubmit()
                     {
@@ -103,8 +106,6 @@ namespace SDViOS.Input
                         SubmitText(subscriber, textField?.Text ?? "");
                     }
 
-                    var alert = UIAlertController.Create(title, null, UIAlertControllerStyle.Alert);
-                    UITextField? textField = null;
                     alert.AddTextField(tf =>
                     {
                         textField = tf;
@@ -164,6 +165,9 @@ namespace SDViOS.Input
                         return;
                     }
 
+                    var alert = UIAlertController.Create("Keyboard Input", null, UIAlertControllerStyle.Alert);
+                    UITextField? textField = null;
+
                     bool submitted = false;
                     void DoComplete()
                     {
@@ -173,8 +177,6 @@ namespace SDViOS.Input
                         onCompleted?.Invoke(textField?.Text ?? "");
                     }
 
-                    var alert = UIAlertController.Create("Keyboard Input", null, UIAlertControllerStyle.Alert);
-                    UITextField? textField = null;
                     alert.AddTextField(tf =>
                     {
                         textField = tf;

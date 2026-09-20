@@ -19,22 +19,30 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.1.1-fix-double-text-input'
+version_name = 'v1.1.2-fix-sprites-and-keyboard'
 
-changelog_content = """Version: v1.1.1-fix-double-text-input
+changelog_content = """Version: v1.1.2-fix-sprites-and-keyboard
 Date: 2026-09-20
 
 Changes:
-1. Fix Double Text Input on Virtual Keyboard:
-   - In VirtualKeyboardManager.cs:
-     * When confirming keyboard input, the manager previously set `TextBox.Text = newText` AND invoked `TextBox.RecieveTextInput(newText)`.
-     * In Stardew Valley's `TextBox.RecieveTextInput(string text)`, the implementation does `this.Text += text`. Calling both caused the entered text to be typed twice (e.g., 'FarmFarm' or 'AhmadAhmad').
-     * Removed the duplicate `RecieveTextInput` call. `TextBox.Text` property assignment sets the text cleanly.
-     * Added idempotency guard (`submitted`) in `ShowKeyboard` and `PromptManualInput` to ensure Done key and OK button cannot trigger multiple submissions.
-   - In TouchVirtualPad.cs:
-     * Removed redundant `RecieveTextInput` invocation in `FeedTextToGame`.
-2. Standalone Unbundled IPA Delivery:
-   - Delivers unbundled StardewValley-iOS.ipa directly to Desktop root and Post-Audio version folder.
+1. Fix Broken/Missing Sprites & Textures (Tools, Furniture, Shirts, Animals):
+   - Diagnosis:
+     * In-game tools (Axe, Hoe, Watering Can, Pickaxe) displayed missing red circle-slash prohibition icons.
+     * Farmhouse interior displayed misplaced Cursors UI sprites (Joja, trash can, coins, clock face) instead of furniture.
+     * Logs showed: `InvalidOperationException: Can't get TitleContainer.Location property from MonoGame` in `LocalizedContentManager.GetContentRoot()`, causing `EnsureManifestInitialized()` to throw and `_manifest` to stay empty.
+     * When `_manifest` is empty, `DoesAssetExist("TileSheets/tools")` returns false, leading to error placeholder sprites.
+   - Root Cause:
+     * Stardew Valley's `LocalizedContentManager.GetContentRoot` uses `typeof(TitleContainer).GetProperty("Location", BindingFlags.Static | BindingFlags.NonPublic)`.
+     * `PatchMonoGame` had modified `TitleContainer.get_Location` and `set_Location` to `MethodAttributes.Public`.
+     * Because the property was public, reflection with `BindingFlags.NonPublic` returned `null` and threw `InvalidOperationException`.
+   - Fix:
+     * Kept `TitleContainer.get_Location` and `set_Location` internal (`MethodAttributes.Assembly`) in `PatchMonoGame`.
+     * Added runtime bytecode patch in `RuntimeSmapiPatcher.cs` for `LocalizedContentManager.GetContentRoot` to search `BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic` (value 56).
+2. Fix Double Text Input on Virtual Keyboard:
+   - Fixed CS0841 compilation error in `VirtualKeyboardManager.cs` (`textField` declaration ordering) that prevented v1.1.1 from compiling on CI.
+   - Verified that `TextBox.Text` assignment is clean and duplicate `RecieveTextInput` calls remain completely purged.
+3. Robust CI Build Detection:
+   - `download_action_build.py` now targets the exact git commit SHA of `HEAD` to eliminate race conditions with older runs.
 """
 
 
@@ -53,25 +61,36 @@ class NoAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
             del new_req.headers['Authorization']
         return new_req
 
-# Determine run_id: from command line arg or fetch latest run
+# Determine run_id: from command line arg or fetch latest run matching current git commit
 run_id = sys.argv[1] if len(sys.argv) > 1 else None
 
 if not run_id:
-    print(f"Fetching latest GitHub Actions run for {repo}...")
     try:
-        url = f'https://api.github.com/repos/{repo}/actions/runs?per_page=1'
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode())
-            runs = data.get('workflow_runs', [])
-            if runs:
-                run_id = str(runs[0]['id'])
-                print(f"Detected latest run: {run_id} ({runs[0].get('name', 'Workflow')})")
-            else:
-                print("No workflow runs found yet for this repository.")
-                sys.exit(1)
+        git_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        current_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=git_dir).decode().strip()
+        print(f"Targeting git commit SHA: {current_sha[:8]}")
+        print(f"Waiting for GitHub Actions run matching commit {current_sha[:8]}...")
+        for attempt in range(24): # wait up to 2 minutes for run to appear
+            try:
+                url = f'https://api.github.com/repos/{repo}/actions/runs?per_page=10'
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req) as resp:
+                    data = json.loads(resp.read().decode())
+                    for r in data.get('workflow_runs', []):
+                        if r.get('head_sha') == current_sha:
+                            run_id = str(r['id'])
+                            print(f"Detected matched run: {run_id} ({r.get('name', 'Workflow')})")
+                            break
+            except Exception as e:
+                print(f"Error checking runs: {e}")
+            if run_id:
+                break
+            time.sleep(5)
+        if not run_id:
+            print("Timed out waiting for GitHub Actions workflow to start.")
+            sys.exit(1)
     except Exception as e:
-        print(f"Error fetching latest run: {e}")
+        print(f"Error detecting git commit or runs: {e}")
         sys.exit(1)
 
 if len(sys.argv) > 2:
