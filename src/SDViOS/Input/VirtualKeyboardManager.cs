@@ -20,6 +20,8 @@ namespace SDViOS.Input
 
         private static bool _isKeyboardActive = false;
         private static object? _activeSubscriber = null;
+        private static DateTime _lastSubmitTime = DateTime.MinValue;
+        private static object? _lastSubmittedSubscriber = null;
 
         public static void Update()
         {
@@ -32,6 +34,11 @@ namespace SDViOS.Input
 
                 object? subscriber = _subscriberProp.GetValue(_keyboardDispatcherInstance);
                 if (subscriber == null) return;
+
+                if (subscriber == _lastSubmittedSubscriber && (DateTime.UtcNow - _lastSubmitTime).TotalSeconds < 1.0)
+                {
+                    return;
+                }
 
                 if (_selectedProp == null)
                 {
@@ -221,6 +228,8 @@ namespace SDViOS.Input
             try
             {
                 EngineLogger.Log($"[VirtualKeyboardManager] Submitting text: '{newText}'");
+                _lastSubmitTime = DateTime.UtcNow;
+                _lastSubmittedSubscriber = subscriber;
 
                 // 1. Direct property assignment sets the text value cleanly without appending
                 if (_textProp == null)
@@ -229,14 +238,23 @@ namespace SDViOS.Input
                 }
                 _textProp?.SetValue(subscriber, newText);
 
-                // 2. Deselect
+                // 2. Deselect subscriber
                 if (_selectedProp == null)
                 {
                     _selectedProp = subscriber.GetType().GetProperty("Selected");
                 }
                 _selectedProp?.SetValue(subscriber, false);
 
-                // 3. Trigger Enter event
+                // 3. Reset SimulatedMouse position so TextBox.Update doesn't re-select it immediately
+                TouchVirtualPad.Instance.ResetSimulatedMouse();
+
+                // 4. Detach subscriber from keyboardDispatcher
+                if (_keyboardDispatcherInstance != null && _subscriberProp != null)
+                {
+                    _subscriberProp.SetValue(_keyboardDispatcherInstance, null);
+                }
+
+                // 5. Trigger Enter event
                 if (_onEnterPressedField == null)
                 {
                     _onEnterPressedField = subscriber.GetType().GetField("OnEnterPressed", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
@@ -259,9 +277,17 @@ namespace SDViOS.Input
         {
             try
             {
+                _lastSubmitTime = DateTime.UtcNow;
+                _lastSubmittedSubscriber = subscriber;
+
                 if (_selectedProp != null)
                 {
                     _selectedProp.SetValue(subscriber, false);
+                }
+                TouchVirtualPad.Instance.ResetSimulatedMouse();
+                if (_keyboardDispatcherInstance != null && _subscriberProp != null)
+                {
+                    _subscriberProp.SetValue(_keyboardDispatcherInstance, null);
                 }
             }
             catch { }

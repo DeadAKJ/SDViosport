@@ -8,8 +8,8 @@ class Program
 {
     static int Main(string[] args)
     {
-        string dllPath = args.Length > 0 ? args[0] : string.Empty;
-        if (string.IsNullOrEmpty(dllPath))
+        string dllPath = args.FirstOrDefault(a => !a.StartsWith("--")) ?? string.Empty;
+        if (string.IsNullOrEmpty(dllPath) || !File.Exists(dllPath))
         {
             string candidate1 = Path.Combine(Directory.GetCurrentDirectory(), "lib", "MonoGame.Framework.dll");
             string candidate2 = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "lib", "MonoGame.Framework.dll"));
@@ -83,6 +83,47 @@ class Program
                 Console.WriteLine($"AudioCategory.{m.Name}: {m.Body.Instructions.Count} instructions");
                 foreach (var inst in m.Body.Instructions)
                     Console.WriteLine($"    {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+            }
+            return 0;
+        }
+
+        if (args.Contains("--inspect-cap"))
+        {
+            var asm = AssemblyDefinition.ReadAssembly(dllPath);
+            Console.WriteLine("=== GraphicsCapabilities ===");
+            var gc = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.GraphicsCapabilities");
+            var platInit = gc.Methods.First(m => m.Name == "PlatformInitialize");
+            Console.WriteLine($"Method: {platInit.Name}");
+            foreach (var inst in platInit.Body.Instructions)
+            {
+                Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+            }
+            return 0;
+        }
+
+        if (args.Contains("--inspect-tex"))
+        {
+            var asm = AssemblyDefinition.ReadAssembly(dllPath);
+            Console.WriteLine("=== Texture2D.GenerateGLTextureIfRequired ===");
+            var t2d = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.Texture2D");
+            var gen = t2d.Methods.First(m => m.Name == "GenerateGLTextureIfRequired");
+            foreach (var inst in gen.Body.Instructions)
+            {
+                Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+            }
+            return 0;
+        }
+
+        if (args.Contains("--inspect-sdv"))
+        {
+            var asm = AssemblyDefinition.ReadAssembly(dllPath);
+
+            Console.WriteLine("\n=== Texture2DReader.Read ===");
+            var t2r = asm.MainModule.GetType("Microsoft.Xna.Framework.Content.Texture2DReader");
+            var readM = t2r.Methods.First(m => m.Name == "Read");
+            foreach (var inst in readM.Body.Instructions)
+            {
+                Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
             }
             return 0;
         }
@@ -937,6 +978,34 @@ class Program
                 var il = asyncLoopEnded.Body.GetILProcessor();
                 il.Emit(OpCodes.Ret);
                 Console.WriteLine("Neutralized Game.Platform_AsyncRunLoopEnded (pure no-op ret).");
+            }
+        }
+
+        // 9. Patch GraphicsCapabilities to always enable SupportsNonPowerOfTwo
+        var graphicsCapabilitiesType = module.GetType("Microsoft.Xna.Framework.Graphics.GraphicsCapabilities");
+        if (graphicsCapabilitiesType != null)
+        {
+            var getSupportsNpot = graphicsCapabilitiesType.Methods.FirstOrDefault(m => m.Name == "get_SupportsNonPowerOfTwo");
+            if (getSupportsNpot != null)
+            {
+                getSupportsNpot.Body.Instructions.Clear();
+                getSupportsNpot.Body.Variables.Clear();
+                getSupportsNpot.Body.ExceptionHandlers.Clear();
+                var il = getSupportsNpot.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldc_I4_1);
+                il.Emit(OpCodes.Ret);
+                Console.WriteLine("Patched GraphicsCapabilities.get_SupportsNonPowerOfTwo to always return true.");
+            }
+
+            var setSupportsNpot = graphicsCapabilitiesType.Methods.FirstOrDefault(m => m.Name == "set_SupportsNonPowerOfTwo");
+            if (setSupportsNpot != null)
+            {
+                setSupportsNpot.Body.Instructions.Clear();
+                setSupportsNpot.Body.Variables.Clear();
+                setSupportsNpot.Body.ExceptionHandlers.Clear();
+                var il = setSupportsNpot.Body.GetILProcessor();
+                il.Emit(OpCodes.Ret);
+                Console.WriteLine("Patched GraphicsCapabilities.set_SupportsNonPowerOfTwo to no-op.");
             }
         }
 

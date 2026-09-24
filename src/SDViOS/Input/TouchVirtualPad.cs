@@ -36,6 +36,13 @@ namespace SDViOS.Input
         public bool SimulatedMouseLeftDown { get; private set; }
         public bool SimulatedMouseRightDown { get; private set; }
 
+        public void ResetSimulatedMouse()
+        {
+            SimulatedMousePosition = new Point(-1000, -1000);
+            SimulatedMouseLeftDown = false;
+            SimulatedMouseRightDown = false;
+        }
+
         // Layout bounds (calculated dynamically based on viewport)
         private Rectangle _joystickBaseRect;
         private Vector2 _joystickCenter;

@@ -69,6 +69,7 @@ namespace SDViOS.Loader
         private static FieldInfo? _game1TicksField;
         private static bool _windowSizeSynchronized = false;
         private static bool _menuLayoutSynchronized = false;
+        private static bool _touchOverlayAttached = false;
 
         public static void InitializeFileSystem()
         {
@@ -1525,10 +1526,17 @@ namespace SDViOS.Loader
                 }
 
                 // Revive graphics device, window viewController, and instance options
-                ReviveGraphicsDeviceAndInstances(runner, plat, null, gameView);
+                if (_directTickCount == 0 || runner.GraphicsDevice == null || runner.GraphicsDevice.IsDisposed)
+                {
+                    ReviveGraphicsDeviceAndInstances(runner, plat, null, gameView);
+                }
 
                 // Ensure TouchOverlay is attached and input forwarded every frame
-                AttachTouchOverlayToGameRunner();
+                if (!_touchOverlayAttached)
+                {
+                    AttachTouchOverlayToGameRunner();
+                    _touchOverlayAttached = true;
+                }
                 TouchVirtualPad.Instance.ForwardInputToGame();
                 VirtualKeyboardManager.Update();
 
