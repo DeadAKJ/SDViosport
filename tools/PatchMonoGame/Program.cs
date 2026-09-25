@@ -51,7 +51,6 @@ class Program
 
             var getValueExisting = netRectType.Methods.FirstOrDefault(m => m.Name == "get_Value" && m.ReturnType.FullName == "Microsoft.Xna.Framework.Rectangle");
             var getXExisting = netRectType.Methods.FirstOrDefault(m => m.Name == "get_X");
-            bool hasValueProp = netRectType.Properties.Any(p => p.Name == "Value");
 
             bool isHealthy = getValueExisting != null &&
                              getValueExisting.HasBody &&
@@ -63,8 +62,7 @@ class Program
                              getXExisting.Body.Instructions.Count >= 2 &&
                              getXExisting.Body.Instructions[1].OpCode == OpCodes.Ldflda &&
                              getXExisting.Body.Instructions[1].Operand is FieldReference gxFr &&
-                             gxFr.FieldType.FullName == "T" &&
-                             !hasValueProp;
+                             gxFr.FieldType.FullName == "T";
 
             if (isHealthy)
             {
@@ -77,13 +75,6 @@ class Program
 
             var getTop = netRectType.Methods.First(m => m.Name == "get_Top");
             var origValueFr = (FieldReference)getTop.Body.Instructions[1].Operand;
-
-            var valProp = netRectType.Properties.FirstOrDefault(p => p.Name == "Value");
-            if (valProp != null)
-            {
-                netRectType.Properties.Remove(valProp);
-                Console.WriteLine("Removed problematic 'Value' property from NetRectangle.");
-            }
 
             // 1. Add or heal concrete public Rectangle get_Value()
             var getValue = getValueExisting;
@@ -124,6 +115,26 @@ class Program
                 ilSet.Emit(OpCodes.Ret);
                 netRectType.Methods.Add(setValue);
                 Console.WriteLine("Added NetRectangle.set_Value(Rectangle).");
+            }
+
+            // Ensure 'Value' property exists and references concrete getValue / setValue without breaking Cecil metadata tokens
+            var valProp = netRectType.Properties.FirstOrDefault(p => p.Name == "Value");
+            if (valProp == null)
+            {
+                valProp = new PropertyDefinition("Value", PropertyAttributes.None, rectType)
+                {
+                    GetMethod = getValue,
+                    SetMethod = setValue
+                };
+                netRectType.Properties.Add(valProp);
+                Console.WriteLine("Added NetRectangle.Value property definition.");
+            }
+            else
+            {
+                valProp.PropertyType = rectType;
+                valProp.GetMethod = getValue;
+                valProp.SetMethod = setValue;
+                Console.WriteLine("Re-linked existing NetRectangle.Value property to concrete get/set methods.");
             }
 
             // 3. Fix get_X, get_Y, get_Width, get_Height

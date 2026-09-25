@@ -19,25 +19,22 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.1.6-fix-save-load-missing-field'
+version_name = 'v1.1.7-fix-cecil-metadatareader-argumentexception'
 
-changelog_content = """Version: v1.1.6-fix-save-load-missing-field
+changelog_content = """Version: v1.1.7-fix-cecil-metadatareader-argumentexception
 Date: 2026-09-26
 
 Changes:
-1. Fix Save Loading Crash / Return to Title Screen:
+1. Fix Runtime Patcher Abort on Devices (ArgumentException in Mono.Cecil.MetadataReader.GetMember):
    - Root Cause:
-     * When loading a save game containing furniture (e.g. at character offset ~1,410,295 in SaveGame XML), `SaveSerializer.Deserialize<SaveGame>` instantiates `Furniture..ctor()` -> `Furniture.updateDrawPosition()` -> `NetRectangle.get_X()`.
-     * In the initial v1.1.5 patch, `valueFieldRef` was synthesized with `FieldType = Rectangle` rather than referencing the declared generic field signature `T` (`GenericParameter`) on `Netcode.NetFieldBase`2<Rectangle, NetRectangle>::value`.
-     * At runtime, Mono / CLR threw `MissingFieldException: Field not found: 'Netcode.NetFieldBase`2.value' at Netcode.NetRectangle.get_X()`, which `SaveSerializer` caught and returned back to the main menu.
-     * Additionally, adding a `Value` property to `NetRectangle` introduced a risk where `XmlSerializer` could attempt to serialize it.
+     * In v1.1.6, `PatchNetRectangle` attempted to remove the `Value` property (`netRectType.Properties.Remove(valProp)`).
+     * On devices that previously booted v1.1.5, the on-disk `Stardew Valley.dll` had MethodSemantics metadata entries associating `get_Value` and `set_Value` with the `Value` property token.
+     * When `asm.Write` was invoked, Cecil's `ImmediateModuleReader.ReadAllSemantics` tried to resolve the property token via `MetadataReader.GetMember[PropertyDefinition]`. Because the property was removed from `Properties`, Cecil threw `ArgumentException: Arg_ArgumentException`.
+     * `EnsureGameRunnerPatched` caught the exception and aborted without saving the patched bytes, leaving the device running the broken v1.1.5 DLL where `get_X()` threw `MissingFieldException: NetFieldBase`2.value`.
    - Fix:
-     * Extracted the exact, clean `origValueFr` from `NetRectangle.get_Top` (`Instructions[1].Operand`), preserving the valid generic field signature `T` on `Netcode.NetFieldBase`2<Rectangle, NetRectangle>`.
-     * Emitted `get_X`, `get_Y`, `get_Width`, `get_Height` to load `origValueFr` directly (`ldflda origValueFr; ldfld <field>`).
-     * Emitted `NetRectangle.get_Value` using `origValueFr` (`ldfld origValueFr`).
-     * Removed the unnecessary `Value` property definition from `NetRectangle.Properties`.
-     * Added full self-healing detection in `RuntimeSmapiPatcher.PatchNetRectangle` and `tools/PatchMonoGame`:
-       If a device already has a v1.1.5 patched DLL with broken field references or the `Value` property, it automatically strips the property and repairs `get_Value` and `get_X/Y/Width/Height` in-place.
+     * Retained the `Value` property on `NetRectangle` and re-linked its `GetMethod` to concrete `get_Value` and `SetMethod` to `set_Value`. Verified via offline tests that having `Value` in `Properties` causes zero XmlSerializer issues.
+     * With `Value` retained, Cecil's metadata reader maintains token integrity and `asm.Write` succeeds seamlessly without `ArgumentException`.
+     * Verified self-healing on existing assemblies with `valProp`: the patcher successfully writes the repaired assembly to disk, resolving the runtime `MissingFieldException` on `get_X` and allowing save games to load properly.
 """
 
 

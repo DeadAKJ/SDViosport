@@ -225,7 +225,6 @@ namespace SDViOS.Compatibility
             // Check if already patched and healthy
             var getValueExisting = netRectType.Methods.FirstOrDefault(m => m.Name == "get_Value" && m.ReturnType.FullName == "Microsoft.Xna.Framework.Rectangle");
             var getXExisting = netRectType.Methods.FirstOrDefault(m => m.Name == "get_X");
-            bool hasValueProp = netRectType.Properties.Any(p => p.Name == "Value");
 
             bool isHealthy = getValueExisting != null &&
                              getValueExisting.HasBody &&
@@ -237,8 +236,7 @@ namespace SDViOS.Compatibility
                              getXExisting.Body.Instructions.Count >= 2 &&
                              getXExisting.Body.Instructions[1].OpCode == OpCodes.Ldflda &&
                              getXExisting.Body.Instructions[1].Operand is FieldReference gxFr &&
-                             gxFr.FieldType.FullName == "T" &&
-                             !hasValueProp;
+                             gxFr.FieldType.FullName == "T";
 
             if (isHealthy)
             {
@@ -261,14 +259,6 @@ namespace SDViOS.Compatibility
                 return false;
             }
             var origValueFr = (FieldReference)getTop.Body.Instructions[1].Operand;
-
-            // Remove problematic 'Value' property if present (XmlSerializer treats it as a serializable element)
-            var valProp = netRectType.Properties.FirstOrDefault(p => p.Name == "Value");
-            if (valProp != null)
-            {
-                netRectType.Properties.Remove(valProp);
-                EngineLogger.Log("[RuntimeSmapiPatcher] Removed problematic 'Value' property from NetRectangle.");
-            }
 
             // 1. Add or heal concrete public Rectangle get_Value()
             var getValue = getValueExisting;
@@ -309,6 +299,26 @@ namespace SDViOS.Compatibility
                 ilSet.Emit(OpCodes.Ret);
                 netRectType.Methods.Add(setValue);
                 EngineLogger.Log("[RuntimeSmapiPatcher] Added NetRectangle.set_Value(Rectangle).");
+            }
+
+            // Ensure 'Value' property exists and references concrete getValue / setValue without breaking Cecil metadata tokens
+            var valProp = netRectType.Properties.FirstOrDefault(p => p.Name == "Value");
+            if (valProp == null)
+            {
+                valProp = new PropertyDefinition("Value", PropertyAttributes.None, rectType)
+                {
+                    GetMethod = getValue,
+                    SetMethod = setValue
+                };
+                netRectType.Properties.Add(valProp);
+                EngineLogger.Log("[RuntimeSmapiPatcher] Added NetRectangle.Value property definition.");
+            }
+            else
+            {
+                valProp.PropertyType = rectType;
+                valProp.GetMethod = getValue;
+                valProp.SetMethod = setValue;
+                EngineLogger.Log("[RuntimeSmapiPatcher] Re-linked existing NetRectangle.Value property to concrete get/set methods.");
             }
 
             // 3. Fix get_X, get_Y, get_Width, get_Height to load fields directly via ldflda origValueFr
