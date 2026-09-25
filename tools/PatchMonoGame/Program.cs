@@ -59,6 +59,62 @@ class Program
             return 0;
         }
 
+        if (args.Contains("--inspect-gc-init"))
+        {
+            var mgAsm = AssemblyDefinition.ReadAssembly(dllPath);
+            var gcType = mgAsm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.GraphicsCapabilities");
+            var m = gcType.Methods.First(m => m.Name == "PlatformInitialize");
+            Console.WriteLine($"=== {m.FullName} ===");
+            foreach (var inst in m.Body.Instructions)
+                Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+            return 0;
+        }
+
+        if (args.Contains("--inspect-sp"))
+        {
+            var sdvDll = @"C:\Users\User\Desktop\SDVport Version\Game_Files\Stardew Valley.dll";
+            var sdvAsm = AssemblyDefinition.ReadAssembly(sdvDll);
+            var furn = sdvAsm.MainModule.GetType("StardewValley.Objects.Furniture");
+            var spMethods = furn.Methods.Where(m => m.Name == "SetPlacement").ToList();
+            foreach (var sp in spMethods)
+            {
+                Console.WriteLine($"=== SetPlacement ({sp.Parameters.Count} params) ===");
+                foreach (var inst in sp.Body.Instructions)
+                    Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+            }
+            return 0;
+        }
+
+        if (args.Contains("--inspect-gdsr"))
+        {
+            var sdvDll = @"C:\Users\User\Desktop\SDVport Version\Game_Files\Stardew Valley.dll";
+            var sdvAsm = AssemblyDefinition.ReadAssembly(sdvDll);
+            var furn = sdvAsm.MainModule.GetType("StardewValley.Objects.Furniture");
+            var gdsrMethods = furn.Methods.Where(m => m.Name.Contains("GetDefaultSourceRect") || m.Name.Contains("getDefaultSourceRect")).ToList();
+            foreach (var m in gdsrMethods)
+            {
+                Console.WriteLine($"=== {m.Name} ({m.Parameters.Count} params) ===");
+                foreach (var inst in m.Body.Instructions)
+                    Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+            }
+            return 0;
+        }
+
+        if (args.Contains("--inspect-fh"))
+        {
+            string sdvDll = @"C:\Users\User\Desktop\SDVport Version\Game_Files\Stardew Valley.dll";
+            var sdvAsm = AssemblyDefinition.ReadAssembly(sdvDll);
+            var fh = sdvAsm.MainModule.GetType("StardewValley.Locations.FarmHouse");
+            var m = fh.Methods.First(x => x.Name == "AddStarterFurniture");
+            using var sw = new StreamWriter(@"C:\Users\User\.gemini\antigravity\brain\76166a89-be43-47e5-a008-2afff7d8556d\scratch\starter_furniture_all.txt");
+            foreach (var inst in m.Body.Instructions)
+            {
+                sw.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+            }
+            Console.WriteLine("Dumped AddStarterFurniture to starter_furniture_all.txt");
+            return 0;
+        }
+
         if (args.Contains("--verify"))
         {
             var asm = AssemblyDefinition.ReadAssembly(dllPath);
@@ -114,7 +170,130 @@ class Program
             return 0;
         }
 
-        if (args.Contains("--inspect-sdv"))
+        if (args.Contains("--inspect-f-ctor"))
+        {
+            var asm = AssemblyDefinition.ReadAssembly(dllPath);
+            var res = asm.MainModule.Resources.OfType<EmbeddedResource>().FirstOrDefault(r => r.Name.Contains("SpriteEffect.ogl.mgfxo"));
+            if (res != null)
+            {
+                byte[] rdata = res.GetResourceData();
+                using var ms = new MemoryStream(rdata, 10, rdata.Length - 10);
+                using var br = new BinaryReader(ms);
+                int cbCount = br.ReadInt32();
+                Console.WriteLine($"CBs: {cbCount}");
+                for (int i = 0; i < cbCount; i++)
+                {
+                    string name = br.ReadString();
+                    short sizeInBytes = br.ReadInt16();
+                    int paramIndexCount = br.ReadInt32();
+                    for (int j = 0; j < paramIndexCount; j++) { br.ReadInt32(); br.ReadUInt16(); }
+                    Console.WriteLine($"  CB #{i}: {name}, size={sizeInBytes}, params={paramIndexCount}");
+                }
+                int shaderCount = br.ReadInt32();
+                Console.WriteLine($"Shaders: {shaderCount}");
+                for (int i = 0; i < shaderCount; i++)
+                {
+                    bool isVertexShader = br.ReadBoolean();
+                    int codeLen = br.ReadInt32();
+                    byte[] code = br.ReadBytes(codeLen);
+                    byte samplers = br.ReadByte();
+                    for (int s = 0; s < samplers; s++)
+                    {
+                        byte type = br.ReadByte();
+                        byte addrU = br.ReadByte();
+                        byte addrV = br.ReadByte();
+                        byte addrW = br.ReadByte();
+                        byte bR = br.ReadByte(); byte bG = br.ReadByte(); byte bB = br.ReadByte(); byte bA = br.ReadByte();
+                        byte filter = br.ReadByte();
+                        int maxAniso = br.ReadInt32();
+                        int maxMip = br.ReadInt32();
+                        float lodBias = br.ReadSingle();
+                        string sName = br.ReadString();
+                        byte sParam = br.ReadByte();
+                    }
+                    byte cbuffers = br.ReadByte();
+                    for (int c = 0; c < cbuffers; c++) br.ReadByte();
+                    byte attribs = br.ReadByte();
+                    Console.WriteLine($"  Shader #{i}: isVS={isVertexShader}, CodeLen={codeLen}, Samplers={samplers}, CBs={cbuffers}, Attribs={attribs}");
+                    for (int a = 0; a < attribs; a++)
+                    {
+                        string aName = br.ReadString();
+                        byte usage = br.ReadByte();
+                        byte idx = br.ReadByte();
+                        short loc = br.ReadInt16();
+                        Console.WriteLine($"    Attrib #{a}: name={aName}, usage={usage}, index={idx}, loc={loc}");
+                    }
+                }
+
+            }
+            return 0;
+
+
+
+        }
+
+
+        if (args.Contains("--inspect-vpct"))
+        {
+            var asm = AssemblyDefinition.ReadAssembly(dllPath);
+            Console.WriteLine("=== VertexPositionColorTexture ===");
+            var vpct = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.VertexPositionColorTexture");
+            Console.WriteLine($"Layout: {vpct.PackingSize}, ClassSize: {vpct.ClassSize}, IsValueType: {vpct.IsValueType}");
+            foreach (var f in vpct.Fields)
+                Console.WriteLine($"  Field: {f.Name}, Type: {f.FieldType.FullName}, Offset: {f.Offset}");
+            var cctor = vpct.Methods.FirstOrDefault(m => m.IsConstructor && m.IsStatic);
+            if (cctor != null)
+            {
+                Console.WriteLine("Static .cctor:");
+                foreach (var inst in cctor.Body.Instructions)
+                    Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+            }
+            return 0;
+        }
+
+        if (args.Contains("--inspect-vd"))
+        {
+            var asm = AssemblyDefinition.ReadAssembly(dllPath);
+            Console.WriteLine("=== VertexDeclaration methods ===");
+            var vd = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.VertexDeclaration");
+            foreach (var m in vd.Methods)
+            {
+                Console.WriteLine($"Method: {m.Name}");
+                if (m.HasBody)
+                {
+                    foreach (var inst in m.Body.Instructions)
+                        Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+                }
+            }
+            return 0;
+        }
+
+        if (args.Contains("--inspect-sbr"))
+        {
+            var asm = AssemblyDefinition.ReadAssembly(dllPath);
+            Console.WriteLine("=== SpriteBatcher methods ===");
+            var sbr = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.SpriteBatcher");
+            foreach (var m in sbr.Methods)
+            {
+                Console.WriteLine($"Method: {m.Name}");
+                foreach (var inst in m.Body.Instructions)
+                    Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+            }
+            Console.WriteLine("=== GraphicsDevice.PlatformDrawUserIndexedPrimitives ===");
+            var gd = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.GraphicsDevice");
+            foreach (var m in gd.Methods.Where(m => m.Name.Contains("DrawUserIndexedPrimitives")))
+            {
+                Console.WriteLine($"Method: {m.FullName}");
+                if (m.HasBody)
+                {
+                    foreach (var inst in m.Body.Instructions)
+                        Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
+                }
+            }
+            return 0;
+        }
+
+        if (args.Contains("--inspect-t2r"))
         {
             var asm = AssemblyDefinition.ReadAssembly(dllPath);
 
@@ -1005,9 +1184,40 @@ class Program
                 setSupportsNpot.Body.ExceptionHandlers.Clear();
                 var il = setSupportsNpot.Body.GetILProcessor();
                 il.Emit(OpCodes.Ret);
-                Console.WriteLine("Patched GraphicsCapabilities.set_SupportsNonPowerOfTwo to no-op.");
             }
         }
+        // 10. Patch shader precision: replace precision mediump float; with precision highp float; in all embedded .mgfxo shaders
+        var mgfxoResources = module.Resources.OfType<EmbeddedResource>().Where(r => r.Name.EndsWith(".mgfxo")).ToList();
+        byte[] mediumpBytes = System.Text.Encoding.ASCII.GetBytes("precision mediump float;");
+        byte[] highpBytes = System.Text.Encoding.ASCII.GetBytes("precision highp   float;");
+        int totalShaderPatches = 0;
+        foreach (var res in mgfxoResources)
+        {
+            byte[] rdata = res.GetResourceData();
+            int resPatched = 0;
+            for (int i = 0; i <= rdata.Length - mediumpBytes.Length; i++)
+            {
+                bool match = true;
+                for (int j = 0; j < mediumpBytes.Length; j++)
+                {
+                    if (rdata[i + j] != mediumpBytes[j]) { match = false; break; }
+                }
+                if (match)
+                {
+                    for (int j = 0; j < highpBytes.Length; j++)
+                        rdata[i + j] = highpBytes[j];
+                    resPatched++;
+                    totalShaderPatches++;
+                }
+            }
+            if (resPatched > 0)
+            {
+                module.Resources.Remove(res);
+                module.Resources.Add(new EmbeddedResource(res.Name, res.Attributes, rdata));
+                Console.WriteLine($"Patched {resPatched} shader(s) in {res.Name} to precision highp float.");
+            }
+        }
+        Console.WriteLine($"Total shader precision patches applied: {totalShaderPatches}");
 
         assembly.Write();
         Console.WriteLine("Saved patched MonoGame.Framework.dll successfully.");

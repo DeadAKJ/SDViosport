@@ -19,31 +19,42 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.1.2-fix-sprites-and-keyboard'
+version_name = 'v1.1.3-fix-furniture-and-camera'
 
-changelog_content = """Version: v1.1.2-fix-sprites-and-keyboard
-Date: 2026-09-20
+changelog_content = """Version: v1.1.3-fix-furniture-and-camera
+Date: 2026-09-24
 
 Changes:
-1. Fix Broken/Missing Sprites & Textures (Tools, Furniture, Shirts, Animals):
-   - Diagnosis:
-     * In-game tools (Axe, Hoe, Watering Can, Pickaxe) displayed missing red circle-slash prohibition icons.
-     * Farmhouse interior displayed misplaced Cursors UI sprites (Joja, trash can, coins, clock face) instead of furniture.
-     * Logs showed: `InvalidOperationException: Can't get TitleContainer.Location property from MonoGame` in `LocalizedContentManager.GetContentRoot()`, causing `EnsureManifestInitialized()` to throw and `_manifest` to stay empty.
-     * When `_manifest` is empty, `DoesAssetExist("TileSheets/tools")` returns false, leading to error placeholder sprites.
+1. Fix Vertical Screen Shake / Camera Judder on Scrolling Maps:
    - Root Cause:
-     * Stardew Valley's `LocalizedContentManager.GetContentRoot` uses `typeof(TitleContainer).GetProperty("Location", BindingFlags.Static | BindingFlags.NonPublic)`.
-     * `PatchMonoGame` had modified `TitleContainer.get_Location` and `set_Location` to `MethodAttributes.Public`.
-     * Because the property was public, reflection with `BindingFlags.NonPublic` returned `null` and threw `InvalidOperationException`.
+     * In `ExecuteDirectGameTick`, `ReviveGraphicsDeviceAndInstances(runner, plat, null, gameView)` and `AttachTouchOverlayToGameRunner()` were executing on every frame (60Hz).
+     * `ReviveGraphicsDeviceAndInstances` continuously forced `PreferredBackBufferWidth = 1792` and `PreferredBackBufferHeight = 828` on `GraphicsDeviceManager`, synchronizing `Game1.defaultDeviceViewport` and `GraphicsDevice.Viewport` 60 times a second.
+     * This 60Hz viewport resetting fought `Game1.UpdateViewPort()`'s camera lerp (`viewportPositionLerp`) whenever moving on maps longer than the screen height (Farm, Town, long interiors), creating severe vertical camera jitter.
    - Fix:
-     * Kept `TitleContainer.get_Location` and `set_Location` internal (`MethodAttributes.Assembly`) in `PatchMonoGame`.
-     * Added runtime bytecode patch in `RuntimeSmapiPatcher.cs` for `LocalizedContentManager.GetContentRoot` to search `BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic` (value 56).
-2. Fix Double Text Input on Virtual Keyboard:
-   - Fixed CS0841 compilation error in `VirtualKeyboardManager.cs` (`textField` declaration ordering) that prevented v1.1.1 from compiling on CI.
-   - Verified that `TextBox.Text` assignment is clean and duplicate `RecieveTextInput` calls remain completely purged.
-3. Robust CI Build Detection:
-   - `download_action_build.py` now targets the exact git commit SHA of `HEAD` to eliminate race conditions with older runs.
+     * Guarded `ReviveGraphicsDeviceAndInstances` so it only executes on cold boot frame 0 or when `runner.GraphicsDevice == null || runner.GraphicsDevice.IsDisposed`.
+     * Guarded `AttachTouchOverlayToGameRunner` with `_touchOverlayAttached` flag so it only runs once.
+
+2. Fix Corrupted Placeable Furniture Sprites:
+   - Root Cause:
+     * Placeable furniture items (table, chair, rug, TV, fireplace) use `TileSheets/furniture.png` (512x1488, which is non-power-of-two).
+     * In MonoGame's `GraphicsCapabilities.PlatformInitialize`, NPOT support was checked via OpenGL ES extension strings (`GL_OES_texture_npot`, `GL_ARB_texture_non_power_of_two`), which are not listed on iOS Metal-backed GLES 3.0 where NPOT is standard core.
+     * Consequently, `SupportsNonPowerOfTwo` defaulted to `false`. MonoGame's `Texture2DReader.Read` clamped level output and OpenGL texture sampling modes failed for non-power-of-two furniture sheets.
+     * Furthermore, 60Hz backbuffer resizing in `ReviveGraphicsDeviceAndInstances` triggered `GraphicsDevice.Resetting` and mid-frame texture recreation.
+   - Fix:
+     * Patched `GraphicsCapabilities.get_SupportsNonPowerOfTwo` in `MonoGame.Framework.dll` to always return `true`, and neutralized `set_SupportsNonPowerOfTwo`.
+     * Stopped mid-frame graphics resets.
+
+3. Fix Virtual Keyboard Double Text Input:
+   - Root Cause:
+     * When the user tapped a text input field, `SimulatedMousePosition` in `TouchVirtualPad` remained at the tapped coordinates.
+     * After dismissing the keyboard, `TextBox.Update()` checked `if (boundingBox.Contains(mousePoint))` which evaluated to `true`, instantly re-selecting the textbox and reopening the keyboard dialog.
+     * Multiple alert dismissals and return callbacks could also race.
+   - Fix:
+     * Added `ResetSimulatedMouse()` in `TouchVirtualPad` to move simulated mouse off-screen `(-1000, -1000)` upon text submit/cancel.
+     * Cleared `Game1.keyboardDispatcher.Subscriber = null` and `subscriber.Selected = false`.
+     * Added a 1.0-second debounce per subscriber to prevent re-opening loops.
 """
+
 
 
 
