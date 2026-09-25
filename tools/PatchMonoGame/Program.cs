@@ -49,34 +49,70 @@ class Program
                 return 1;
             }
 
-            // Check if already patched
-            if (netRectType.Methods.Any(m => m.Name == "get_Value" && m.ReturnType.FullName == "Microsoft.Xna.Framework.Rectangle"))
+            var getValueExisting = netRectType.Methods.FirstOrDefault(m => m.Name == "get_Value" && m.ReturnType.FullName == "Microsoft.Xna.Framework.Rectangle");
+            var getXExisting = netRectType.Methods.FirstOrDefault(m => m.Name == "get_X");
+            bool hasValueProp = netRectType.Properties.Any(p => p.Name == "Value");
+
+            bool isHealthy = getValueExisting != null &&
+                             getValueExisting.HasBody &&
+                             getValueExisting.Body.Instructions.Count >= 2 &&
+                             getValueExisting.Body.Instructions[1].Operand is FieldReference gvFr &&
+                             gvFr.FieldType.FullName == "T" &&
+                             getXExisting != null &&
+                             getXExisting.HasBody &&
+                             getXExisting.Body.Instructions.Count >= 2 &&
+                             getXExisting.Body.Instructions[1].OpCode == OpCodes.Ldflda &&
+                             getXExisting.Body.Instructions[1].Operand is FieldReference gxFr &&
+                             gxFr.FieldType.FullName == "T" &&
+                             !hasValueProp;
+
+            if (isHealthy)
             {
-                Console.WriteLine("Netcode.NetRectangle already has concrete get_Value. Skipping creation.");
+                Console.WriteLine("Netcode.NetRectangle is already correctly patched and healthy. Skipping.");
+                return 0;
             }
-            else
+
+            var setMethod = netRectType.Methods.First(m => m.Name == "Set" && m.Parameters.Count == 1);
+            var rectType = setMethod.Parameters[0].ParameterType; // Concrete Microsoft.Xna.Framework.Rectangle
+
+            var getTop = netRectType.Methods.First(m => m.Name == "get_Top");
+            var origValueFr = (FieldReference)getTop.Body.Instructions[1].Operand;
+
+            var valProp = netRectType.Properties.FirstOrDefault(p => p.Name == "Value");
+            if (valProp != null)
             {
-                var setMethod = netRectType.Methods.First(m => m.Name == "Set" && m.Parameters.Count == 1);
-                var rectType = setMethod.Parameters[0].ParameterType; // Concrete Microsoft.Xna.Framework.Rectangle
+                netRectType.Properties.Remove(valProp);
+                Console.WriteLine("Removed problematic 'Value' property from NetRectangle.");
+            }
 
-                var getTop = netRectType.Methods.First(m => m.Name == "get_Top");
-                var origValueFr = (FieldReference)getTop.Body.Instructions[1].Operand;
-                var valueFieldRef = new FieldReference("value", rectType, origValueFr.DeclaringType);
-
-                // 1. Add get_Value
-                var getValue = new MethodDefinition(
+            // 1. Add or heal concrete public Rectangle get_Value()
+            var getValue = getValueExisting;
+            if (getValue == null)
+            {
+                getValue = new MethodDefinition(
                     "get_Value",
                     MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
                     rectType);
-                var ilGet = getValue.Body.GetILProcessor();
-                ilGet.Emit(OpCodes.Ldarg_0);
-                ilGet.Emit(OpCodes.Ldfld, valueFieldRef);
-                ilGet.Emit(OpCodes.Ret);
                 netRectType.Methods.Add(getValue);
                 Console.WriteLine($"Added NetRectangle.get_Value() with concrete return type: {rectType.FullName}.");
+            }
+            else
+            {
+                getValue.Body.Instructions.Clear();
+                getValue.Body.Variables.Clear();
+                getValue.Body.ExceptionHandlers.Clear();
+                Console.WriteLine("Re-initializing existing NetRectangle.get_Value().");
+            }
+            var ilGet = getValue.Body.GetILProcessor();
+            ilGet.Emit(OpCodes.Ldarg_0);
+            ilGet.Emit(OpCodes.Ldfld, origValueFr);
+            ilGet.Emit(OpCodes.Ret);
 
-                // 2. Add set_Value
-                var setValue = new MethodDefinition(
+            // 2. Add or heal concrete public void set_Value(Rectangle value)
+            var setValue = netRectType.Methods.FirstOrDefault(m => m.Name == "set_Value" && m.Parameters.Count == 1);
+            if (setValue == null)
+            {
+                setValue = new MethodDefinition(
                     "set_Value",
                     MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
                     mod.TypeSystem.Void);
@@ -88,92 +124,85 @@ class Program
                 ilSet.Emit(OpCodes.Ret);
                 netRectType.Methods.Add(setValue);
                 Console.WriteLine("Added NetRectangle.set_Value(Rectangle).");
+            }
 
-                var valProp = new PropertyDefinition("Value", PropertyAttributes.None, rectType)
+            // 3. Fix get_X, get_Y, get_Width, get_Height
+            var writeDelta = netRectType.Methods.First(m => m.Name == "WriteDelta");
+            var rectFields = writeDelta.Body.Instructions
+                .Where(i => i.OpCode == OpCodes.Ldfld && i.Operand is FieldReference fr && fr.DeclaringType.Name == "Rectangle")
+                .Select(i => (FieldReference)i.Operand)
+                .ToList();
+            var xField = rectFields.First(f => f.Name == "X");
+            var yField = rectFields.First(f => f.Name == "Y");
+            var wField = rectFields.First(f => f.Name == "Width");
+            var hField = rectFields.First(f => f.Name == "Height");
+
+            void FixGetter(string name, FieldReference field)
+            {
+                var m = netRectType.Methods.First(meth => meth.Name == name);
+                m.Body.Instructions.Clear();
+                m.Body.Variables.Clear();
+                m.Body.ExceptionHandlers.Clear();
+                var il = m.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldflda, origValueFr);
+                il.Emit(OpCodes.Ldfld, field);
+                il.Emit(OpCodes.Ret);
+                Console.WriteLine($"Patched NetRectangle.{name} to load field directly.");
+            }
+
+            FixGetter("get_X", xField);
+            FixGetter("get_Y", yField);
+            FixGetter("get_Width", wField);
+            FixGetter("get_Height", hField);
+
+            // 4. Replace call sites
+            int replacedGet = 0;
+            int replacedSet = 0;
+            void PatchType(TypeDefinition t)
+            {
+                foreach (var m in t.Methods)
                 {
-                    GetMethod = getValue,
-                    SetMethod = setValue
-                };
-                netRectType.Properties.Add(valProp);
-
-                // 3. Fix get_X, get_Y, get_Width, get_Height
-                var writeDelta = netRectType.Methods.First(m => m.Name == "WriteDelta");
-                var rectFields = writeDelta.Body.Instructions
-                    .Where(i => i.OpCode == OpCodes.Ldfld && i.Operand is FieldReference fr && fr.DeclaringType.Name == "Rectangle")
-                    .Select(i => (FieldReference)i.Operand)
-                    .ToList();
-                var xField = rectFields.First(f => f.Name == "X");
-                var yField = rectFields.First(f => f.Name == "Y");
-                var wField = rectFields.First(f => f.Name == "Width");
-                var hField = rectFields.First(f => f.Name == "Height");
-
-                void FixGetter(string name, FieldReference field)
-                {
-                    var m = netRectType.Methods.First(meth => meth.Name == name);
-                    m.Body.Instructions.Clear();
-                    m.Body.Variables.Clear();
-                    m.Body.ExceptionHandlers.Clear();
-                    var il = m.Body.GetILProcessor();
-                    il.Emit(OpCodes.Ldarg_0);
-                    il.Emit(OpCodes.Ldflda, valueFieldRef);
-                    il.Emit(OpCodes.Ldfld, field);
-                    il.Emit(OpCodes.Ret);
-                    Console.WriteLine($"Patched NetRectangle.{name} to load field directly.");
-                }
-
-                FixGetter("get_X", xField);
-                FixGetter("get_Y", yField);
-                FixGetter("get_Width", wField);
-                FixGetter("get_Height", hField);
-
-                // 4. Replace call sites
-                int replacedGet = 0;
-                int replacedSet = 0;
-                void PatchType(TypeDefinition t)
-                {
-                    foreach (var m in t.Methods)
+                    if (m.HasBody && m.DeclaringType != netRectType)
                     {
-                        if (m.HasBody && m.DeclaringType != netRectType)
+                        for (int i = 0; i < m.Body.Instructions.Count; i++)
                         {
-                            for (int i = 0; i < m.Body.Instructions.Count; i++)
+                            var inst = m.Body.Instructions[i];
+                            if (inst.Operand is MethodReference mr)
                             {
-                                var inst = m.Body.Instructions[i];
-                                if (inst.Operand is MethodReference mr)
+                                if (mr.Name == "get_Value" &&
+                                    mr.DeclaringType.FullName.Contains("NetFieldBase") &&
+                                    mr.DeclaringType.FullName.Contains("Rectangle") &&
+                                    mr.DeclaringType.FullName.Contains("NetRectangle"))
                                 {
-                                    if (mr.Name == "get_Value" &&
-                                        mr.DeclaringType.FullName.Contains("NetFieldBase") &&
-                                        mr.DeclaringType.FullName.Contains("Rectangle") &&
-                                        mr.DeclaringType.FullName.Contains("NetRectangle"))
-                                    {
-                                        inst.OpCode = OpCodes.Callvirt;
-                                        inst.Operand = getValue;
-                                        replacedGet++;
-                                    }
-                                    else if (mr.Name == "set_Value" &&
-                                        mr.DeclaringType.FullName.Contains("NetFieldBase") &&
-                                        mr.DeclaringType.FullName.Contains("Rectangle") &&
-                                        mr.DeclaringType.FullName.Contains("NetRectangle"))
-                                    {
-                                        inst.OpCode = OpCodes.Callvirt;
-                                        inst.Operand = setValue;
-                                        replacedSet++;
-                                    }
+                                    inst.OpCode = OpCodes.Callvirt;
+                                    inst.Operand = getValue;
+                                    replacedGet++;
+                                }
+                                else if (mr.Name == "set_Value" &&
+                                    mr.DeclaringType.FullName.Contains("NetFieldBase") &&
+                                    mr.DeclaringType.FullName.Contains("Rectangle") &&
+                                    mr.DeclaringType.FullName.Contains("NetRectangle"))
+                                {
+                                    inst.OpCode = OpCodes.Callvirt;
+                                    inst.Operand = setValue;
+                                    replacedSet++;
                                 }
                             }
                         }
                     }
-                    foreach (var nested in t.NestedTypes)
-                        PatchType(nested);
                 }
-
-                foreach (var t in mod.Types)
-                    PatchType(t);
-
-                Console.WriteLine($"Replaced {replacedGet} get_Value calls and {replacedSet} set_Value calls across the assembly.");
-
-                sdvAsm.Write();
-                Console.WriteLine("Saved patched Stardew Valley.dll successfully.");
+                foreach (var nested in t.NestedTypes)
+                    PatchType(nested);
             }
+
+            foreach (var t in mod.Types)
+                PatchType(t);
+
+            Console.WriteLine($"Replaced {replacedGet} get_Value calls and {replacedSet} set_Value calls across the assembly.");
+
+            sdvAsm.Write();
+            Console.WriteLine("Saved patched Stardew Valley.dll successfully.");
             return 0;
         }
         string dllPath = args.FirstOrDefault(a => !a.StartsWith("--")) ?? string.Empty;

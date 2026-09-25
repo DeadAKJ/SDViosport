@@ -222,10 +222,27 @@ namespace SDViOS.Compatibility
                 return false;
             }
 
-            // Check if already patched with concrete get_Value
-            if (netRectType.Methods.Any(m => m.Name == "get_Value" && m.ReturnType.FullName == "Microsoft.Xna.Framework.Rectangle"))
+            // Check if already patched and healthy
+            var getValueExisting = netRectType.Methods.FirstOrDefault(m => m.Name == "get_Value" && m.ReturnType.FullName == "Microsoft.Xna.Framework.Rectangle");
+            var getXExisting = netRectType.Methods.FirstOrDefault(m => m.Name == "get_X");
+            bool hasValueProp = netRectType.Properties.Any(p => p.Name == "Value");
+
+            bool isHealthy = getValueExisting != null &&
+                             getValueExisting.HasBody &&
+                             getValueExisting.Body.Instructions.Count >= 2 &&
+                             getValueExisting.Body.Instructions[1].Operand is FieldReference gvFr &&
+                             gvFr.FieldType.FullName == "T" &&
+                             getXExisting != null &&
+                             getXExisting.HasBody &&
+                             getXExisting.Body.Instructions.Count >= 2 &&
+                             getXExisting.Body.Instructions[1].OpCode == OpCodes.Ldflda &&
+                             getXExisting.Body.Instructions[1].Operand is FieldReference gxFr &&
+                             gxFr.FieldType.FullName == "T" &&
+                             !hasValueProp;
+
+            if (isHealthy)
             {
-                EngineLogger.Log("[RuntimeSmapiPatcher] Netcode.NetRectangle already has concrete get_Value. Skipping.");
+                EngineLogger.Log("[RuntimeSmapiPatcher] Netcode.NetRectangle is already correctly patched and healthy. Skipping.");
                 return false;
             }
 
@@ -244,42 +261,57 @@ namespace SDViOS.Compatibility
                 return false;
             }
             var origValueFr = (FieldReference)getTop.Body.Instructions[1].Operand;
-            var valueFieldRef = new FieldReference("value", rectType, origValueFr.DeclaringType);
 
-            // 1. Add concrete public Rectangle get_Value()
-            var getValue = new MethodDefinition(
-                "get_Value",
-                MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
-                rectType);
+            // Remove problematic 'Value' property if present (XmlSerializer treats it as a serializable element)
+            var valProp = netRectType.Properties.FirstOrDefault(p => p.Name == "Value");
+            if (valProp != null)
+            {
+                netRectType.Properties.Remove(valProp);
+                EngineLogger.Log("[RuntimeSmapiPatcher] Removed problematic 'Value' property from NetRectangle.");
+            }
+
+            // 1. Add or heal concrete public Rectangle get_Value()
+            var getValue = getValueExisting;
+            if (getValue == null)
+            {
+                getValue = new MethodDefinition(
+                    "get_Value",
+                    MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
+                    rectType);
+                netRectType.Methods.Add(getValue);
+                EngineLogger.Log($"[RuntimeSmapiPatcher] Added NetRectangle.get_Value() with concrete return type: {rectType.FullName}.");
+            }
+            else
+            {
+                getValue.Body.Instructions.Clear();
+                getValue.Body.Variables.Clear();
+                getValue.Body.ExceptionHandlers.Clear();
+                EngineLogger.Log("[RuntimeSmapiPatcher] Re-initializing existing NetRectangle.get_Value().");
+            }
             var ilGet = getValue.Body.GetILProcessor();
             ilGet.Emit(OpCodes.Ldarg_0);
-            ilGet.Emit(OpCodes.Ldfld, valueFieldRef);
+            ilGet.Emit(OpCodes.Ldfld, origValueFr);
             ilGet.Emit(OpCodes.Ret);
-            netRectType.Methods.Add(getValue);
-            EngineLogger.Log($"[RuntimeSmapiPatcher] Added NetRectangle.get_Value() with concrete return type: {rectType.FullName}.");
 
-            // 2. Add concrete public void set_Value(Rectangle value)
-            var setValue = new MethodDefinition(
-                "set_Value",
-                MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
-                mod.TypeSystem.Void);
-            setValue.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, rectType));
-            var ilSet = setValue.Body.GetILProcessor();
-            ilSet.Emit(OpCodes.Ldarg_0);
-            ilSet.Emit(OpCodes.Ldarg_1);
-            ilSet.Emit(OpCodes.Callvirt, setMethod);
-            ilSet.Emit(OpCodes.Ret);
-            netRectType.Methods.Add(setValue);
-            EngineLogger.Log("[RuntimeSmapiPatcher] Added NetRectangle.set_Value(Rectangle).");
-
-            var valProp = new PropertyDefinition("Value", PropertyAttributes.None, rectType)
+            // 2. Add or heal concrete public void set_Value(Rectangle value)
+            var setValue = netRectType.Methods.FirstOrDefault(m => m.Name == "set_Value" && m.Parameters.Count == 1);
+            if (setValue == null)
             {
-                GetMethod = getValue,
-                SetMethod = setValue
-            };
-            netRectType.Properties.Add(valProp);
+                setValue = new MethodDefinition(
+                    "set_Value",
+                    MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
+                    mod.TypeSystem.Void);
+                setValue.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, rectType));
+                var ilSet = setValue.Body.GetILProcessor();
+                ilSet.Emit(OpCodes.Ldarg_0);
+                ilSet.Emit(OpCodes.Ldarg_1);
+                ilSet.Emit(OpCodes.Callvirt, setMethod);
+                ilSet.Emit(OpCodes.Ret);
+                netRectType.Methods.Add(setValue);
+                EngineLogger.Log("[RuntimeSmapiPatcher] Added NetRectangle.set_Value(Rectangle).");
+            }
 
-            // 3. Fix get_X, get_Y, get_Width, get_Height to load fields directly via ldflda value
+            // 3. Fix get_X, get_Y, get_Width, get_Height to load fields directly via ldflda origValueFr
             var writeDelta = netRectType.Methods.FirstOrDefault(m => m.Name == "WriteDelta");
             if (writeDelta != null && writeDelta.HasBody)
             {
@@ -302,10 +334,10 @@ namespace SDViOS.Compatibility
                     m.Body.ExceptionHandlers.Clear();
                     var il = m.Body.GetILProcessor();
                     il.Emit(OpCodes.Ldarg_0);
-                    il.Emit(OpCodes.Ldflda, valueFieldRef);
+                    il.Emit(OpCodes.Ldflda, origValueFr);
                     il.Emit(OpCodes.Ldfld, field);
                     il.Emit(OpCodes.Ret);
-                    EngineLogger.Log($"[RuntimeSmapiPatcher] Patched NetRectangle.{name} to load field directly.");
+                    EngineLogger.Log($"[RuntimeSmapiPatcher] Patched NetRectangle.{name} to load field directly via origValueFr.");
                 }
 
                 FixGetter("get_X", xField);

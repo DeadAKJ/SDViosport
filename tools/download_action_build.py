@@ -19,23 +19,25 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.1.5-fix-netrectangle-arm64-sprites'
+version_name = 'v1.1.6-fix-save-load-missing-field'
 
-changelog_content = """Version: v1.1.5-fix-netrectangle-arm64-sprites
-Date: 2026-09-25
+changelog_content = """Version: v1.1.6-fix-save-load-missing-field
+Date: 2026-09-26
 
 Changes:
-1. Fix Placeable Item & Furniture Sprite Glitch on iOS ARM64:
+1. Fix Save Loading Crash / Return to Title Screen:
    - Root Cause:
-     * `NetRectangle` inherits from open-generic `NetFieldBase<Rectangle, NetRectangle>`.
-     * In Mono's ARM64 interpreter (`interp.c`), generic method calls returning value types > 8 bytes (such as 16-byte `Rectangle`: X, Y, Width, Height) via `!0 NetFieldBase<Rectangle, NetRectangle>::get_Value()` suffer from trampoline return value corruption, returning garbage Y offsets (~688-704, row 43) instead of valid rows (0-4).
-     * `get_X()`, `get_Y()`, `get_Width()`, and `get_Height()` also routed through this broken generic getter.
+     * When loading a save game containing furniture (e.g. at character offset ~1,410,295 in SaveGame XML), `SaveSerializer.Deserialize<SaveGame>` instantiates `Furniture..ctor()` -> `Furniture.updateDrawPosition()` -> `NetRectangle.get_X()`.
+     * In the initial v1.1.5 patch, `valueFieldRef` was synthesized with `FieldType = Rectangle` rather than referencing the declared generic field signature `T` (`GenericParameter`) on `Netcode.NetFieldBase`2<Rectangle, NetRectangle>::value`.
+     * At runtime, Mono / CLR threw `MissingFieldException: Field not found: 'Netcode.NetFieldBase`2.value' at Netcode.NetRectangle.get_X()`, which `SaveSerializer` caught and returned back to the main menu.
+     * Additionally, adding a `Value` property to `NetRectangle` introduced a risk where `XmlSerializer` could attempt to serialize it.
    - Fix:
-     * Injected concrete non-generic `public Rectangle get_Value()` (`ldarg.0; ldfld value; ret;`) and `public void set_Value(Rectangle)` into `Netcode.NetRectangle`.
-     * Optimized `get_X`, `get_Y`, `get_Width`, `get_Height` in `Netcode.NetRectangle` to load `value` struct fields directly via `ldflda value; ldfld <field>`.
-     * Redirected all 61 call sites of `NetFieldBase<Rectangle, NetRectangle>::get_Value` and 46 call sites of `set_Value` across `Stardew Valley.dll` (including `Furniture.draw`, `Furniture.drawAtNonTileSpot`, `InitializeAtTile`, `updateRotation`, `Object.GetBoundingBoxAt`, `Bush.draw`, etc.) to concrete `NetRectangle` methods.
-     * Integrated into `RuntimeSmapiPatcher.EnsureGameRunnerPatched` for automatic, idempotent runtime patching on iOS devices, with fallback to `Documents/smapi-internal/`.
-     * Preserved and cleaned offline patcher `--apply-netrect-patch` in `tools/PatchMonoGame`.
+     * Extracted the exact, clean `origValueFr` from `NetRectangle.get_Top` (`Instructions[1].Operand`), preserving the valid generic field signature `T` on `Netcode.NetFieldBase`2<Rectangle, NetRectangle>`.
+     * Emitted `get_X`, `get_Y`, `get_Width`, `get_Height` to load `origValueFr` directly (`ldflda origValueFr; ldfld <field>`).
+     * Emitted `NetRectangle.get_Value` using `origValueFr` (`ldfld origValueFr`).
+     * Removed the unnecessary `Value` property definition from `NetRectangle.Properties`.
+     * Added full self-healing detection in `RuntimeSmapiPatcher.PatchNetRectangle` and `tools/PatchMonoGame`:
+       If a device already has a v1.1.5 patched DLL with broken field references or the `Value` property, it automatically strips the property and repairs `get_Value` and `get_X/Y/Width/Height` in-place.
 """
 
 
