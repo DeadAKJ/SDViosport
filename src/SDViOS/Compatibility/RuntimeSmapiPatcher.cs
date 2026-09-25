@@ -191,6 +191,9 @@ namespace SDViOS.Compatibility
                     }
                 }
 
+                if (PatchNetRectangle(mod))
+                    modified = true;
+
                 if (!modified)
                 {
                     EngineLogger.Log($"[RuntimeSmapiPatcher] '{sdvDllPath}' is already patched.");
@@ -208,6 +211,154 @@ namespace SDViOS.Compatibility
                 EngineLogger.LogError($"[RuntimeSmapiPatcher] Could not patch SDV assembly '{sdvDllPath}': {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
                 return sdvDllPath;
             }
+        }
+
+        private static bool PatchNetRectangle(ModuleDefinition mod)
+        {
+            var netRectType = mod.GetType("Netcode.NetRectangle");
+            if (netRectType == null)
+            {
+                EngineLogger.LogWarning("[RuntimeSmapiPatcher] Netcode.NetRectangle not found in assembly.");
+                return false;
+            }
+
+            // Check if already patched with concrete get_Value
+            if (netRectType.Methods.Any(m => m.Name == "get_Value" && m.ReturnType.FullName == "Microsoft.Xna.Framework.Rectangle"))
+            {
+                EngineLogger.Log("[RuntimeSmapiPatcher] Netcode.NetRectangle already has concrete get_Value. Skipping.");
+                return false;
+            }
+
+            var setMethod = netRectType.Methods.FirstOrDefault(m => m.Name == "Set" && m.Parameters.Count == 1);
+            if (setMethod == null)
+            {
+                EngineLogger.LogWarning("[RuntimeSmapiPatcher] Netcode.NetRectangle.Set(Rectangle) not found.");
+                return false;
+            }
+            var rectType = setMethod.Parameters[0].ParameterType; // Concrete Microsoft.Xna.Framework.Rectangle
+
+            var getTop = netRectType.Methods.FirstOrDefault(m => m.Name == "get_Top");
+            if (getTop == null || !getTop.HasBody || getTop.Body.Instructions.Count < 2 || !(getTop.Body.Instructions[1].Operand is FieldReference))
+            {
+                EngineLogger.LogWarning("[RuntimeSmapiPatcher] Netcode.NetRectangle.get_Top instruction format unexpected.");
+                return false;
+            }
+            var origValueFr = (FieldReference)getTop.Body.Instructions[1].Operand;
+            var valueFieldRef = new FieldReference("value", rectType, origValueFr.DeclaringType);
+
+            // 1. Add concrete public Rectangle get_Value()
+            var getValue = new MethodDefinition(
+                "get_Value",
+                MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
+                rectType);
+            var ilGet = getValue.Body.GetILProcessor();
+            ilGet.Emit(OpCodes.Ldarg_0);
+            ilGet.Emit(OpCodes.Ldfld, valueFieldRef);
+            ilGet.Emit(OpCodes.Ret);
+            netRectType.Methods.Add(getValue);
+            EngineLogger.Log($"[RuntimeSmapiPatcher] Added NetRectangle.get_Value() with concrete return type: {rectType.FullName}.");
+
+            // 2. Add concrete public void set_Value(Rectangle value)
+            var setValue = new MethodDefinition(
+                "set_Value",
+                MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
+                mod.TypeSystem.Void);
+            setValue.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, rectType));
+            var ilSet = setValue.Body.GetILProcessor();
+            ilSet.Emit(OpCodes.Ldarg_0);
+            ilSet.Emit(OpCodes.Ldarg_1);
+            ilSet.Emit(OpCodes.Callvirt, setMethod);
+            ilSet.Emit(OpCodes.Ret);
+            netRectType.Methods.Add(setValue);
+            EngineLogger.Log("[RuntimeSmapiPatcher] Added NetRectangle.set_Value(Rectangle).");
+
+            var valProp = new PropertyDefinition("Value", PropertyAttributes.None, rectType)
+            {
+                GetMethod = getValue,
+                SetMethod = setValue
+            };
+            netRectType.Properties.Add(valProp);
+
+            // 3. Fix get_X, get_Y, get_Width, get_Height to load fields directly via ldflda value
+            var writeDelta = netRectType.Methods.FirstOrDefault(m => m.Name == "WriteDelta");
+            if (writeDelta != null && writeDelta.HasBody)
+            {
+                var rectFields = writeDelta.Body.Instructions
+                    .Where(i => i.OpCode == OpCodes.Ldfld && i.Operand is FieldReference fr && fr.DeclaringType.Name == "Rectangle")
+                    .Select(i => (FieldReference)i.Operand)
+                    .ToList();
+                var xField = rectFields.FirstOrDefault(f => f.Name == "X");
+                var yField = rectFields.FirstOrDefault(f => f.Name == "Y");
+                var wField = rectFields.FirstOrDefault(f => f.Name == "Width");
+                var hField = rectFields.FirstOrDefault(f => f.Name == "Height");
+
+                void FixGetter(string name, FieldReference? field)
+                {
+                    if (field == null) return;
+                    var m = netRectType.Methods.FirstOrDefault(meth => meth.Name == name);
+                    if (m == null || !m.HasBody) return;
+                    m.Body.Instructions.Clear();
+                    m.Body.Variables.Clear();
+                    m.Body.ExceptionHandlers.Clear();
+                    var il = m.Body.GetILProcessor();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Ldflda, valueFieldRef);
+                    il.Emit(OpCodes.Ldfld, field);
+                    il.Emit(OpCodes.Ret);
+                    EngineLogger.Log($"[RuntimeSmapiPatcher] Patched NetRectangle.{name} to load field directly.");
+                }
+
+                FixGetter("get_X", xField);
+                FixGetter("get_Y", yField);
+                FixGetter("get_Width", wField);
+                FixGetter("get_Height", hField);
+            }
+
+            // 4. Redirect all NetFieldBase<Rectangle, NetRectangle>::get_Value and set_Value call sites to concrete NetRectangle methods
+            int replacedGet = 0;
+            int replacedSet = 0;
+            void PatchType(TypeDefinition t)
+            {
+                foreach (var m in t.Methods)
+                {
+                    if (m.HasBody && m.DeclaringType != netRectType)
+                    {
+                        for (int i = 0; i < m.Body.Instructions.Count; i++)
+                        {
+                            var inst = m.Body.Instructions[i];
+                            if (inst.Operand is MethodReference mr)
+                            {
+                                if (mr.Name == "get_Value" &&
+                                    mr.DeclaringType.FullName.Contains("NetFieldBase") &&
+                                    mr.DeclaringType.FullName.Contains("Rectangle") &&
+                                    mr.DeclaringType.FullName.Contains("NetRectangle"))
+                                {
+                                    inst.OpCode = OpCodes.Callvirt;
+                                    inst.Operand = getValue;
+                                    replacedGet++;
+                                }
+                                else if (mr.Name == "set_Value" &&
+                                    mr.DeclaringType.FullName.Contains("NetFieldBase") &&
+                                    mr.DeclaringType.FullName.Contains("Rectangle") &&
+                                    mr.DeclaringType.FullName.Contains("NetRectangle"))
+                                {
+                                    inst.OpCode = OpCodes.Callvirt;
+                                    inst.Operand = setValue;
+                                    replacedSet++;
+                                }
+                            }
+                        }
+                    }
+                }
+                foreach (var nested in t.NestedTypes)
+                    PatchType(nested);
+            }
+
+            foreach (var t in mod.Types)
+                PatchType(t);
+
+            EngineLogger.Log($"[RuntimeSmapiPatcher] Patched NetRectangle: added concrete Value getter/setter, fixed X/Y/W/H getters, redirected {replacedGet} get_Value and {replacedSet} set_Value calls.");
+            return true;
         }
 
         private static string SavePatchedAssembly(string originalPath, byte[] patchedBytes)

@@ -19,40 +19,23 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.1.3-fix-furniture-and-camera'
+version_name = 'v1.1.5-fix-netrectangle-arm64-sprites'
 
-changelog_content = """Version: v1.1.3-fix-furniture-and-camera
-Date: 2026-09-24
+changelog_content = """Version: v1.1.5-fix-netrectangle-arm64-sprites
+Date: 2026-09-25
 
 Changes:
-1. Fix Vertical Screen Shake / Camera Judder on Scrolling Maps:
+1. Fix Placeable Item & Furniture Sprite Glitch on iOS ARM64:
    - Root Cause:
-     * In `ExecuteDirectGameTick`, `ReviveGraphicsDeviceAndInstances(runner, plat, null, gameView)` and `AttachTouchOverlayToGameRunner()` were executing on every frame (60Hz).
-     * `ReviveGraphicsDeviceAndInstances` continuously forced `PreferredBackBufferWidth = 1792` and `PreferredBackBufferHeight = 828` on `GraphicsDeviceManager`, synchronizing `Game1.defaultDeviceViewport` and `GraphicsDevice.Viewport` 60 times a second.
-     * This 60Hz viewport resetting fought `Game1.UpdateViewPort()`'s camera lerp (`viewportPositionLerp`) whenever moving on maps longer than the screen height (Farm, Town, long interiors), creating severe vertical camera jitter.
+     * `NetRectangle` inherits from open-generic `NetFieldBase<Rectangle, NetRectangle>`.
+     * In Mono's ARM64 interpreter (`interp.c`), generic method calls returning value types > 8 bytes (such as 16-byte `Rectangle`: X, Y, Width, Height) via `!0 NetFieldBase<Rectangle, NetRectangle>::get_Value()` suffer from trampoline return value corruption, returning garbage Y offsets (~688-704, row 43) instead of valid rows (0-4).
+     * `get_X()`, `get_Y()`, `get_Width()`, and `get_Height()` also routed through this broken generic getter.
    - Fix:
-     * Guarded `ReviveGraphicsDeviceAndInstances` so it only executes on cold boot frame 0 or when `runner.GraphicsDevice == null || runner.GraphicsDevice.IsDisposed`.
-     * Guarded `AttachTouchOverlayToGameRunner` with `_touchOverlayAttached` flag so it only runs once.
-
-2. Fix Corrupted Placeable Furniture Sprites:
-   - Root Cause:
-     * Placeable furniture items (table, chair, rug, TV, fireplace) use `TileSheets/furniture.png` (512x1488, which is non-power-of-two).
-     * In MonoGame's `GraphicsCapabilities.PlatformInitialize`, NPOT support was checked via OpenGL ES extension strings (`GL_OES_texture_npot`, `GL_ARB_texture_non_power_of_two`), which are not listed on iOS Metal-backed GLES 3.0 where NPOT is standard core.
-     * Consequently, `SupportsNonPowerOfTwo` defaulted to `false`. MonoGame's `Texture2DReader.Read` clamped level output and OpenGL texture sampling modes failed for non-power-of-two furniture sheets.
-     * Furthermore, 60Hz backbuffer resizing in `ReviveGraphicsDeviceAndInstances` triggered `GraphicsDevice.Resetting` and mid-frame texture recreation.
-   - Fix:
-     * Patched `GraphicsCapabilities.get_SupportsNonPowerOfTwo` in `MonoGame.Framework.dll` to always return `true`, and neutralized `set_SupportsNonPowerOfTwo`.
-     * Stopped mid-frame graphics resets.
-
-3. Fix Virtual Keyboard Double Text Input:
-   - Root Cause:
-     * When the user tapped a text input field, `SimulatedMousePosition` in `TouchVirtualPad` remained at the tapped coordinates.
-     * After dismissing the keyboard, `TextBox.Update()` checked `if (boundingBox.Contains(mousePoint))` which evaluated to `true`, instantly re-selecting the textbox and reopening the keyboard dialog.
-     * Multiple alert dismissals and return callbacks could also race.
-   - Fix:
-     * Added `ResetSimulatedMouse()` in `TouchVirtualPad` to move simulated mouse off-screen `(-1000, -1000)` upon text submit/cancel.
-     * Cleared `Game1.keyboardDispatcher.Subscriber = null` and `subscriber.Selected = false`.
-     * Added a 1.0-second debounce per subscriber to prevent re-opening loops.
+     * Injected concrete non-generic `public Rectangle get_Value()` (`ldarg.0; ldfld value; ret;`) and `public void set_Value(Rectangle)` into `Netcode.NetRectangle`.
+     * Optimized `get_X`, `get_Y`, `get_Width`, `get_Height` in `Netcode.NetRectangle` to load `value` struct fields directly via `ldflda value; ldfld <field>`.
+     * Redirected all 61 call sites of `NetFieldBase<Rectangle, NetRectangle>::get_Value` and 46 call sites of `set_Value` across `Stardew Valley.dll` (including `Furniture.draw`, `Furniture.drawAtNonTileSpot`, `InitializeAtTile`, `updateRotation`, `Object.GetBoundingBoxAt`, `Bush.draw`, etc.) to concrete `NetRectangle` methods.
+     * Integrated into `RuntimeSmapiPatcher.EnsureGameRunnerPatched` for automatic, idempotent runtime patching on iOS devices, with fallback to `Documents/smapi-internal/`.
+     * Preserved and cleaned offline patcher `--apply-netrect-patch` in `tools/PatchMonoGame`.
 """
 
 
@@ -150,12 +133,6 @@ if not ipa_artifact:
     print("No artifact found!")
     sys.exit(1)
 
-download_url = ipa_artifact['archive_download_url']
-print(f"Downloading artifact {ipa_artifact['name']} from {download_url}...")
-
-opener = urllib.request.build_opener(NoAuthRedirectHandler)
-req = urllib.request.Request(download_url, headers=headers)
-
 target_dir = os.path.join(r"C:\Users\User\Desktop\SDVport Version\Post-Audio", version_name)
 logs_dir = os.path.join(target_dir, "logs")
 os.makedirs(logs_dir, exist_ok=True)
@@ -166,13 +143,51 @@ with open(changelog_path, "w", encoding="utf-8") as f:
 print(f"Created changelog: {changelog_path}")
 print(f"Created logs folder: {logs_dir}")
 
-with opener.open(req) as resp:
-    zip_bytes = resp.read()
-    print(f"Downloaded {len(zip_bytes)} bytes.")
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
-        for filename in z.namelist():
-            print(f"Extracting {filename} to {target_dir}...")
-            z.extract(filename, target_dir)
+artifact_id = str(ipa_artifact.get('id', ''))
+candidate_urls = []
+if token and 'archive_download_url' in ipa_artifact:
+    candidate_urls.append((ipa_artifact['archive_download_url'], headers))
+if artifact_id:
+    candidate_urls.append((f"https://nightly.link/{repo}/actions/artifacts/{artifact_id}.zip", {'User-Agent': 'Mozilla/5.0'}))
+candidate_urls.append((f"https://nightly.link/{repo}/workflows/build-ipa.yml/main/StardewValley-iOS.zip", {'User-Agent': 'Mozilla/5.0'}))
+
+zip_bytes = None
+for d_url, d_headers in candidate_urls:
+    try:
+        print(f"Attempting download from: {d_url}...")
+        opener = urllib.request.build_opener(NoAuthRedirectHandler)
+        req = urllib.request.Request(d_url, headers=d_headers)
+        with opener.open(req, timeout=120) as resp:
+            content = resp.read()
+            if len(content) > 1000:
+                zip_bytes = content
+                print(f"Successfully downloaded {len(zip_bytes)} bytes.")
+                break
+    except Exception as e:
+        print(f"Download attempt failed: {e}")
+
+if not zip_bytes or len(zip_bytes) < 1000:
+    print("Error: Could not download artifact from any candidate URL.")
+    sys.exit(1)
+
+with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+    for filename in z.namelist():
+        print(f"Extracting {filename} to {target_dir}...")
+        z.extract(filename, target_dir)
+
+# Verify extracted IPA integrity
+extracted_ipa = os.path.join(target_dir, "StardewValley-iOS.ipa")
+if os.path.exists(extracted_ipa):
+    try:
+        with zipfile.ZipFile(extracted_ipa, 'r') as ipa_zip:
+            bad_file = ipa_zip.testzip()
+            if bad_file:
+                print(f"Warning: Corrupted file detected inside IPA: {bad_file}")
+            else:
+                payload_files = [n for n in ipa_zip.namelist() if n.startswith("Payload/")]
+                print(f"IPA integrity verified: {len(payload_files)} files present in Payload bundle.")
+    except Exception as e:
+        print(f"Warning: IPA integrity verification exception: {e}")
 
 # Copy standalone IPA to base directory root
 base_dir = r"C:\Users\User\Desktop\SDVport Version"

@@ -8,6 +8,174 @@ class Program
 {
     static int Main(string[] args)
     {
+        if (args.Contains("--apply-netrect-patch"))
+        {
+            string sdvDll = args.FirstOrDefault(a => !a.StartsWith("--") && a.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) ?? string.Empty;
+            if (string.IsNullOrEmpty(sdvDll) || !File.Exists(sdvDll))
+            {
+                string[] candidates = {
+                    @"C:\Users\User\Desktop\SDVport Version\Game_Files\Stardew Valley.dll",
+                    Path.Combine(Directory.GetCurrentDirectory(), "Game_Files", "Stardew Valley.dll"),
+                    Path.Combine(Directory.GetCurrentDirectory(), "Stardew Valley.dll")
+                };
+                sdvDll = candidates.FirstOrDefault(File.Exists) ?? candidates[0];
+            }
+
+            if (!File.Exists(sdvDll))
+            {
+                Console.WriteLine($"Error: Stardew Valley assembly not found at '{sdvDll}'.");
+                return 1;
+            }
+
+            Console.WriteLine($"Applying NetRectangle ARM64 patch to '{sdvDll}'...");
+            var resolver = new DefaultAssemblyResolver();
+            string? sdvDir = Path.GetDirectoryName(sdvDll);
+            if (!string.IsNullOrEmpty(sdvDir))
+                resolver.AddSearchDirectory(sdvDir);
+
+            string candidateLib = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "lib"));
+            if (Directory.Exists(candidateLib))
+                resolver.AddSearchDirectory(candidateLib);
+            else if (Directory.Exists(@"c:\Users\User\Documents\GitHub\SDVios\lib"))
+                resolver.AddSearchDirectory(@"c:\Users\User\Documents\GitHub\SDVios\lib");
+
+            using var sdvAsm = AssemblyDefinition.ReadAssembly(sdvDll, new ReaderParameters { ReadWrite = true, AssemblyResolver = resolver });
+            var mod = sdvAsm.MainModule;
+
+            var netRectType = mod.GetType("Netcode.NetRectangle");
+            if (netRectType == null)
+            {
+                Console.WriteLine("Error: Netcode.NetRectangle not found!");
+                return 1;
+            }
+
+            // Check if already patched
+            if (netRectType.Methods.Any(m => m.Name == "get_Value" && m.ReturnType.FullName == "Microsoft.Xna.Framework.Rectangle"))
+            {
+                Console.WriteLine("Netcode.NetRectangle already has concrete get_Value. Skipping creation.");
+            }
+            else
+            {
+                var setMethod = netRectType.Methods.First(m => m.Name == "Set" && m.Parameters.Count == 1);
+                var rectType = setMethod.Parameters[0].ParameterType; // Concrete Microsoft.Xna.Framework.Rectangle
+
+                var getTop = netRectType.Methods.First(m => m.Name == "get_Top");
+                var origValueFr = (FieldReference)getTop.Body.Instructions[1].Operand;
+                var valueFieldRef = new FieldReference("value", rectType, origValueFr.DeclaringType);
+
+                // 1. Add get_Value
+                var getValue = new MethodDefinition(
+                    "get_Value",
+                    MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
+                    rectType);
+                var ilGet = getValue.Body.GetILProcessor();
+                ilGet.Emit(OpCodes.Ldarg_0);
+                ilGet.Emit(OpCodes.Ldfld, valueFieldRef);
+                ilGet.Emit(OpCodes.Ret);
+                netRectType.Methods.Add(getValue);
+                Console.WriteLine($"Added NetRectangle.get_Value() with concrete return type: {rectType.FullName}.");
+
+                // 2. Add set_Value
+                var setValue = new MethodDefinition(
+                    "set_Value",
+                    MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.SpecialName,
+                    mod.TypeSystem.Void);
+                setValue.Parameters.Add(new ParameterDefinition("value", ParameterAttributes.None, rectType));
+                var ilSet = setValue.Body.GetILProcessor();
+                ilSet.Emit(OpCodes.Ldarg_0);
+                ilSet.Emit(OpCodes.Ldarg_1);
+                ilSet.Emit(OpCodes.Callvirt, setMethod);
+                ilSet.Emit(OpCodes.Ret);
+                netRectType.Methods.Add(setValue);
+                Console.WriteLine("Added NetRectangle.set_Value(Rectangle).");
+
+                var valProp = new PropertyDefinition("Value", PropertyAttributes.None, rectType)
+                {
+                    GetMethod = getValue,
+                    SetMethod = setValue
+                };
+                netRectType.Properties.Add(valProp);
+
+                // 3. Fix get_X, get_Y, get_Width, get_Height
+                var writeDelta = netRectType.Methods.First(m => m.Name == "WriteDelta");
+                var rectFields = writeDelta.Body.Instructions
+                    .Where(i => i.OpCode == OpCodes.Ldfld && i.Operand is FieldReference fr && fr.DeclaringType.Name == "Rectangle")
+                    .Select(i => (FieldReference)i.Operand)
+                    .ToList();
+                var xField = rectFields.First(f => f.Name == "X");
+                var yField = rectFields.First(f => f.Name == "Y");
+                var wField = rectFields.First(f => f.Name == "Width");
+                var hField = rectFields.First(f => f.Name == "Height");
+
+                void FixGetter(string name, FieldReference field)
+                {
+                    var m = netRectType.Methods.First(meth => meth.Name == name);
+                    m.Body.Instructions.Clear();
+                    m.Body.Variables.Clear();
+                    m.Body.ExceptionHandlers.Clear();
+                    var il = m.Body.GetILProcessor();
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Ldflda, valueFieldRef);
+                    il.Emit(OpCodes.Ldfld, field);
+                    il.Emit(OpCodes.Ret);
+                    Console.WriteLine($"Patched NetRectangle.{name} to load field directly.");
+                }
+
+                FixGetter("get_X", xField);
+                FixGetter("get_Y", yField);
+                FixGetter("get_Width", wField);
+                FixGetter("get_Height", hField);
+
+                // 4. Replace call sites
+                int replacedGet = 0;
+                int replacedSet = 0;
+                void PatchType(TypeDefinition t)
+                {
+                    foreach (var m in t.Methods)
+                    {
+                        if (m.HasBody && m.DeclaringType != netRectType)
+                        {
+                            for (int i = 0; i < m.Body.Instructions.Count; i++)
+                            {
+                                var inst = m.Body.Instructions[i];
+                                if (inst.Operand is MethodReference mr)
+                                {
+                                    if (mr.Name == "get_Value" &&
+                                        mr.DeclaringType.FullName.Contains("NetFieldBase") &&
+                                        mr.DeclaringType.FullName.Contains("Rectangle") &&
+                                        mr.DeclaringType.FullName.Contains("NetRectangle"))
+                                    {
+                                        inst.OpCode = OpCodes.Callvirt;
+                                        inst.Operand = getValue;
+                                        replacedGet++;
+                                    }
+                                    else if (mr.Name == "set_Value" &&
+                                        mr.DeclaringType.FullName.Contains("NetFieldBase") &&
+                                        mr.DeclaringType.FullName.Contains("Rectangle") &&
+                                        mr.DeclaringType.FullName.Contains("NetRectangle"))
+                                    {
+                                        inst.OpCode = OpCodes.Callvirt;
+                                        inst.Operand = setValue;
+                                        replacedSet++;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    foreach (var nested in t.NestedTypes)
+                        PatchType(nested);
+                }
+
+                foreach (var t in mod.Types)
+                    PatchType(t);
+
+                Console.WriteLine($"Replaced {replacedGet} get_Value calls and {replacedSet} set_Value calls across the assembly.");
+
+                sdvAsm.Write();
+                Console.WriteLine("Saved patched Stardew Valley.dll successfully.");
+            }
+            return 0;
+        }
         string dllPath = args.FirstOrDefault(a => !a.StartsWith("--")) ?? string.Empty;
         if (string.IsNullOrEmpty(dllPath) || !File.Exists(dllPath))
         {
@@ -23,290 +191,6 @@ class Program
             Console.WriteLine($"Error: {dllPath} not found.");
             return 1;
         }
-
-
-        if (args.Contains("--inspect-sei"))
-        {
-            var asm = AssemblyDefinition.ReadAssembly(dllPath);
-            var wb = asm.MainModule.GetType("Microsoft.Xna.Framework.Audio.WaveBank");
-            var m = wb.Methods.First(x => x.Name == "GetSoundEffectInstance");
-            Console.WriteLine($"Method: {m.Name}");
-            Console.WriteLine($"Variables count: {m.Body.Variables.Count}");
-            foreach (var v in m.Body.Variables)
-                Console.WriteLine($"  Var {v.Index}: {v.VariableType.FullName}");
-            Console.WriteLine($"Exception Handlers: {m.Body.ExceptionHandlers.Count}");
-            foreach (var eh in m.Body.ExceptionHandlers)
-                Console.WriteLine($"  EH: Type={eh.HandlerType}, Try: {eh.TryStart?.Offset:X4}-{eh.TryEnd?.Offset:X4}, Handler: {eh.HandlerStart?.Offset:X4}-{eh.HandlerEnd?.Offset:X4}");
-            foreach (var inst in m.Body.Instructions)
-                Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-
-            var allLoads = wb.Methods.Where(x => x.Name == "LoadSoundEffect").ToList();
-            Console.WriteLine($"Found {allLoads.Count} LoadSoundEffect methods");
-            for (int li = 0; li < allLoads.Count; li++)
-            {
-                var loadM = allLoads[li];
-                Console.WriteLine($"\n--- LoadSoundEffect #{li} ---");
-                Console.WriteLine($"Method: {loadM.Name}, ReturnType: {loadM.ReturnType}");
-                Console.WriteLine($"Variables count: {loadM.Body.Variables.Count}");
-                foreach (var v in loadM.Body.Variables)
-                    Console.WriteLine($"  Var {v.Index}: {v.VariableType.FullName}");
-                Console.WriteLine($"Exception Handlers: {loadM.Body.ExceptionHandlers.Count}");
-                foreach (var eh in loadM.Body.ExceptionHandlers)
-                    Console.WriteLine($"  EH: Type={eh.HandlerType}, Try: {eh.TryStart?.Offset:X4}-{eh.TryEnd?.Offset:X4}, Handler: {eh.HandlerStart?.Offset:X4}-{eh.HandlerEnd?.Offset:X4}");
-                foreach (var inst in loadM.Body.Instructions)
-                    Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            }
-            return 0;
-        }
-
-        if (args.Contains("--inspect-gc-init"))
-        {
-            var mgAsm = AssemblyDefinition.ReadAssembly(dllPath);
-            var gcType = mgAsm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.GraphicsCapabilities");
-            var m = gcType.Methods.First(m => m.Name == "PlatformInitialize");
-            Console.WriteLine($"=== {m.FullName} ===");
-            foreach (var inst in m.Body.Instructions)
-                Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            return 0;
-        }
-
-        if (args.Contains("--inspect-sp"))
-        {
-            var sdvDll = @"C:\Users\User\Desktop\SDVport Version\Game_Files\Stardew Valley.dll";
-            var sdvAsm = AssemblyDefinition.ReadAssembly(sdvDll);
-            var furn = sdvAsm.MainModule.GetType("StardewValley.Objects.Furniture");
-            var spMethods = furn.Methods.Where(m => m.Name == "SetPlacement").ToList();
-            foreach (var sp in spMethods)
-            {
-                Console.WriteLine($"=== SetPlacement ({sp.Parameters.Count} params) ===");
-                foreach (var inst in sp.Body.Instructions)
-                    Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            }
-            return 0;
-        }
-
-        if (args.Contains("--inspect-gdsr"))
-        {
-            var sdvDll = @"C:\Users\User\Desktop\SDVport Version\Game_Files\Stardew Valley.dll";
-            var sdvAsm = AssemblyDefinition.ReadAssembly(sdvDll);
-            var furn = sdvAsm.MainModule.GetType("StardewValley.Objects.Furniture");
-            var gdsrMethods = furn.Methods.Where(m => m.Name.Contains("GetDefaultSourceRect") || m.Name.Contains("getDefaultSourceRect")).ToList();
-            foreach (var m in gdsrMethods)
-            {
-                Console.WriteLine($"=== {m.Name} ({m.Parameters.Count} params) ===");
-                foreach (var inst in m.Body.Instructions)
-                    Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            }
-            return 0;
-        }
-
-        if (args.Contains("--inspect-fh"))
-        {
-            string sdvDll = @"C:\Users\User\Desktop\SDVport Version\Game_Files\Stardew Valley.dll";
-            var sdvAsm = AssemblyDefinition.ReadAssembly(sdvDll);
-            var fh = sdvAsm.MainModule.GetType("StardewValley.Locations.FarmHouse");
-            var m = fh.Methods.First(x => x.Name == "AddStarterFurniture");
-            using var sw = new StreamWriter(@"C:\Users\User\.gemini\antigravity\brain\76166a89-be43-47e5-a008-2afff7d8556d\scratch\starter_furniture_all.txt");
-            foreach (var inst in m.Body.Instructions)
-            {
-                sw.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            }
-            Console.WriteLine("Dumped AddStarterFurniture to starter_furniture_all.txt");
-            return 0;
-        }
-
-        if (args.Contains("--verify"))
-        {
-            var asm = AssemblyDefinition.ReadAssembly(dllPath);
-            var xs = asm.MainModule.GetType("Microsoft.Xna.Framework.Audio.XactSound");
-            var ctor = xs.Methods.First(x => x.IsConstructor && x.Parameters.Count == 3 && x.Parameters[0].ParameterType.Name == "AudioEngine");
-            Console.WriteLine("Last 10 instructions of XactSound..ctor:");
-            var list = ctor.Body.Instructions.ToList();
-            for (int i = Math.Max(0, list.Count - 10); i < list.Count; i++)
-                Console.WriteLine($"  {list[i].Offset:X4}: {list[i].OpCode} {list[i].Operand}");
-
-            Console.WriteLine("\nBranches into the end of XactSound..ctor:");
-            for (int i = 0; i < list.Count; i++)
-            {
-                if (list[i].Operand is Instruction target && target.Offset >= list[list.Count - 5].Offset)
-                    Console.WriteLine($"  {list[i].Offset:X4}: {list[i].OpCode} -> {target.Offset:X4} ({target.OpCode})");
-            }
-
-            Console.WriteLine("\nAudioCategory methods:");
-            var cat = asm.MainModule.GetType("Microsoft.Xna.Framework.Audio.AudioCategory");
-            foreach (var m in cat.Methods.Where(m => !m.IsConstructor))
-            {
-                Console.WriteLine($"AudioCategory.{m.Name}: {m.Body.Instructions.Count} instructions");
-                foreach (var inst in m.Body.Instructions)
-                    Console.WriteLine($"    {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            }
-            return 0;
-        }
-
-        if (args.Contains("--inspect-cap"))
-        {
-            var asm = AssemblyDefinition.ReadAssembly(dllPath);
-            Console.WriteLine("=== GraphicsCapabilities ===");
-            var gc = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.GraphicsCapabilities");
-            var platInit = gc.Methods.First(m => m.Name == "PlatformInitialize");
-            Console.WriteLine($"Method: {platInit.Name}");
-            foreach (var inst in platInit.Body.Instructions)
-            {
-                Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            }
-            return 0;
-        }
-
-        if (args.Contains("--inspect-tex"))
-        {
-            var asm = AssemblyDefinition.ReadAssembly(dllPath);
-            Console.WriteLine("=== Texture2D.GenerateGLTextureIfRequired ===");
-            var t2d = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.Texture2D");
-            var gen = t2d.Methods.First(m => m.Name == "GenerateGLTextureIfRequired");
-            foreach (var inst in gen.Body.Instructions)
-            {
-                Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            }
-            return 0;
-        }
-
-        if (args.Contains("--inspect-f-ctor"))
-        {
-            var asm = AssemblyDefinition.ReadAssembly(dllPath);
-            var res = asm.MainModule.Resources.OfType<EmbeddedResource>().FirstOrDefault(r => r.Name.Contains("SpriteEffect.ogl.mgfxo"));
-            if (res != null)
-            {
-                byte[] rdata = res.GetResourceData();
-                using var ms = new MemoryStream(rdata, 10, rdata.Length - 10);
-                using var br = new BinaryReader(ms);
-                int cbCount = br.ReadInt32();
-                Console.WriteLine($"CBs: {cbCount}");
-                for (int i = 0; i < cbCount; i++)
-                {
-                    string name = br.ReadString();
-                    short sizeInBytes = br.ReadInt16();
-                    int paramIndexCount = br.ReadInt32();
-                    for (int j = 0; j < paramIndexCount; j++) { br.ReadInt32(); br.ReadUInt16(); }
-                    Console.WriteLine($"  CB #{i}: {name}, size={sizeInBytes}, params={paramIndexCount}");
-                }
-                int shaderCount = br.ReadInt32();
-                Console.WriteLine($"Shaders: {shaderCount}");
-                for (int i = 0; i < shaderCount; i++)
-                {
-                    bool isVertexShader = br.ReadBoolean();
-                    int codeLen = br.ReadInt32();
-                    byte[] code = br.ReadBytes(codeLen);
-                    byte samplers = br.ReadByte();
-                    for (int s = 0; s < samplers; s++)
-                    {
-                        byte type = br.ReadByte();
-                        byte addrU = br.ReadByte();
-                        byte addrV = br.ReadByte();
-                        byte addrW = br.ReadByte();
-                        byte bR = br.ReadByte(); byte bG = br.ReadByte(); byte bB = br.ReadByte(); byte bA = br.ReadByte();
-                        byte filter = br.ReadByte();
-                        int maxAniso = br.ReadInt32();
-                        int maxMip = br.ReadInt32();
-                        float lodBias = br.ReadSingle();
-                        string sName = br.ReadString();
-                        byte sParam = br.ReadByte();
-                    }
-                    byte cbuffers = br.ReadByte();
-                    for (int c = 0; c < cbuffers; c++) br.ReadByte();
-                    byte attribs = br.ReadByte();
-                    Console.WriteLine($"  Shader #{i}: isVS={isVertexShader}, CodeLen={codeLen}, Samplers={samplers}, CBs={cbuffers}, Attribs={attribs}");
-                    for (int a = 0; a < attribs; a++)
-                    {
-                        string aName = br.ReadString();
-                        byte usage = br.ReadByte();
-                        byte idx = br.ReadByte();
-                        short loc = br.ReadInt16();
-                        Console.WriteLine($"    Attrib #{a}: name={aName}, usage={usage}, index={idx}, loc={loc}");
-                    }
-                }
-
-            }
-            return 0;
-
-
-
-        }
-
-
-        if (args.Contains("--inspect-vpct"))
-        {
-            var asm = AssemblyDefinition.ReadAssembly(dllPath);
-            Console.WriteLine("=== VertexPositionColorTexture ===");
-            var vpct = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.VertexPositionColorTexture");
-            Console.WriteLine($"Layout: {vpct.PackingSize}, ClassSize: {vpct.ClassSize}, IsValueType: {vpct.IsValueType}");
-            foreach (var f in vpct.Fields)
-                Console.WriteLine($"  Field: {f.Name}, Type: {f.FieldType.FullName}, Offset: {f.Offset}");
-            var cctor = vpct.Methods.FirstOrDefault(m => m.IsConstructor && m.IsStatic);
-            if (cctor != null)
-            {
-                Console.WriteLine("Static .cctor:");
-                foreach (var inst in cctor.Body.Instructions)
-                    Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            }
-            return 0;
-        }
-
-        if (args.Contains("--inspect-vd"))
-        {
-            var asm = AssemblyDefinition.ReadAssembly(dllPath);
-            Console.WriteLine("=== VertexDeclaration methods ===");
-            var vd = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.VertexDeclaration");
-            foreach (var m in vd.Methods)
-            {
-                Console.WriteLine($"Method: {m.Name}");
-                if (m.HasBody)
-                {
-                    foreach (var inst in m.Body.Instructions)
-                        Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-                }
-            }
-            return 0;
-        }
-
-        if (args.Contains("--inspect-sbr"))
-        {
-            var asm = AssemblyDefinition.ReadAssembly(dllPath);
-            Console.WriteLine("=== SpriteBatcher methods ===");
-            var sbr = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.SpriteBatcher");
-            foreach (var m in sbr.Methods)
-            {
-                Console.WriteLine($"Method: {m.Name}");
-                foreach (var inst in m.Body.Instructions)
-                    Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            }
-            Console.WriteLine("=== GraphicsDevice.PlatformDrawUserIndexedPrimitives ===");
-            var gd = asm.MainModule.GetType("Microsoft.Xna.Framework.Graphics.GraphicsDevice");
-            foreach (var m in gd.Methods.Where(m => m.Name.Contains("DrawUserIndexedPrimitives")))
-            {
-                Console.WriteLine($"Method: {m.FullName}");
-                if (m.HasBody)
-                {
-                    foreach (var inst in m.Body.Instructions)
-                        Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-                }
-            }
-            return 0;
-        }
-
-        if (args.Contains("--inspect-t2r"))
-        {
-            var asm = AssemblyDefinition.ReadAssembly(dllPath);
-
-            Console.WriteLine("\n=== Texture2DReader.Read ===");
-            var t2r = asm.MainModule.GetType("Microsoft.Xna.Framework.Content.Texture2DReader");
-            var readM = t2r.Methods.First(m => m.Name == "Read");
-            foreach (var inst in readM.Body.Instructions)
-            {
-                Console.WriteLine($"  {inst.Offset:X4}: {inst.OpCode} {inst.Operand}");
-            }
-            return 0;
-        }
-
         Console.WriteLine($"Patching MonoGame at: {dllPath}");
         var assembly = AssemblyDefinition.ReadAssembly(dllPath, new ReaderParameters { ReadWrite = true });
         var module = assembly.MainModule;
