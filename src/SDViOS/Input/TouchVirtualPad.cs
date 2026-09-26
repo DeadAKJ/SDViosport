@@ -287,8 +287,12 @@ namespace SDViOS.Input
             }
 
             // 1. Process Settings Menu Interaction
+            // 1. Process Settings Menu Interaction
             if (IsSettingsOpen)
             {
+                _trackpadPrimaryTouchId = -1;
+                _trackpadSecondTouchId = -1;
+                _stickTouchId = -1;
                 UpdateSettingsTouches(touches);
                 ForwardInputToGame();
                 return;
@@ -297,23 +301,73 @@ namespace SDViOS.Input
             // 2. Process Edit Layout (Drag & Reposition) Interaction
             if (IsEditLayoutMode)
             {
+                _trackpadPrimaryTouchId = -1;
+                _trackpadSecondTouchId = -1;
+                _stickTouchId = -1;
                 UpdateEditModeTouches(touches);
                 ForwardInputToGame();
                 return;
             }
 
             // 3. Normal Overlay Interaction
+            // Watchdog: verify active touch IDs still exist in the current touches collection
+            bool trackpadPrimaryFound = false;
+            bool trackpadSecondFound = false;
             bool stickTouchFound = false;
+
+            foreach (var touch in touches)
+            {
+                if (touch.Id == _trackpadPrimaryTouchId && touch.State != TouchLocationState.Released)
+                    trackpadPrimaryFound = true;
+                if (touch.Id == _trackpadSecondTouchId && touch.State != TouchLocationState.Released)
+                    trackpadSecondFound = true;
+                if (touch.Id == _stickTouchId && touch.State != TouchLocationState.Released)
+                    stickTouchFound = true;
+            }
+
+            if (!trackpadPrimaryFound && _trackpadPrimaryTouchId != -1)
+            {
+                _trackpadPrimaryTouchId = -1;
+            }
+            if (!trackpadSecondFound && _trackpadSecondTouchId != -1)
+            {
+                _trackpadSecondTouchId = -1;
+            }
+            if (!stickTouchFound && _stickTouchId != -1)
+            {
+                _stickTouchId = -1;
+                _currentStickPos = _joystickCenter;
+                LeftStick = Vector2.Zero;
+            }
+
+            // Clamp cursor position and prevent NaN / Infinity
+            if (float.IsNaN(_trackpadCursorPos.X) || float.IsInfinity(_trackpadCursorPos.X) ||
+                float.IsNaN(_trackpadCursorPos.Y) || float.IsInfinity(_trackpadCursorPos.Y))
+            {
+                _trackpadCursorPos = new Vector2(_viewportWidth / 2f, _viewportHeight / 2f);
+            }
+            _trackpadCursorPos.X = Math.Clamp(_trackpadCursorPos.X, 0f, Math.Max(10f, _viewportWidth - 1));
+            _trackpadCursorPos.Y = Math.Clamp(_trackpadCursorPos.Y, 0f, Math.Max(10f, _viewportHeight - 1));
 
             foreach (var touch in touches)
             {
                 Vector2 pos = touch.Position;
                 Point pt = new Point((int)pos.X, (int)pos.Y);
 
+                // If this touch is already claimed as trackpad touch, process it directly
+                if (touch.Id == _trackpadPrimaryTouchId || touch.Id == _trackpadSecondTouchId)
+                {
+                    HandleBackgroundTouch(touch, pt, gameTime);
+                    continue;
+                }
+
                 // Settings button check
                 if (touch.State == TouchLocationState.Pressed && _btnSettingsRect.Contains(pt))
                 {
                     IsSettingsOpen = true;
+                    _trackpadPrimaryTouchId = -1;
+                    _trackpadSecondTouchId = -1;
+                    _stickTouchId = -1;
                     UpdateLayout(_viewportWidth, _viewportHeight);
                     continue;
                 }
@@ -359,7 +413,6 @@ namespace SDViOS.Input
                     }
                     else
                     {
-                        stickTouchFound = true;
                         UpdateJoystickVector(pos);
                     }
                     continue;
@@ -367,7 +420,6 @@ namespace SDViOS.Input
                 else if (_stickTouchId == -1 && touch.State == TouchLocationState.Pressed && _joystickBaseRect.Contains(pt))
                 {
                     _stickTouchId = touch.Id;
-                    stickTouchFound = true;
                     UpdateJoystickVector(pos);
                     continue;
                 }
@@ -376,31 +428,26 @@ namespace SDViOS.Input
                 if (_btnARect.Contains(pt))
                 {
                     ButtonA = true;
+                    continue;
                 }
-                else if (_btnXRect.Contains(pt))
+                if (_btnXRect.Contains(pt))
                 {
                     ButtonX = true;
+                    continue;
                 }
-                else if (_btnYRect.Contains(pt))
+                if (_btnYRect.Contains(pt))
                 {
                     ButtonY = true;
+                    continue;
                 }
-                else if (_btnBRect.Contains(pt))
+                if (_btnBRect.Contains(pt))
                 {
                     ButtonB = true;
+                    continue;
                 }
-                else
-                {
-                    // Touch on background area (outside virtual buttons)
-                    HandleBackgroundTouch(touch, pt, gameTime);
-                }
-            }
 
-            if (!stickTouchFound && _stickTouchId != -1)
-            {
-                _stickTouchId = -1;
-                _currentStickPos = _joystickCenter;
-                LeftStick = Vector2.Zero;
+                // Touch on background area (outside virtual buttons)
+                HandleBackgroundTouch(touch, pt, gameTime);
             }
 
             ForwardInputToGame();
@@ -423,66 +470,70 @@ namespace SDViOS.Input
 
             if (Settings.MouseControlMode == MouseMode.Trackpad)
             {
-                // Steam Link style Trackpad Cursor Mode
-                float curTime = (float)gameTime.TotalGameTime.TotalSeconds;
+                HandleTrackpadTouch(touch, gameTime);
+            }
+        }
 
-                if (touch.State == TouchLocationState.Pressed)
+        private void HandleTrackpadTouch(TouchLocation touch, GameTime gameTime)
+        {
+            float curTime = (float)gameTime.TotalGameTime.TotalSeconds;
+
+            if (touch.State == TouchLocationState.Pressed || (_trackpadPrimaryTouchId == -1 && touch.State == TouchLocationState.Moved))
+            {
+                if (_trackpadPrimaryTouchId == -1)
                 {
-                    if (_trackpadPrimaryTouchId == -1)
-                    {
-                        _trackpadPrimaryTouchId = touch.Id;
-                        _trackpadLastTouchPos = touch.Position;
-                        _trackpadTouchStartTime = curTime;
-                        _trackpadTotalDistMoved = 0f;
-                    }
-                    else if (_trackpadSecondTouchId == -1 && touch.Id != _trackpadPrimaryTouchId)
-                    {
-                        // Second finger touch down
-                        _trackpadSecondTouchId = touch.Id;
-                    }
+                    _trackpadPrimaryTouchId = touch.Id;
+                    _trackpadLastTouchPos = touch.Position;
+                    _trackpadTouchStartTime = curTime;
+                    _trackpadTotalDistMoved = 0f;
                 }
-                else if (touch.State == TouchLocationState.Moved)
+                else if (_trackpadSecondTouchId == -1 && touch.Id != _trackpadPrimaryTouchId)
                 {
-                    if (touch.Id == _trackpadPrimaryTouchId)
-                    {
-                        Vector2 delta = touch.Position - _trackpadLastTouchPos;
-                        _trackpadLastTouchPos = touch.Position;
-                        _trackpadTotalDistMoved += delta.Length();
-
-                        _trackpadCursorPos += delta * Settings.TrackpadSensitivity;
-                        _trackpadCursorPos.X = Math.Clamp(_trackpadCursorPos.X, 0, _viewportWidth - 1);
-                        _trackpadCursorPos.Y = Math.Clamp(_trackpadCursorPos.Y, 0, _viewportHeight - 1);
-                    }
+                    // Second finger touch down
+                    _trackpadSecondTouchId = touch.Id;
                 }
-                else if (touch.State == TouchLocationState.Released)
+            }
+            else if (touch.State == TouchLocationState.Moved)
+            {
+                if (touch.Id == _trackpadPrimaryTouchId)
                 {
-                    if (touch.Id == _trackpadPrimaryTouchId)
-                    {
-                        float duration = curTime - _trackpadTouchStartTime;
+                    Vector2 delta = touch.Position - _trackpadLastTouchPos;
+                    _trackpadLastTouchPos = touch.Position;
+                    _trackpadTotalDistMoved += delta.Length();
 
-                        // Check if two-finger tap occurred (Right Click)
-                        if (_trackpadSecondTouchId != -1)
-                        {
-                            _trackpadRightClickFrames = 8;
-                            _trackpadSecondTouchId = -1;
-                        }
-                        // Single-finger tap (Left Click): short tap with minimal movement
-                        else if (duration < 0.32f && _trackpadTotalDistMoved < 20f)
-                        {
-                            _trackpadLeftClickFrames = 8;
-                        }
+                    _trackpadCursorPos += delta * Settings.TrackpadSensitivity;
+                    _trackpadCursorPos.X = Math.Clamp(_trackpadCursorPos.X, 0f, Math.Max(10f, _viewportWidth - 1));
+                    _trackpadCursorPos.Y = Math.Clamp(_trackpadCursorPos.Y, 0f, Math.Max(10f, _viewportHeight - 1));
+                }
+            }
+            else if (touch.State == TouchLocationState.Released)
+            {
+                if (touch.Id == _trackpadPrimaryTouchId)
+                {
+                    float duration = curTime - _trackpadTouchStartTime;
 
-                        _trackpadPrimaryTouchId = -1;
-                    }
-                    else if (touch.Id == _trackpadSecondTouchId)
+                    // Check if two-finger tap occurred (Right Click)
+                    if (_trackpadSecondTouchId != -1)
                     {
-                        // Second finger released while primary was down: trigger Right Click
-                        if (_trackpadPrimaryTouchId != -1)
-                        {
-                            _trackpadRightClickFrames = 8;
-                        }
+                        _trackpadRightClickFrames = 8;
                         _trackpadSecondTouchId = -1;
                     }
+                    // Single-finger tap (Left Click): short tap with minimal movement
+                    else if (duration < 0.35f && _trackpadTotalDistMoved < 25f)
+                    {
+                        _trackpadLeftClickFrames = 8;
+                    }
+
+                    _trackpadPrimaryTouchId = -1;
+                }
+                else if (touch.Id == _trackpadSecondTouchId)
+                {
+                    // Second finger released while primary was down: trigger Right Click
+                    if (_trackpadPrimaryTouchId != -1)
+                    {
+                        _trackpadRightClickFrames = 8;
+                    }
+                    _trackpadSecondTouchId = -1;
                 }
             }
         }

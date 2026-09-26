@@ -19,28 +19,24 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.2.1-mouse-modes-trackpad-point-and-click'
+version_name = 'v1.2.2-fix-trackpad-tracking-freeze'
 
-changelog_content = """Version: v1.2.1-mouse-modes-trackpad-point-and-click
+changelog_content = """Version: v1.2.2-fix-trackpad-tracking-freeze
 Date: 2026-09-26
 
 Changes:
-1. Dual Mouse Control Modes in Settings Menu:
-   - Added `MouseMode` selector directly in the touch overlay settings menu:
-     * Mode 1: `POINT & CLICK` (Direct Touch / Absolute Positioning):
-       - Tapping or dragging anywhere on screen outside virtual buttons moves the cursor directly under the finger and issues left clicks/drags.
-     * Mode 2: `TRACKPAD` (Steam Link Style Relative Virtual Trackpad):
-       - The entire screen outside virtual buttons acts as a smooth, relative laptop trackpad.
-       - A visible virtual mouse cursor pointer (with classic arrow outline) is rendered on screen.
-       - Moving a finger slides the cursor relatively across the display with customizable sensitivity (`0.4X` to `3.0X`).
-       - Single-finger tap sends Left Click at the current cursor position.
-       - Two-finger tap sends Right Click at the current cursor position.
-       - Action buttons A (Left Click) and X (Right Click) can also be used while aiming with the trackpad cursor for maximum precision.
-     * Mode 3: `DISABLED`:
-       - Background touches outside buttons do not trigger mouse events.
-   - Added `TRACKPAD SPEED` adjustment controls (`[ - ]` / `[ + ]`) to fine-tune cursor sensitivity.
-   - Cursor rendering with high-contrast border (`OverlayFont.DrawMouseCursor`) ensures visibility on all terrain and menus.
-   - Mouse mode and trackpad sensitivity automatically persist to `touch_overlay_config.json`.
+1. Fix Trackpad Tracking Freeze:
+   - Added per-frame Touch Watchdog in `TouchVirtualPad.Update()`:
+     * Validates whether active primary and secondary trackpad touch IDs are still physically present in MonoGame's `TouchPanel.GetState()`.
+     * Automatically frees stranded touch IDs when fingers lift off, exit bounds, or get cancelled without delivering `TouchLocationState.Released`.
+   - Touch Ownership Routing:
+     * Ongoing trackpad drag touches are routed directly to the trackpad controller regardless of whether the finger trajectory crosses over virtual action buttons (A, B, X, Y, Menu).
+     * Prevents virtual button hitboxes from intercepting active trackpad gestures and causing touch ID state leakage.
+   - Fallback Touch Adoption:
+     * Adopts touches on background even if `Pressed` was missed on the initial contact frame (e.g. state starting at `Moved`).
+   - Coordinate & Modal Safety:
+     * Added NaN/Infinity guards and viewport clamping for cursor position.
+     * Guaranteed reset of active touch IDs when opening or closing the Settings or Edit Layout modal.
 """
 
 
