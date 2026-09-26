@@ -13,13 +13,16 @@ import json
 import socket
 import asyncio
 import threading
+import webbrowser
+import urllib.parse
 from typing import Optional
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QFileDialog, QMessageBox, QLineEdit, QTextEdit,
-    QProgressBar, QFrame, QSplitter, QCheckBox, QAbstractItemView
+    QProgressBar, QFrame, QSplitter, QCheckBox, QAbstractItemView,
+    QDialog, QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject
 from PyQt6.QtGui import QColor, QFont, QIcon, QDragEnterEvent, QDropEvent
@@ -29,13 +32,15 @@ try:
     from tools.mod_manager.backend import IOSModBackend, ModInfo
     from tools.mod_manager.nexus import (
         NexusAPI, load_config, save_config, register_nxm_protocol,
-        is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR
+        is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR,
+        parse_any_url
     )
 except ImportError:
     from backend import IOSModBackend, ModInfo
     from nexus import (
         NexusAPI, load_config, save_config, register_nxm_protocol,
-        is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR
+        is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR,
+        parse_any_url
     )
 
 
@@ -124,6 +129,23 @@ QLineEdit {
 }
 QLineEdit:focus {
     border: 1px solid #DA7C21;
+}
+QComboBox {
+    background-color: #21242D;
+    border: 1px solid #313543;
+    border-radius: 5px;
+    padding: 6px 12px;
+    color: #FFFFFF;
+}
+QComboBox:focus {
+    border: 1px solid #DA7C21;
+}
+QComboBox QAbstractItemView {
+    background-color: #21242D;
+    border: 1px solid #313543;
+    selection-background-color: #DA7C21;
+    selection-color: #FFFFFF;
+    color: #FFFFFF;
 }
 QTableWidget {
     background-color: #21242D;
@@ -228,9 +250,350 @@ class DownloadWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
+class InstallFromLinkDialog(QDialog):
+    def __init__(self, parent=None, nexus_api: Optional[NexusAPI] = None, dispatcher: Optional[AsyncDispatcher] = None, initial_url: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Install Mod from Link or URL")
+        self.resize(650, 480)
+        self.setStyleSheet(DARK_STYLE)
+        self.nexus_api = nexus_api or NexusAPI()
+        self.dispatcher = dispatcher
+        self.parsed_data = None
+        self.mod_details = None
+        self.mod_files = []
+
+        self._build_ui()
+        if initial_url:
+            self.input_url.setText(initial_url)
+            self._on_check_link()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        # Header
+        title_box = QVBoxLayout()
+        title_lbl = QLabel("🌐 Install Mod from Link / URL")
+        title_lbl.setStyleSheet("font-weight: bold; font-size: 16px; color: #DA7C21;")
+        sub_lbl = QLabel("Paste any Nexus Mods URL, Mod ID, nxm:// protocol link, or direct .zip download link.")
+        sub_lbl.setStyleSheet("color: #8F94A6; font-size: 12px;")
+        title_box.addWidget(title_lbl)
+        title_box.addWidget(sub_lbl)
+        layout.addLayout(title_box)
+
+        # Input Row
+        input_row = QHBoxLayout()
+        self.input_url = QLineEdit()
+        self.input_url.setPlaceholderText("e.g. https://www.nexusmods.com/stardewvalley/mods/1915 or 1915 or direct .zip link...")
+        self.input_url.returnPressed.connect(self._on_check_link)
+        input_row.addWidget(self.input_url)
+
+        self.btn_paste = QPushButton("📋 Paste")
+        self.btn_paste.setObjectName("SecondaryBtn")
+        self.btn_paste.clicked.connect(self._on_paste_clicked)
+        input_row.addWidget(self.btn_paste)
+
+        self.btn_check = QPushButton("🔍 Check")
+        self.btn_check.setObjectName("SecondaryBtn")
+        self.btn_check.clicked.connect(self._on_check_link)
+        input_row.addWidget(self.btn_check)
+
+        layout.addLayout(input_row)
+
+        # Info Frame / Card
+        self.card = QFrame()
+        self.card.setStyleSheet("background-color: #21242D; border: 1px solid #313543; border-radius: 6px; padding: 14px;")
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setSpacing(10)
+
+        self.lbl_title = QLabel("Ready to inspect link")
+        self.lbl_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #FFFFFF;")
+        card_layout.addWidget(self.lbl_title)
+
+        self.lbl_author = QLabel("")
+        self.lbl_author.setStyleSheet("color: #DA7C21; font-size: 12px; font-weight: bold;")
+        card_layout.addWidget(self.lbl_author)
+
+        self.lbl_desc = QLabel("Enter or paste a mod link or numeric Mod ID above, then click 'Check'.")
+        self.lbl_desc.setWordWrap(True)
+        self.lbl_desc.setStyleSheet("color: #9A9EAB; font-size: 12px;")
+        card_layout.addWidget(self.lbl_desc)
+
+        # File selector dropdown
+        self.combo_box_layout = QVBoxLayout()
+        self.combo_label = QLabel("Select File to Install:")
+        self.combo_label.setStyleSheet("color: #E2E4E9; font-weight: bold; font-size: 12px;")
+        self.combo_files = QComboBox()
+        self.combo_box_layout.addWidget(self.combo_label)
+        self.combo_box_layout.addWidget(self.combo_files)
+        self.combo_label.setVisible(False)
+        self.combo_files.setVisible(False)
+        card_layout.addLayout(self.combo_box_layout)
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setStyleSheet("color: #F1C40F; font-size: 11px;")
+        card_layout.addWidget(self.lbl_status)
+
+        layout.addWidget(self.card)
+        layout.addStretch()
+
+        # Action Buttons
+        btn_row = QHBoxLayout()
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setObjectName("SecondaryBtn")
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(self.btn_cancel)
+
+        btn_row.addStretch()
+
+        self.btn_open_browser = QPushButton("🚀 Open Mod Page & Download")
+        self.btn_open_browser.setObjectName("SecondaryBtn")
+        self.btn_open_browser.setVisible(False)
+        self.btn_open_browser.clicked.connect(self._on_open_browser_clicked)
+        btn_row.addWidget(self.btn_open_browser)
+
+        self.btn_install = QPushButton("📥 Download & Install to iPhone")
+        self.btn_install.setEnabled(False)
+        self.btn_install.clicked.connect(self._on_install_clicked)
+        btn_row.addWidget(self.btn_install)
+
+        layout.addLayout(btn_row)
+
+    def _on_paste_clicked(self):
+        text = QApplication.clipboard().text().strip()
+        if text:
+            self.input_url.setText(text)
+            self._on_check_link()
+
+    def _on_check_link(self):
+        raw = self.input_url.text().strip()
+        if not raw:
+            self.lbl_title.setText("Please enter a link or Mod ID")
+            self.lbl_author.setText("")
+            self.lbl_desc.setText("Enter or paste a mod link or numeric Mod ID above.")
+            self.combo_label.setVisible(False)
+            self.combo_files.setVisible(False)
+            self.btn_open_browser.setVisible(False)
+            self.btn_install.setEnabled(False)
+            return
+
+        parsed = parse_any_url(raw)
+        self.parsed_data = parsed
+        link_type = parsed.get("type")
+
+        if link_type == "invalid":
+            self.lbl_title.setText("❌ Unrecognized Link Format")
+            self.lbl_author.setText("")
+            self.lbl_desc.setText("Supported formats:\n• Nexus URL: https://www.nexusmods.com/stardewvalley/mods/1915\n• Mod ID: 1915\n• Nexus NXM: nxm://stardewvalley/mods/1915/files/...\n• Direct URL: https://example.com/mod.zip")
+            self.combo_label.setVisible(False)
+            self.combo_files.setVisible(False)
+            self.btn_open_browser.setVisible(False)
+            self.btn_install.setEnabled(False)
+
+        elif link_type == "nxm":
+            self.lbl_title.setText("🔗 Nexus One-Click Link (NXM Protocol)")
+            self.lbl_author.setText(f"Game: {parsed.get('game', 'stardewvalley')} | Mod #{parsed.get('mod_id')} | File #{parsed.get('file_id')}")
+            self.lbl_desc.setText("Validated security tokens detected. Ready to download from Nexus CDN and install directly to your iPhone.")
+            self.combo_label.setVisible(False)
+            self.combo_files.setVisible(False)
+            self.btn_open_browser.setVisible(False)
+            self.btn_install.setEnabled(True)
+            self.btn_install.setText("📥 Download & Install to iPhone")
+
+        elif link_type == "direct_url":
+            url = parsed["url"]
+            filename = os.path.basename(urllib.parse.urlparse(url).path) or "download.zip"
+            self.lbl_title.setText("📦 Direct Download Archive")
+            self.lbl_author.setText(f"Target: {filename}")
+            self.lbl_desc.setText(f"Direct link: {url}\nReady to download archive and extract mods directly to iPhone.")
+            self.combo_label.setVisible(False)
+            self.combo_files.setVisible(False)
+            self.btn_open_browser.setVisible(False)
+            self.btn_install.setEnabled(True)
+            self.btn_install.setText("📥 Download & Install to iPhone")
+
+        elif link_type == "nexus_web":
+            mod_id = parsed["mod_id"]
+            game = parsed.get("game", "stardewvalley")
+
+            if not self.nexus_api.api_key:
+                self.lbl_title.setText(f"🔑 API Key Required for Mod #{mod_id}")
+                self.lbl_author.setText("")
+                self.lbl_desc.setText("To query Nexus Mods details, please enter your Personal API Key in the 'Nexus Downloads' tab.")
+                self.btn_open_browser.setVisible(True)
+                self.btn_install.setEnabled(False)
+                return
+
+            self.lbl_title.setText(f"🔍 Contacting Nexus Mods for Mod #{mod_id}...")
+            self.lbl_author.setText("")
+            self.lbl_desc.setText("Fetching mod details and downloadable files...")
+            self.lbl_status.setText("Connecting...")
+            self.btn_install.setEnabled(False)
+
+            def fetch():
+                details = self.nexus_api.get_mod_details(game, mod_id)
+                files = self.nexus_api.get_mod_files(game, mod_id)
+                return details, files
+
+            if self.dispatcher:
+                self.dispatcher.run_async(
+                    asyncio.to_thread(fetch),
+                    on_success=self._on_nexus_details_loaded,
+                    on_error=self._on_nexus_details_error
+                )
+            else:
+                try:
+                    d, f = fetch()
+                    self._on_nexus_details_loaded((d, f))
+                except Exception as e:
+                    self._on_nexus_details_error(str(e))
+
+    def _on_nexus_details_loaded(self, res):
+        details, files = res
+        self.mod_details = details
+        self.mod_files = files
+        self.lbl_status.setText("")
+
+        name = details.get("name", "Unknown Mod")
+        author = details.get("author", "Unknown")
+        ver = details.get("version", "")
+        summary = details.get("summary", "")
+
+        self.lbl_title.setText(f"🎮 {name}")
+        self.lbl_author.setText(f"Author: {author}  •  Version: {ver}")
+        self.lbl_desc.setText(summary or "No summary provided.")
+
+        # Filter relevant files: MAIN, UPDATE, OPTIONAL
+        relevant = [f for f in files if f.get("category_name") in ["MAIN", "UPDATE", "OPTIONAL"]]
+        if not relevant:
+            relevant = files[:10]
+
+        # Sort: newest timestamp first
+        relevant.sort(key=lambda x: x.get("uploaded_timestamp", 0), reverse=True)
+
+        self.combo_files.clear()
+        for f in relevant:
+            f_id = f.get("file_id")
+            f_name = f.get("name", "File")
+            f_ver = f.get("version", "")
+            f_cat = f.get("category_name", "FILE")
+            f_kb = f.get("size_kb", 0)
+            f_mb = f_kb / 1024
+            label = f"[{f_cat}] {f_name} (v{f_ver}, {f_mb:.1f} MB)"
+            self.combo_files.addItem(label, f_id)
+
+        target_fid = self.parsed_data.get("file_id")
+        if target_fid:
+            idx = self.combo_files.findData(target_fid)
+            if idx >= 0:
+                self.combo_files.setCurrentIndex(idx)
+
+        self.combo_label.setVisible(True)
+        self.combo_files.setVisible(True)
+        self.btn_open_browser.setVisible(True)
+        self.btn_install.setEnabled(True)
+        self.btn_install.setText("📥 Download & Install to iPhone")
+
+    def _on_nexus_details_error(self, err_msg: str):
+        self.lbl_status.setText("")
+        self.lbl_title.setText("❌ Failed to Query Nexus")
+        self.lbl_author.setText("")
+        self.lbl_desc.setText(f"Error fetching mod information:\n{err_msg}")
+        self.btn_open_browser.setVisible(True)
+        self.btn_install.setEnabled(False)
+
+    def _on_open_browser_clicked(self):
+        if not self.parsed_data:
+            return
+        game = self.parsed_data.get("game", "stardewvalley")
+        mod_id = self.parsed_data.get("mod_id")
+        file_id = self.combo_files.currentData() if self.combo_files.count() > 0 else self.parsed_data.get("file_id")
+        if file_id:
+            url = f"https://www.nexusmods.com/{game}/mods/{mod_id}?tab=files&file_id={file_id}"
+        else:
+            url = f"https://www.nexusmods.com/{game}/mods/{mod_id}?tab=files"
+        webbrowser.open(url)
+        self.accept()
+
+    def _on_install_clicked(self):
+        if not self.parsed_data:
+            return
+
+        link_type = self.parsed_data.get("type")
+
+        if link_type == "nxm":
+            url = self.parsed_data.get("url")
+            self.accept()
+            if self.parent():
+                self.parent()._handle_nxm_url(url)
+
+        elif link_type == "direct_url":
+            url = self.parsed_data.get("url")
+            self.accept()
+            if self.parent():
+                self.parent()._handle_direct_download_url(url)
+
+        elif link_type == "nexus_web":
+            game = self.parsed_data.get("game", "stardewvalley")
+            mod_id = self.parsed_data.get("mod_id")
+            file_id = self.combo_files.currentData() if self.combo_files.count() > 0 else self.parsed_data.get("file_id")
+
+            if not file_id:
+                QMessageBox.warning(self, "No File", "Please select a file to download.")
+                return
+
+            self.btn_install.setEnabled(False)
+            self.btn_install.setText("Resolving download link...")
+            self.lbl_status.setText("Checking Nexus CDN download link permissions...")
+
+            def try_resolve():
+                return self.nexus_api.get_download_links(game, mod_id, file_id)
+
+            def on_success(links):
+                self.accept()
+                if self.parent():
+                    parsed_equiv = {
+                        "game": game,
+                        "mod_id": mod_id,
+                        "file_id": file_id
+                    }
+                    self.parent()._on_links_resolved(links, parsed_equiv)
+
+            def on_error(err):
+                self.btn_install.setEnabled(True)
+                self.btn_install.setText("📥 Download & Install to iPhone")
+                self.lbl_status.setText("")
+                web_url = f"https://www.nexusmods.com/{game}/mods/{mod_id}?tab=files&file_id={file_id}"
+                reply = QMessageBox.information(
+                    self,
+                    "Nexus Authorization Required",
+                    f"Nexus Mods requires free/standard accounts to initiate downloads from their website.\n\n"
+                    f"Would you like to open the download page now?\n\n"
+                    f"Simply click 'MOD MANAGER DOWNLOAD' on the page, and this tool will automatically capture the download and install it straight to your iPhone!",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    webbrowser.open(web_url)
+                    self.accept()
+
+            if self.dispatcher:
+                self.dispatcher.run_async(
+                    asyncio.to_thread(try_resolve),
+                    on_success=on_success,
+                    on_error=on_error
+                )
+            else:
+                try:
+                    links = try_resolve()
+                    on_success(links)
+                except Exception as e:
+                    on_error(str(e))
+
 
 class ModManagerWindow(QMainWindow):
     nxm_received = pyqtSignal(str)
+
 
     def __init__(self, initial_nxm: Optional[str] = None):
         super().__init__()
@@ -360,6 +723,10 @@ class ModManagerWindow(QMainWindow):
         self.btn_install_mod = QPushButton("📥 Install Mod (.zip / folder)")
         self.btn_install_mod.clicked.connect(self._browse_and_install_mod)
         toolbar.addWidget(self.btn_install_mod)
+
+        self.btn_install_url = QPushButton("🌐 Install from Link / URL")
+        self.btn_install_url.clicked.connect(lambda: self._show_install_url_dialog())
+        toolbar.addWidget(self.btn_install_url)
 
         self.btn_refresh_mods = QPushButton("⟳ Refresh")
         self.btn_refresh_mods.setObjectName("SecondaryBtn")
@@ -626,17 +993,22 @@ class ModManagerWindow(QMainWindow):
         man_layout = QVBoxLayout(man_card)
         man_layout.setSpacing(10)
 
-        man_title = QLabel("📥 Manual NXM Link Downloader")
+        man_title = QLabel("📥 Mod Link / URL Downloader")
         man_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #DA7C21;")
         man_layout.addWidget(man_title)
 
+        man_desc = QLabel("Enter any Nexus link (web page or nxm://), Mod ID number, or direct .zip URL to download and install straight to iPhone:")
+        man_desc.setStyleSheet("color: #9A9EAB; font-size: 12px;")
+        man_layout.addWidget(man_desc)
+
         man_row = QHBoxLayout()
         self.nxm_input = QLineEdit()
-        self.nxm_input.setPlaceholderText("Paste nxm:// link here if not clicked from browser...")
+        self.nxm_input.setPlaceholderText("Paste Nexus link, Mod ID, nxm://, or direct .zip URL...")
+        self.nxm_input.returnPressed.connect(lambda: self._handle_any_link_input(self.nxm_input.text().strip()))
         man_row.addWidget(self.nxm_input)
 
         self.btn_download_nxm = QPushButton("Download & Install")
-        self.btn_download_nxm.clicked.connect(lambda: self._handle_nxm_url(self.nxm_input.text().strip()))
+        self.btn_download_nxm.clicked.connect(lambda: self._handle_any_link_input(self.nxm_input.text().strip()))
         man_row.addWidget(self.btn_download_nxm)
 
         man_layout.addLayout(man_row)
@@ -678,7 +1050,9 @@ class ModManagerWindow(QMainWindow):
             self.lbl_nexus_user.setStyleSheet("color: #2ECC71; font-weight: bold;")
             self.config["nexus_api_key"] = self.nexus_api.api_key
             self.config["user_name"] = user_name
+            self.config["is_premium"] = is_prem
             save_config(self.config)
+
         else:
             msg = data.get("message", "Invalid API Key")
             self.lbl_nexus_user.setText(f"🔴 {msg}")
@@ -768,6 +1142,52 @@ class ModManagerWindow(QMainWindow):
     def _on_nxm_failed(self, err: str):
         self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "Nexus Error", f"Failed to process NXM link:\n{err}")
+
+    def _show_install_url_dialog(self, initial_url: str = ""):
+        dlg = InstallFromLinkDialog(
+            parent=self,
+            nexus_api=self.nexus_api,
+            dispatcher=self.dispatcher,
+            initial_url=initial_url
+        )
+        dlg.exec()
+
+    def _handle_any_link_input(self, raw: str):
+        raw = raw.strip()
+        if not raw:
+            self._show_install_url_dialog()
+            return
+
+        parsed = parse_any_url(raw)
+        if parsed.get("type") == "nxm":
+            self._handle_nxm_url(raw)
+        elif parsed.get("type") == "direct_url":
+            self._handle_direct_download_url(parsed["url"])
+        else:
+            self._show_install_url_dialog(raw)
+
+    def _handle_direct_download_url(self, url: str):
+        if not self.backend.is_connected:
+            QMessageBox.warning(self, "Not Connected", "Please connect your iOS device via USB or select a local folder first.")
+            return
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        fname = os.path.basename(urllib.parse.urlparse(url).path) or "archive"
+        self.status_bar.setText(f" Downloading {fname}...")
+
+        dl_worker = DownloadWorker(self.nexus_api, url, DEFAULT_DOWNLOAD_DIR)
+        dl_worker.progress.connect(self._on_download_progress)
+        dl_worker.finished.connect(self._on_download_finished)
+        dl_worker.failed.connect(self._on_direct_download_failed)
+        self._current_dl_worker = dl_worker
+        dl_worker.start()
+
+    def _on_direct_download_failed(self, err: str):
+        self.progress_bar.setVisible(False)
+        QMessageBox.critical(self, "Download Error", f"Failed to download mod from URL:\n{err}")
+
 
     # ----------------- 4. LOGS TAB -----------------
     def _setup_logs_tab(self):
@@ -1124,15 +1544,26 @@ class ModManagerWindow(QMainWindow):
 
     # Drag and Drop
     def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() or event.mimeData().hasText():
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent):
-        urls = event.mimeData().urls()
-        if urls:
-            path = urls[0].toLocalFile()
-            if os.path.exists(path):
-                self._install_mod(path)
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if urls:
+                path = urls[0].toLocalFile()
+                if path and os.path.exists(path):
+                    self._install_mod(path)
+                    return
+                raw_url = urls[0].toString()
+                if raw_url.startswith(("http://", "https://", "nxm://")):
+                    self._handle_any_link_input(raw_url)
+                    return
+        if event.mimeData().hasText():
+            text = event.mimeData().text().strip()
+            if text:
+                self._handle_any_link_input(text)
+
 
     def closeEvent(self, event):
         if hasattr(self, "dispatcher") and self.dispatcher:

@@ -4,11 +4,13 @@ Nexus Mods API integration and NXM protocol handling for Stardew Valley iOS Mod 
 
 import os
 import sys
+import re
 import json
 import urllib.parse
 import requests
 import winreg
 from typing import Optional, Callable
+
 
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
@@ -101,8 +103,39 @@ class NexusAPI:
 
         return None
 
-    def get_download_links(self, game_name: str, mod_id: int, file_id: int, key: str, expires: str) -> list[str]:
-        """Request direct CDN download links for an NXM link."""
+    def get_mod_details(self, game_name: str, mod_id: int) -> dict:
+        """Fetch mod details from Nexus Mods API."""
+        if not self.api_key:
+            raise ValueError("Nexus API key not configured.")
+        url = f"{self.BASE_URL}/games/{game_name}/mods/{mod_id}.json"
+        headers = {
+            "apikey": self.api_key,
+            "User-Agent": self.USER_AGENT,
+            "accept": "application/json"
+        }
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            raise Exception(f"Nexus API error ({r.status_code}): {r.text}")
+        return r.json()
+
+    def get_mod_files(self, game_name: str, mod_id: int) -> list[dict]:
+        """Fetch list of mod downloadable files from Nexus Mods API."""
+        if not self.api_key:
+            raise ValueError("Nexus API key not configured.")
+        url = f"{self.BASE_URL}/games/{game_name}/mods/{mod_id}/files.json"
+        headers = {
+            "apikey": self.api_key,
+            "User-Agent": self.USER_AGENT,
+            "accept": "application/json"
+        }
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code != 200:
+            raise Exception(f"Nexus API error ({r.status_code}): {r.text}")
+        data = r.json()
+        return data.get("files", [])
+
+    def get_download_links(self, game_name: str, mod_id: int, file_id: int, key: str = "", expires: str = "") -> list[str]:
+        """Request direct CDN download links for an NXM link or mod file."""
         if not self.api_key:
             raise ValueError("Nexus API key not configured.")
 
@@ -132,7 +165,7 @@ class NexusAPI:
         return links
 
     def download_file(self, uri: str, dest_dir: str, progress_callback: Optional[Callable[[int, int], None]] = None) -> str:
-        """Download file from CDN to local dest_dir with progress."""
+        """Download file from CDN or direct URL to local dest_dir with progress."""
         os.makedirs(dest_dir, exist_ok=True)
 
         headers = {"User-Agent": self.USER_AGENT}
@@ -146,7 +179,7 @@ class NexusAPI:
                 filename = cd.split("filename=")[-1].strip('";\' ')
             if not filename:
                 filename = os.path.basename(urllib.parse.urlparse(uri).path)
-            if not filename:
+            if not filename or "." not in filename:
                 filename = "nexus_mod_download.zip"
 
             total_size = int(r.headers.get("content-length", 0))
@@ -162,6 +195,70 @@ class NexusAPI:
                             progress_callback(downloaded, total_size)
 
         return out_path
+
+
+def parse_any_url(raw: str) -> dict:
+    """
+    Parse any mod input string:
+    - NXM protocol: nxm://stardewvalley/mods/{mod_id}/files/{file_id}?...
+    - Nexus web page: https://www.nexusmods.com/stardewvalley/mods/{mod_id}
+    - Numeric Mod ID: 1915 or #1915 or mod:1915
+    - Direct archive URL: https://.../something.zip
+    """
+    s = raw.strip()
+    if not s:
+        return {"type": "empty"}
+
+    # 1. NXM protocol
+    if s.startswith("nxm://"):
+        api = NexusAPI()
+        parsed = api.parse_nxm_url(s)
+        if parsed:
+            return {"type": "nxm", **parsed}
+        return {"type": "invalid", "error": "Invalid nxm:// link format"}
+
+    # 2. Nexus Web URL
+    nexus_match = re.search(r"nexusmods\.com/([^/]+)/mods/(\d+)", s, re.IGNORECASE)
+    if nexus_match:
+        game = nexus_match.group(1).lower()
+        mod_id = int(nexus_match.group(2))
+        file_id = None
+        if "?" in s:
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(s).query)
+            if "file_id" in qs:
+                try:
+                    file_id = int(qs["file_id"][0])
+                except ValueError:
+                    pass
+        return {
+            "type": "nexus_web",
+            "game": game,
+            "mod_id": mod_id,
+            "file_id": file_id,
+            "url": f"https://www.nexusmods.com/{game}/mods/{mod_id}"
+        }
+
+    # 3. Numeric Mod ID
+    cleaned = re.sub(r"^(?:mod[:\s#]*|#)", "", s, flags=re.IGNORECASE).strip()
+    if cleaned.isdigit():
+        mod_id = int(cleaned)
+        return {
+            "type": "nexus_web",
+            "game": "stardewvalley",
+            "mod_id": mod_id,
+            "file_id": None,
+            "url": f"https://www.nexusmods.com/stardewvalley/mods/{mod_id}"
+        }
+
+    # 4. Direct HTTP/HTTPS Archive or Web link
+    if s.startswith("http://") or s.startswith("https://"):
+        return {
+            "type": "direct_url",
+            "url": s
+        }
+
+    return {"type": "invalid", "error": "Unrecognized link format"}
+
 
 
 def register_nxm_protocol() -> bool:
