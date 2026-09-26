@@ -19,26 +19,25 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.1.8-fix-music-delay'
+version_name = 'v1.1.9-fix-audiocategory-fieldaccess'
 
-changelog_content = """Version: v1.1.8-fix-music-delay
+changelog_content = """Version: v1.1.9-fix-audiocategory-fieldaccess
 Date: 2026-09-26
 
 Changes:
-1. Fix Delayed Music Playback / Silent Playback on Track Transition:
+1. Fix Freeze / Failure to Advance Past ConcernedApe Splash Screen (FieldAccessException in AudioCategory.SetVolume):
    - Root Cause:
-     * In `Game1.updateMusic()`, Stardew Valley transitions tracks by ducking `musicPlayerVolume -= 0.01f` per frame down to 0.0f.
-     * When volume hits 0.0f, SDV starts the new cue: `currentSong = soundBank.GetCue(track); currentSong.Play();`.
-     * At play time, MonoGame's `XactSound.Play()` initializes instance volume as `_volume * _cueVolume * AudioCategory._volume[0]`. Because `_volume[0]` was 0.0f, the OpenAL hardware source gain was set to 0.0f (completely silent).
-     * SDV then fades the track in over 75 frames (1.25s) by incrementing `musicPlayerVolume += 0.01f` and calling `musicCategory.SetVolume(musicPlayerVolume)`.
-     * However, in `lib/MonoGame.Framework.dll`, `AudioCategory.SetVolume` had been gutted to only store `this._volume[0] = volume` without updating any active sound instances or OpenAL hardware sources.
-     * As a result, the newly started song played in complete silence for its entire duration (~2-3 minutes) until it stopped, at which point SDV queued the next track (which was audible because `_volume[0]` had already reached 0.75f). This caused the user-reported music delay.
+     * In v1.1.8, `AudioCategory.SetVolume` was updated to iterate over `AudioEngine.ActiveCues` and match `AudioEngine._categories[sound._categoryID] == this`.
+     * However, in `MonoGame.Framework.dll`, `AudioEngine._categories`, `Cue._curSound`, and `XactSound._categoryID` had private visibility (`IsPrivate = true`).
+     * When `Game1.updateMusic()` invoked `musicCategory.SetVolume(musicPlayerVolume)` during the startup intro fade, the runtime security / AOT verifier threw:
+       `FieldAccessException: Field Microsoft.Xna.Framework.Audio.AudioEngine:_categories is inaccessible from method Microsoft.Xna.Framework.Audio.AudioCategory:SetVolume (single)`
+     * Because this unhandled exception crashed `Game1.Update()` on every tick, the update loop could not proceed to transition from the ConcernedApe screen to the Title Menu.
    - Fix:
-     * Patched `AudioCategory.SetVolume(float volume)` in `MonoGame.Framework.dll` via Cecil.
-     * Sets `this._volume[0] = volume` and synchronizes on `this._engine.UpdateLock`.
-     * Iterates through `this._engine.ActiveCues`, identifies active cues belonging to the category (`sound._categoryID`), and invokes `sound.UpdateCategoryVolume(volume)`.
-     * `UpdateCategoryVolume` calls `_wave.Volume = ...`, which immediately updates the underlying OpenAL hardware source gain (`AL.Source(SourceId, ALSourcef.Gain, gain)`).
-     * Background music, ambient sounds, and category volume adjustments now fade in smoothly and play immediately as intended.
+     * Made `AudioEngine._categories`, `AudioEngine.ActiveCues`, `AudioEngine.UpdateLock`, `Cue._curSound`, `XactSound._categoryID`, `XactSound.UpdateCategoryVolume`, and `AudioCategory` fields public (`IsPublic = true; IsPrivate = false;`).
+     * Added an overarching `try ... catch (Exception)` handler inside `AudioCategory.SetVolume`:
+       - Safely enters and exits `Monitor` on `UpdateLock` in both normal and exceptional flows.
+       - Guarantees `SetVolume` never throws an unhandled exception into `Game1.updateMusic()` or the game update loop.
+     * Game now advances cleanly through the ConcernedApe logo into Title Menu and save files with responsive audio fading.
 """
 
 

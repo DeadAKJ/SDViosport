@@ -957,6 +957,18 @@ class Program
                 var xsCategoryIDField = xactSoundType.Fields.FirstOrDefault(f => f.Name == "_categoryID");
                 var xsUpdateCatVolMeth = xactSoundType.Methods.FirstOrDefault(m => m.Name == "UpdateCategoryVolume");
 
+                var exTypeRef = module.ImportReference(typeof(Exception));
+
+                // Make all referenced fields and methods public to prevent FieldAccessException/MethodAccessException
+                if (catVolumeField != null) { catVolumeField.IsPrivate = false; catVolumeField.IsPublic = true; }
+                if (catEngineField != null) { catEngineField.IsPrivate = false; catEngineField.IsPublic = true; }
+                if (aeActiveCuesField != null) { aeActiveCuesField.IsPrivate = false; aeActiveCuesField.IsPublic = true; }
+                if (aeUpdateLockField != null) { aeUpdateLockField.IsPrivate = false; aeUpdateLockField.IsPublic = true; }
+                if (aeCategoriesField != null) { aeCategoriesField.IsPrivate = false; aeCategoriesField.IsPublic = true; }
+                if (cueCurSoundField != null) { cueCurSoundField.IsPrivate = false; cueCurSoundField.IsPublic = true; }
+                if (xsCategoryIDField != null) { xsCategoryIDField.IsPrivate = false; xsCategoryIDField.IsPublic = true; }
+                if (xsUpdateCatVolMeth != null) { xsUpdateCatVolMeth.IsPrivate = false; xsUpdateCatVolMeth.IsPublic = true; }
+
                 var aeUpd = aeType.Methods.FirstOrDefault(m => m.Name == "Update");
                 MethodReference? listGetItem = null;
                 MethodReference? listGetCount = null;
@@ -1069,26 +1081,28 @@ class Program
                     ilVol.Emit(OpCodes.Ldfld, aeCategoriesField);
                     ilVol.Emit(OpCodes.Stloc, locCategories);
 
-                    // Monitor.Enter(lockObj, ref lockTaken)
+                    // lockTaken = false;
                     ilVol.Emit(OpCodes.Ldc_I4_0);
                     ilVol.Emit(OpCodes.Stloc, locLockTaken);
-                    ilVol.Emit(OpCodes.Ldloc, locLockObj);
+
+                    // Try block start:
+                    var tryStart = ilVol.Create(OpCodes.Ldloc, locLockObj);
+                    ilVol.Append(tryStart);
                     ilVol.Emit(OpCodes.Ldloca, locLockTaken);
                     ilVol.Emit(OpCodes.Call, monitorEnter);
 
-                    // Try block start:
-                    var tryStart = ilVol.Create(OpCodes.Ldc_I4_0); // i = 0
-                    ilVol.Append(tryStart);
+                    // i = 0;
+                    ilVol.Emit(OpCodes.Ldc_I4_0);
                     ilVol.Emit(OpCodes.Stloc, locI);
 
                     var loopCheck = ilVol.Create(OpCodes.Ldloc, locI);
                     var loopBody = ilVol.Create(OpCodes.Ldloc, locActiveCues);
                     ilVol.Emit(OpCodes.Br, loopCheck);
 
-                    // Loop body:
+                    // loopBody: cue = activeCues[i];
                     ilVol.Append(loopBody);
                     ilVol.Emit(OpCodes.Ldloc, locI);
-                    ilVol.Emit(OpCodes.Callvirt, listGetItem); // cue = activeCues[i]
+                    ilVol.Emit(OpCodes.Callvirt, listGetItem);
                     ilVol.Emit(OpCodes.Stloc, locCue);
 
                     var loopNext = ilVol.Create(OpCodes.Ldloc, locI);
@@ -1149,24 +1163,31 @@ class Program
                     ilVol.Emit(OpCodes.Callvirt, listGetCount);
                     ilVol.Emit(OpCodes.Blt, loopBody);
 
-                    var tryEnd = ilVol.Create(OpCodes.Leave_S, lblEnd);
-                    ilVol.Append(tryEnd);
-
-                    // Finally block:
-                    var finallyStart = ilVol.Create(OpCodes.Ldloc, locLockTaken);
-                    ilVol.Append(finallyStart);
-                    var finallyEnd = ilVol.Create(OpCodes.Endfinally);
-                    ilVol.Emit(OpCodes.Brfalse_S, finallyEnd);
+                    // Normal unlock: if (lockTaken) Monitor.Exit(lockObj);
+                    var lblLeaveTry = ilVol.Create(OpCodes.Leave_S, lblEnd);
+                    ilVol.Emit(OpCodes.Ldloc, locLockTaken);
+                    ilVol.Emit(OpCodes.Brfalse_S, lblLeaveTry);
                     ilVol.Emit(OpCodes.Ldloc, locLockObj);
                     ilVol.Emit(OpCodes.Call, monitorExit);
-                    ilVol.Append(finallyEnd);
+                    ilVol.Append(lblLeaveTry);
 
-                    var handler = new ExceptionHandler(ExceptionHandlerType.Finally)
+                    // Catch handler: if (lockTaken) Monitor.Exit(lockObj);
+                    var catchStart = ilVol.Create(OpCodes.Pop); // pop Exception
+                    ilVol.Append(catchStart);
+                    var lblLeaveCatch = ilVol.Create(OpCodes.Leave_S, lblEnd);
+                    ilVol.Emit(OpCodes.Ldloc, locLockTaken);
+                    ilVol.Emit(OpCodes.Brfalse_S, lblLeaveCatch);
+                    ilVol.Emit(OpCodes.Ldloc, locLockObj);
+                    ilVol.Emit(OpCodes.Call, monitorExit);
+                    ilVol.Append(lblLeaveCatch);
+
+                    var handler = new ExceptionHandler(ExceptionHandlerType.Catch)
                     {
                         TryStart = tryStart,
-                        TryEnd = finallyStart,
-                        HandlerStart = finallyStart,
-                        HandlerEnd = lblEnd
+                        TryEnd = catchStart,
+                        HandlerStart = catchStart,
+                        HandlerEnd = lblEnd,
+                        CatchType = exTypeRef
                     };
                     setVolMethod.Body.ExceptionHandlers.Add(handler);
                 }
@@ -1174,7 +1195,7 @@ class Program
                 ilVol.Append(lblEnd);
                 ilVol.Emit(OpCodes.Ret);
 
-                Console.WriteLine("Rebuilt AudioCategory.SetVolume cleanly with null check and active cue volume propagation.");
+                Console.WriteLine("Rebuilt AudioCategory.SetVolume cleanly with null check, public access, and try-catch safeguarded cue propagation.");
             }
 
             // 7c. AudioCategory.Pause, Resume, Stop: pure ret
