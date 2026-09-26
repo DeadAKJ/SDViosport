@@ -19,25 +19,33 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.1.9-fix-audiocategory-fieldaccess'
+version_name = 'v1.2.0-touch-overlay-settings-menu'
 
-changelog_content = """Version: v1.1.9-fix-audiocategory-fieldaccess
+changelog_content = """Version: v1.2.0-touch-overlay-settings-menu
 Date: 2026-09-26
 
 Changes:
-1. Fix Freeze / Failure to Advance Past ConcernedApe Splash Screen (FieldAccessException in AudioCategory.SetVolume):
-   - Root Cause:
-     * In v1.1.8, `AudioCategory.SetVolume` was updated to iterate over `AudioEngine.ActiveCues` and match `AudioEngine._categories[sound._categoryID] == this`.
-     * However, in `MonoGame.Framework.dll`, `AudioEngine._categories`, `Cue._curSound`, and `XactSound._categoryID` had private visibility (`IsPrivate = true`).
-     * When `Game1.updateMusic()` invoked `musicCategory.SetVolume(musicPlayerVolume)` during the startup intro fade, the runtime security / AOT verifier threw:
-       `FieldAccessException: Field Microsoft.Xna.Framework.Audio.AudioEngine:_categories is inaccessible from method Microsoft.Xna.Framework.Audio.AudioCategory:SetVolume (single)`
-     * Because this unhandled exception crashed `Game1.Update()` on every tick, the update loop could not proceed to transition from the ConcernedApe screen to the Title Menu.
-   - Fix:
-     * Made `AudioEngine._categories`, `AudioEngine.ActiveCues`, `AudioEngine.UpdateLock`, `Cue._curSound`, `XactSound._categoryID`, `XactSound.UpdateCategoryVolume`, and `AudioCategory` fields public (`IsPublic = true; IsPrivate = false;`).
-     * Added an overarching `try ... catch (Exception)` handler inside `AudioCategory.SetVolume`:
-       - Safely enters and exits `Monitor` on `UpdateLock` in both normal and exceptional flows.
-       - Guarantees `SetVolume` never throws an unhandled exception into `Game1.updateMusic()` or the game update loop.
-     * Game now advances cleanly through the ConcernedApe logo into Title Menu and save files with responsive audio fading.
+1. Interactive Touch Overlay Settings Menu & Customization:
+   - Added a dedicated [SET] button to the top utility bar of the touch overlay.
+   - Built an interactive on-screen Settings Menu modal:
+     * Overlay Opacity adjustment (20% - 100%).
+     * Overlay Scale / Size adjustment (60% - 150%).
+     * Handedness Layout preset (Right-Handed vs. Left-Handed swap with 1 tap).
+     * Joystick Deadzone selector (Low 0.15, Normal 0.25, High 0.35).
+     * Toggle visibility of Keyboard [KEY] and Menu [MENU] buttons.
+     * Toggle Screen Tap Click (simulating mouse clicks when tapping screen outside controls).
+     * Reset to Defaults button.
+     * Save & Close button.
+   - Built Full Drag-and-Drop Repositioning ("Edit Layout") mode:
+     * Users can freely drag and reposition the virtual joystick base anywhere on screen.
+     * Users can freely drag and reposition the action buttons diamond anywhere on screen.
+     * Uses normalized screen coordinates so layouts automatically adjust across device rotations and screen resolutions.
+   - Integrated Built-in 5x7 Retro Pixel Font (`OverlayFont.cs`):
+     * Renders crisp button labels ("A", "B", "X", "Y", "SET", "KEY", "MENU", "HIDE") directly on controls.
+     * Renders complete settings menu with zero external font asset or content pipeline dependencies.
+   - Persistent Configuration (`TouchOverlaySettings.cs`):
+     * Automatically saves all settings to `touch_overlay_config.json` in Documents directory.
+     * Automatically reloads user preferences on startup across sessions.
 """
 
 

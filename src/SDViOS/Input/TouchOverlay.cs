@@ -66,12 +66,17 @@ namespace SDViOS.Input
             base.LoadContent();
         }
 
+        private int _lastWidth = -1;
+        private int _lastHeight = -1;
+
         private void TryInitializePad()
         {
             if (!_padInitialized && GraphicsDevice != null)
             {
                 try
                 {
+                    _lastWidth = GraphicsDevice.Viewport.Width;
+                    _lastHeight = GraphicsDevice.Viewport.Height;
                     TouchVirtualPad.Instance.Initialize(GraphicsDevice);
                     _padInitialized = true;
                     EngineLogger.Log("[TouchOverlay] TouchVirtualPad initialized successfully.");
@@ -83,7 +88,14 @@ namespace SDViOS.Input
             }
             else if (_padInitialized && GraphicsDevice != null)
             {
-                TouchVirtualPad.Instance.UpdateLayout(GraphicsDevice.Viewport.Width, GraphicsDevice.Viewport.Height);
+                int w = GraphicsDevice.Viewport.Width;
+                int h = GraphicsDevice.Viewport.Height;
+                if (w != _lastWidth || h != _lastHeight)
+                {
+                    _lastWidth = w;
+                    _lastHeight = h;
+                    TouchVirtualPad.Instance.UpdateLayout(w, h);
+                }
             }
         }
 
