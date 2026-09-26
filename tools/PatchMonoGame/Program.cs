@@ -941,16 +941,69 @@ class Program
                 Console.WriteLine("Safeguarded AudioCategory.AddSound (pure no-op ret).");
             }
 
-            // 7b. AudioCategory.SetVolume: cleanly set _volume[0] = volume
+            // 7b. AudioCategory.SetVolume: cleanly set _volume[0] = volume and propagate to ActiveCues
             var setVolMethod = audioCategoryType.Methods.FirstOrDefault(m => m.Name == "SetVolume");
-            if (setVolMethod != null && catVolumeField != null)
+            var catEngineField = audioCategoryType.Fields.FirstOrDefault(f => f.Name == "_engine");
+            var aeType = module.GetType("Microsoft.Xna.Framework.Audio.AudioEngine");
+            var cueType = module.GetType("Microsoft.Xna.Framework.Audio.Cue");
+
+            if (setVolMethod != null && catVolumeField != null && catEngineField != null && aeType != null && cueType != null && xactSoundType != null)
             {
+                var aeActiveCuesField = aeType.Fields.FirstOrDefault(f => f.Name == "ActiveCues");
+                var aeUpdateLockField = aeType.Fields.FirstOrDefault(f => f.Name == "UpdateLock");
+                var aeCategoriesField = aeType.Fields.FirstOrDefault(f => f.Name == "_categories");
+                var cueCurSoundField = cueType.Fields.FirstOrDefault(f => f.Name == "_curSound");
+                var cueGetIsDisposed = cueType.Methods.FirstOrDefault(m => m.Name == "get_IsDisposed");
+                var xsCategoryIDField = xactSoundType.Fields.FirstOrDefault(f => f.Name == "_categoryID");
+                var xsUpdateCatVolMeth = xactSoundType.Methods.FirstOrDefault(m => m.Name == "UpdateCategoryVolume");
+
+                var aeUpd = aeType.Methods.FirstOrDefault(m => m.Name == "Update");
+                MethodReference? listGetItem = null;
+                MethodReference? listGetCount = null;
+                MethodReference? monitorEnter = null;
+                MethodReference? monitorExit = null;
+
+                if (aeUpd != null && aeUpd.HasBody)
+                {
+                    foreach (var inst in aeUpd.Body.Instructions)
+                    {
+                        if (inst.Operand is MethodReference mr)
+                        {
+                            if (mr.Name == "get_Item") listGetItem = mr;
+                            else if (mr.Name == "get_Count") listGetCount = mr;
+                            else if (mr.Name == "Enter" && mr.DeclaringType.Name == "Monitor") monitorEnter = mr;
+                            else if (mr.Name == "Exit" && mr.DeclaringType.Name == "Monitor") monitorExit = mr;
+                        }
+                    }
+                }
+
                 var argExCtor = module.ImportReference(typeof(ArgumentException).GetConstructor(new[] { typeof(string) }));
                 setVolMethod.Body.Instructions.Clear();
                 setVolMethod.Body.ExceptionHandlers.Clear();
                 setVolMethod.Body.Variables.Clear();
+                setVolMethod.Body.InitLocals = true;
+
+                var locActiveCues = new VariableDefinition(aeActiveCuesField.FieldType);
+                var locLockObj = new VariableDefinition(module.TypeSystem.Object);
+                var locLockTaken = new VariableDefinition(module.TypeSystem.Boolean);
+                var locCategories = new VariableDefinition(aeCategoriesField.FieldType);
+                var locI = new VariableDefinition(module.TypeSystem.Int32);
+                var locCue = new VariableDefinition(cueType);
+                var locSound = new VariableDefinition(xactSoundType);
+                var locCatId = new VariableDefinition(module.TypeSystem.UInt32);
+
+                setVolMethod.Body.Variables.Add(locActiveCues);
+                setVolMethod.Body.Variables.Add(locLockObj);
+                setVolMethod.Body.Variables.Add(locLockTaken);
+                setVolMethod.Body.Variables.Add(locCategories);
+                setVolMethod.Body.Variables.Add(locI);
+                setVolMethod.Body.Variables.Add(locCue);
+                setVolMethod.Body.Variables.Add(locSound);
+                setVolMethod.Body.Variables.Add(locCatId);
+
                 var ilVol = setVolMethod.Body.GetILProcessor();
                 var lblOk = ilVol.Create(OpCodes.Ldarg_0);
+                var lblEnd = ilVol.Create(OpCodes.Ret);
 
                 // if (volume < 0.0f) throw new ArgumentException("The volume must be positive.");
                 ilVol.Emit(OpCodes.Ldarg_1);
@@ -977,9 +1030,151 @@ class Program
                 ilVol.Emit(OpCodes.Ldc_I4_0);
                 ilVol.Emit(OpCodes.Ldarg_1);
                 ilVol.Emit(OpCodes.Stelem_R4);
+
+                // Check dependencies for ActiveCues volume propagation
+                if (aeActiveCuesField != null && aeUpdateLockField != null && aeCategoriesField != null &&
+                    cueCurSoundField != null && cueGetIsDisposed != null && xsCategoryIDField != null &&
+                    xsUpdateCatVolMeth != null && listGetItem != null && listGetCount != null &&
+                    monitorEnter != null && monitorExit != null)
+                {
+                    // if (this._engine == null) return;
+                    ilVol.Emit(OpCodes.Ldarg_0);
+                    ilVol.Emit(OpCodes.Ldfld, catEngineField);
+                    ilVol.Emit(OpCodes.Brfalse, lblEnd);
+
+                    // var activeCues = this._engine.ActiveCues;
+                    // if (activeCues == null) return;
+                    ilVol.Emit(OpCodes.Ldarg_0);
+                    ilVol.Emit(OpCodes.Ldfld, catEngineField);
+                    ilVol.Emit(OpCodes.Ldfld, aeActiveCuesField);
+                    ilVol.Emit(OpCodes.Stloc, locActiveCues);
+                    ilVol.Emit(OpCodes.Ldloc, locActiveCues);
+                    ilVol.Emit(OpCodes.Brfalse, lblEnd);
+
+                    // var lockObj = this._engine.UpdateLock;
+                    // if (lockObj == null) lockObj = activeCues;
+                    ilVol.Emit(OpCodes.Ldarg_0);
+                    ilVol.Emit(OpCodes.Ldfld, catEngineField);
+                    ilVol.Emit(OpCodes.Ldfld, aeUpdateLockField);
+                    ilVol.Emit(OpCodes.Dup);
+                    var lblGotLockObj = ilVol.Create(OpCodes.Stloc, locLockObj);
+                    ilVol.Emit(OpCodes.Brtrue_S, lblGotLockObj);
+                    ilVol.Emit(OpCodes.Pop);
+                    ilVol.Emit(OpCodes.Ldloc, locActiveCues);
+                    ilVol.Append(lblGotLockObj);
+
+                    // var categories = this._engine._categories;
+                    ilVol.Emit(OpCodes.Ldarg_0);
+                    ilVol.Emit(OpCodes.Ldfld, catEngineField);
+                    ilVol.Emit(OpCodes.Ldfld, aeCategoriesField);
+                    ilVol.Emit(OpCodes.Stloc, locCategories);
+
+                    // Monitor.Enter(lockObj, ref lockTaken)
+                    ilVol.Emit(OpCodes.Ldc_I4_0);
+                    ilVol.Emit(OpCodes.Stloc, locLockTaken);
+                    ilVol.Emit(OpCodes.Ldloc, locLockObj);
+                    ilVol.Emit(OpCodes.Ldloca, locLockTaken);
+                    ilVol.Emit(OpCodes.Call, monitorEnter);
+
+                    // Try block start:
+                    var tryStart = ilVol.Create(OpCodes.Ldc_I4_0); // i = 0
+                    ilVol.Append(tryStart);
+                    ilVol.Emit(OpCodes.Stloc, locI);
+
+                    var loopCheck = ilVol.Create(OpCodes.Ldloc, locI);
+                    var loopBody = ilVol.Create(OpCodes.Ldloc, locActiveCues);
+                    ilVol.Emit(OpCodes.Br, loopCheck);
+
+                    // Loop body:
+                    ilVol.Append(loopBody);
+                    ilVol.Emit(OpCodes.Ldloc, locI);
+                    ilVol.Emit(OpCodes.Callvirt, listGetItem); // cue = activeCues[i]
+                    ilVol.Emit(OpCodes.Stloc, locCue);
+
+                    var loopNext = ilVol.Create(OpCodes.Ldloc, locI);
+
+                    // if (cue == null) goto loopNext;
+                    ilVol.Emit(OpCodes.Ldloc, locCue);
+                    ilVol.Emit(OpCodes.Brfalse, loopNext);
+
+                    // if (cue.IsDisposed) goto loopNext;
+                    ilVol.Emit(OpCodes.Ldloc, locCue);
+                    ilVol.Emit(OpCodes.Callvirt, cueGetIsDisposed);
+                    ilVol.Emit(OpCodes.Brtrue, loopNext);
+
+                    // var sound = cue._curSound;
+                    // if (sound == null) goto loopNext;
+                    ilVol.Emit(OpCodes.Ldloc, locCue);
+                    ilVol.Emit(OpCodes.Ldfld, cueCurSoundField);
+                    ilVol.Emit(OpCodes.Stloc, locSound);
+                    ilVol.Emit(OpCodes.Ldloc, locSound);
+                    ilVol.Emit(OpCodes.Brfalse, loopNext);
+
+                    // if (categories == null) goto loopNext;
+                    ilVol.Emit(OpCodes.Ldloc, locCategories);
+                    ilVol.Emit(OpCodes.Brfalse, loopNext);
+
+                    // uint catId = sound._categoryID;
+                    // if (catId >= categories.Length) goto loopNext;
+                    ilVol.Emit(OpCodes.Ldloc, locSound);
+                    ilVol.Emit(OpCodes.Ldfld, xsCategoryIDField);
+                    ilVol.Emit(OpCodes.Stloc, locCatId);
+
+                    ilVol.Emit(OpCodes.Ldloc, locCatId);
+                    ilVol.Emit(OpCodes.Ldloc, locCategories);
+                    ilVol.Emit(OpCodes.Ldlen);
+                    ilVol.Emit(OpCodes.Bge_Un, loopNext);
+
+                    // if (categories[catId] != this) goto loopNext;
+                    ilVol.Emit(OpCodes.Ldloc, locCategories);
+                    ilVol.Emit(OpCodes.Ldloc, locCatId);
+                    ilVol.Emit(OpCodes.Ldelem_Ref);
+                    ilVol.Emit(OpCodes.Ldarg_0);
+                    ilVol.Emit(OpCodes.Bne_Un, loopNext);
+
+                    // sound.UpdateCategoryVolume(volume);
+                    ilVol.Emit(OpCodes.Ldloc, locSound);
+                    ilVol.Emit(OpCodes.Ldarg_1);
+                    ilVol.Emit(OpCodes.Callvirt, xsUpdateCatVolMeth);
+
+                    // loopNext: i++
+                    ilVol.Append(loopNext);
+                    ilVol.Emit(OpCodes.Ldc_I4_1);
+                    ilVol.Emit(OpCodes.Add);
+                    ilVol.Emit(OpCodes.Stloc, locI);
+
+                    // loopCheck: if (i < activeCues.Count) goto loopBody;
+                    ilVol.Append(loopCheck);
+                    ilVol.Emit(OpCodes.Ldloc, locActiveCues);
+                    ilVol.Emit(OpCodes.Callvirt, listGetCount);
+                    ilVol.Emit(OpCodes.Blt, loopBody);
+
+                    var tryEnd = ilVol.Create(OpCodes.Leave_S, lblEnd);
+                    ilVol.Append(tryEnd);
+
+                    // Finally block:
+                    var finallyStart = ilVol.Create(OpCodes.Ldloc, locLockTaken);
+                    ilVol.Append(finallyStart);
+                    var finallyEnd = ilVol.Create(OpCodes.Endfinally);
+                    ilVol.Emit(OpCodes.Brfalse_S, finallyEnd);
+                    ilVol.Emit(OpCodes.Ldloc, locLockObj);
+                    ilVol.Emit(OpCodes.Call, monitorExit);
+                    ilVol.Append(finallyEnd);
+
+                    var handler = new ExceptionHandler(ExceptionHandlerType.Finally)
+                    {
+                        TryStart = tryStart,
+                        TryEnd = finallyStart,
+                        HandlerStart = finallyStart,
+                        HandlerEnd = lblEnd
+                    };
+                    setVolMethod.Body.ExceptionHandlers.Add(handler);
+                }
+
+                ilVol.Append(lblEnd);
                 ilVol.Emit(OpCodes.Ret);
 
-                Console.WriteLine("Rebuilt AudioCategory.SetVolume cleanly with null check.");
+                Console.WriteLine("Rebuilt AudioCategory.SetVolume cleanly with null check and active cue volume propagation.");
             }
 
             // 7c. AudioCategory.Pause, Resume, Stop: pure ret

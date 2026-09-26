@@ -19,22 +19,26 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.1.7-fix-cecil-metadatareader-argumentexception'
+version_name = 'v1.1.8-fix-music-delay'
 
-changelog_content = """Version: v1.1.7-fix-cecil-metadatareader-argumentexception
+changelog_content = """Version: v1.1.8-fix-music-delay
 Date: 2026-09-26
 
 Changes:
-1. Fix Runtime Patcher Abort on Devices (ArgumentException in Mono.Cecil.MetadataReader.GetMember):
+1. Fix Delayed Music Playback / Silent Playback on Track Transition:
    - Root Cause:
-     * In v1.1.6, `PatchNetRectangle` attempted to remove the `Value` property (`netRectType.Properties.Remove(valProp)`).
-     * On devices that previously booted v1.1.5, the on-disk `Stardew Valley.dll` had MethodSemantics metadata entries associating `get_Value` and `set_Value` with the `Value` property token.
-     * When `asm.Write` was invoked, Cecil's `ImmediateModuleReader.ReadAllSemantics` tried to resolve the property token via `MetadataReader.GetMember[PropertyDefinition]`. Because the property was removed from `Properties`, Cecil threw `ArgumentException: Arg_ArgumentException`.
-     * `EnsureGameRunnerPatched` caught the exception and aborted without saving the patched bytes, leaving the device running the broken v1.1.5 DLL where `get_X()` threw `MissingFieldException: NetFieldBase`2.value`.
+     * In `Game1.updateMusic()`, Stardew Valley transitions tracks by ducking `musicPlayerVolume -= 0.01f` per frame down to 0.0f.
+     * When volume hits 0.0f, SDV starts the new cue: `currentSong = soundBank.GetCue(track); currentSong.Play();`.
+     * At play time, MonoGame's `XactSound.Play()` initializes instance volume as `_volume * _cueVolume * AudioCategory._volume[0]`. Because `_volume[0]` was 0.0f, the OpenAL hardware source gain was set to 0.0f (completely silent).
+     * SDV then fades the track in over 75 frames (1.25s) by incrementing `musicPlayerVolume += 0.01f` and calling `musicCategory.SetVolume(musicPlayerVolume)`.
+     * However, in `lib/MonoGame.Framework.dll`, `AudioCategory.SetVolume` had been gutted to only store `this._volume[0] = volume` without updating any active sound instances or OpenAL hardware sources.
+     * As a result, the newly started song played in complete silence for its entire duration (~2-3 minutes) until it stopped, at which point SDV queued the next track (which was audible because `_volume[0]` had already reached 0.75f). This caused the user-reported music delay.
    - Fix:
-     * Retained the `Value` property on `NetRectangle` and re-linked its `GetMethod` to concrete `get_Value` and `SetMethod` to `set_Value`. Verified via offline tests that having `Value` in `Properties` causes zero XmlSerializer issues.
-     * With `Value` retained, Cecil's metadata reader maintains token integrity and `asm.Write` succeeds seamlessly without `ArgumentException`.
-     * Verified self-healing on existing assemblies with `valProp`: the patcher successfully writes the repaired assembly to disk, resolving the runtime `MissingFieldException` on `get_X` and allowing save games to load properly.
+     * Patched `AudioCategory.SetVolume(float volume)` in `MonoGame.Framework.dll` via Cecil.
+     * Sets `this._volume[0] = volume` and synchronizes on `this._engine.UpdateLock`.
+     * Iterates through `this._engine.ActiveCues`, identifies active cues belonging to the category (`sound._categoryID`), and invokes `sound.UpdateCategoryVolume(volume)`.
+     * `UpdateCategoryVolume` calls `_wave.Volume = ...`, which immediately updates the underlying OpenAL hardware source gain (`AL.Source(SourceId, ALSourcef.Gain, gain)`).
+     * Background music, ambient sounds, and category volume adjustments now fade in smoothly and play immediately as intended.
 """
 
 
