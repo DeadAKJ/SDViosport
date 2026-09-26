@@ -19,33 +19,28 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.2.0-touch-overlay-settings-menu'
+version_name = 'v1.2.1-mouse-modes-trackpad-point-and-click'
 
-changelog_content = """Version: v1.2.0-touch-overlay-settings-menu
+changelog_content = """Version: v1.2.1-mouse-modes-trackpad-point-and-click
 Date: 2026-09-26
 
 Changes:
-1. Interactive Touch Overlay Settings Menu & Customization:
-   - Added a dedicated [SET] button to the top utility bar of the touch overlay.
-   - Built an interactive on-screen Settings Menu modal:
-     * Overlay Opacity adjustment (20% - 100%).
-     * Overlay Scale / Size adjustment (60% - 150%).
-     * Handedness Layout preset (Right-Handed vs. Left-Handed swap with 1 tap).
-     * Joystick Deadzone selector (Low 0.15, Normal 0.25, High 0.35).
-     * Toggle visibility of Keyboard [KEY] and Menu [MENU] buttons.
-     * Toggle Screen Tap Click (simulating mouse clicks when tapping screen outside controls).
-     * Reset to Defaults button.
-     * Save & Close button.
-   - Built Full Drag-and-Drop Repositioning ("Edit Layout") mode:
-     * Users can freely drag and reposition the virtual joystick base anywhere on screen.
-     * Users can freely drag and reposition the action buttons diamond anywhere on screen.
-     * Uses normalized screen coordinates so layouts automatically adjust across device rotations and screen resolutions.
-   - Integrated Built-in 5x7 Retro Pixel Font (`OverlayFont.cs`):
-     * Renders crisp button labels ("A", "B", "X", "Y", "SET", "KEY", "MENU", "HIDE") directly on controls.
-     * Renders complete settings menu with zero external font asset or content pipeline dependencies.
-   - Persistent Configuration (`TouchOverlaySettings.cs`):
-     * Automatically saves all settings to `touch_overlay_config.json` in Documents directory.
-     * Automatically reloads user preferences on startup across sessions.
+1. Dual Mouse Control Modes in Settings Menu:
+   - Added `MouseMode` selector directly in the touch overlay settings menu:
+     * Mode 1: `POINT & CLICK` (Direct Touch / Absolute Positioning):
+       - Tapping or dragging anywhere on screen outside virtual buttons moves the cursor directly under the finger and issues left clicks/drags.
+     * Mode 2: `TRACKPAD` (Steam Link Style Relative Virtual Trackpad):
+       - The entire screen outside virtual buttons acts as a smooth, relative laptop trackpad.
+       - A visible virtual mouse cursor pointer (with classic arrow outline) is rendered on screen.
+       - Moving a finger slides the cursor relatively across the display with customizable sensitivity (`0.4X` to `3.0X`).
+       - Single-finger tap sends Left Click at the current cursor position.
+       - Two-finger tap sends Right Click at the current cursor position.
+       - Action buttons A (Left Click) and X (Right Click) can also be used while aiming with the trackpad cursor for maximum precision.
+     * Mode 3: `DISABLED`:
+       - Background touches outside buttons do not trigger mouse events.
+   - Added `TRACKPAD SPEED` adjustment controls (`[ - ]` / `[ + ]`) to fine-tune cursor sensitivity.
+   - Cursor rendering with high-contrast border (`OverlayFont.DrawMouseCursor`) ensures visibility on all terrain and menus.
+   - Mouse mode and trackpad sensitivity automatically persist to `touch_overlay_config.json`.
 """
 
 

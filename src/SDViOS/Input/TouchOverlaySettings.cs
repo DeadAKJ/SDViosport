@@ -6,6 +6,13 @@ using SDViOS.Loader;
 
 namespace SDViOS.Input
 {
+    public enum MouseMode
+    {
+        PointAndClick = 0,
+        Trackpad = 1,
+        Disabled = 2
+    }
+
     public class TouchOverlaySettings
     {
         public static TouchOverlaySettings Instance { get; } = new TouchOverlaySettings();
@@ -17,6 +24,10 @@ namespace SDViOS.Input
         public bool ShowKeyboardBtn { get; set; } = true;
         public bool ShowMenuBtn { get; set; } = true;
         public bool SimulateMouseOnTap { get; set; } = true;
+
+        // Mouse modes
+        public MouseMode MouseControlMode { get; set; } = MouseMode.PointAndClick;
+        public float TrackpadSensitivity { get; set; } = 1.2f;
 
         public bool CustomPositionsSet { get; set; } = false;
         public float JoystickNormX { get; set; } = 0.15f;
@@ -69,6 +80,13 @@ namespace SDViOS.Input
                         ShowMenuBtn = sm;
                     else if (key.Equals("SimulateMouseOnTap", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool smt))
                         SimulateMouseOnTap = smt;
+                    else if (key.Equals("MouseControlMode", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (Enum.TryParse<MouseMode>(val, true, out var mm)) MouseControlMode = mm;
+                        else if (int.TryParse(val, out int mmi)) MouseControlMode = (MouseMode)Math.Clamp(mmi, 0, 2);
+                    }
+                    else if (key.Equals("TrackpadSensitivity", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float ts))
+                        TrackpadSensitivity = Math.Clamp(ts, 0.4f, 3.0f);
                     else if (key.Equals("CustomPositionsSet", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool cps))
                         CustomPositionsSet = cps;
                     else if (key.Equals("JoystickNormX", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float jx))
@@ -81,7 +99,7 @@ namespace SDViOS.Input
                         ButtonsNormY = Math.Clamp(by, 0.05f, 0.95f);
                 }
 
-                EngineLogger.Log($"[TouchOverlaySettings] Loaded settings: Opacity={Opacity:F2}, Scale={Scale:F2}, LeftHanded={LeftHanded}, Deadzone={Deadzone:F2}");
+                EngineLogger.Log($"[TouchOverlaySettings] Loaded settings: Opacity={Opacity:F2}, Scale={Scale:F2}, LeftHanded={LeftHanded}, Deadzone={Deadzone:F2}, MouseMode={MouseControlMode}, Sensitivity={TrackpadSensitivity:F1}");
             }
             catch (Exception ex)
             {
@@ -102,6 +120,8 @@ namespace SDViOS.Input
                     $"  \"ShowKeyboardBtn\": {(ShowKeyboardBtn ? "true" : "false")},\n" +
                     $"  \"ShowMenuBtn\": {(ShowMenuBtn ? "true" : "false")},\n" +
                     $"  \"SimulateMouseOnTap\": {(SimulateMouseOnTap ? "true" : "false")},\n" +
+                    $"  \"MouseControlMode\": \"{MouseControlMode}\",\n" +
+                    $"  \"TrackpadSensitivity\": {TrackpadSensitivity.ToString("0.00", CultureInfo.InvariantCulture)},\n" +
                     $"  \"CustomPositionsSet\": {(CustomPositionsSet ? "true" : "false")},\n" +
                     $"  \"JoystickNormX\": {JoystickNormX.ToString("0.000", CultureInfo.InvariantCulture)},\n" +
                     $"  \"JoystickNormY\": {JoystickNormY.ToString("0.000", CultureInfo.InvariantCulture)},\n" +
@@ -133,6 +153,8 @@ namespace SDViOS.Input
             ShowKeyboardBtn = true;
             ShowMenuBtn = true;
             SimulateMouseOnTap = true;
+            MouseControlMode = MouseMode.PointAndClick;
+            TrackpadSensitivity = 1.2f;
             CustomPositionsSet = false;
             JoystickNormX = 0.15f;
             JoystickNormY = 0.82f;

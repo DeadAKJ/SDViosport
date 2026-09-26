@@ -67,6 +67,16 @@ namespace SDViOS.Input
         private Rectangle _btnToggleRect;
         private Rectangle _btnSettingsRect;
 
+        // Trackpad mode state (Steam Link style relative touch mouse)
+        private Vector2 _trackpadCursorPos = new Vector2(896, 414);
+        private int _trackpadPrimaryTouchId = -1;
+        private Vector2 _trackpadLastTouchPos;
+        private float _trackpadTouchStartTime;
+        private float _trackpadTotalDistMoved;
+        private int _trackpadSecondTouchId = -1;
+        private int _trackpadLeftClickFrames = 0;
+        private int _trackpadRightClickFrames = 0;
+
         // Edit layout mode tracking
         private int _activeDragTarget = 0; // 0: None, 1: Joystick, 2: Buttons
         private int _dragTouchId = -1;
@@ -83,7 +93,9 @@ namespace SDViOS.Input
         private Rectangle _btnDeadzone;
         private Rectangle _btnToggleKeyboard;
         private Rectangle _btnToggleMenu;
-        private Rectangle _btnToggleMouseTap;
+        private Rectangle _btnToggleMouseMode;
+        private Rectangle _btnSensitivityMinus;
+        private Rectangle _btnSensitivityPlus;
         private Rectangle _btnEditLayout;
         private Rectangle _btnResetDefaults;
         private Rectangle _btnSaveClose;
@@ -109,6 +121,7 @@ namespace SDViOS.Input
         public void Initialize(GraphicsDevice graphicsDevice)
         {
             Settings.Load();
+            _trackpadCursorPos = new Vector2(graphicsDevice.Viewport.Width / 2f, graphicsDevice.Viewport.Height / 2f);
             UpdateLayout(graphicsDevice.Viewport.Width, graphicsDevice.Viewport.Height);
             GenerateTextures(graphicsDevice);
             EnsureReflection();
@@ -204,44 +217,48 @@ namespace SDViOS.Input
 
             // Settings Modal layout
             int modalW = Math.Min(680, width - 40);
-            int modalH = Math.Min(490, height - 40);
+            int modalH = Math.Min(530, height - 30);
             _settingsModalRect = new Rectangle((width - modalW) / 2, (height - modalH) / 2, modalW, modalH);
 
             _settingsCloseRect = new Rectangle(_settingsModalRect.Right - 38, _settingsModalRect.Top + 8, 30, 30);
 
-            int startY = _settingsModalRect.Top + 54;
-            int rowSpacing = 42;
+            int startY = _settingsModalRect.Top + 48;
+            int rowSpacing = 37;
             int ctrlX = _settingsModalRect.Left + 260;
 
             // Row 0: Opacity
-            _btnOpacityMinus = new Rectangle(ctrlX, startY, 40, 30);
-            _btnOpacityPlus = new Rectangle(ctrlX + 110, startY, 40, 30);
+            _btnOpacityMinus = new Rectangle(ctrlX, startY, 40, 28);
+            _btnOpacityPlus = new Rectangle(ctrlX + 110, startY, 40, 28);
 
             // Row 1: Scale
-            _btnScaleMinus = new Rectangle(ctrlX, startY + rowSpacing, 40, 30);
-            _btnScalePlus = new Rectangle(ctrlX + 110, startY + rowSpacing, 40, 30);
+            _btnScaleMinus = new Rectangle(ctrlX, startY + rowSpacing, 40, 28);
+            _btnScalePlus = new Rectangle(ctrlX + 110, startY + rowSpacing, 40, 28);
 
             // Row 2: Handedness
-            _btnHandedness = new Rectangle(ctrlX, startY + rowSpacing * 2, 170, 30);
+            _btnHandedness = new Rectangle(ctrlX, startY + rowSpacing * 2, 170, 28);
 
             // Row 3: Deadzone
-            _btnDeadzone = new Rectangle(ctrlX, startY + rowSpacing * 3, 170, 30);
+            _btnDeadzone = new Rectangle(ctrlX, startY + rowSpacing * 3, 170, 28);
 
             // Row 4: Extra Buttons
-            _btnToggleKeyboard = new Rectangle(ctrlX, startY + rowSpacing * 4, 75, 30);
-            _btnToggleMenu = new Rectangle(ctrlX + 90, startY + rowSpacing * 4, 75, 30);
+            _btnToggleKeyboard = new Rectangle(ctrlX, startY + rowSpacing * 4, 80, 28);
+            _btnToggleMenu = new Rectangle(ctrlX + 90, startY + rowSpacing * 4, 80, 28);
 
-            // Row 5: Screen Tap
-            _btnToggleMouseTap = new Rectangle(ctrlX, startY + rowSpacing * 5, 170, 30);
+            // Row 5: Mouse Mode (Point & Click / Trackpad / Disabled)
+            _btnToggleMouseMode = new Rectangle(ctrlX, startY + rowSpacing * 5, 170, 28);
 
-            // Row 6: Reposition controls
-            _btnEditLayout = new Rectangle(_settingsModalRect.Left + 28, startY + rowSpacing * 6 + 6, modalW - 56, 34);
+            // Row 6: Trackpad Sensitivity
+            _btnSensitivityMinus = new Rectangle(ctrlX, startY + rowSpacing * 6, 40, 28);
+            _btnSensitivityPlus = new Rectangle(ctrlX + 110, startY + rowSpacing * 6, 40, 28);
 
-            // Row 7: Reset & Close
+            // Row 7: Reposition controls
+            _btnEditLayout = new Rectangle(_settingsModalRect.Left + 28, startY + rowSpacing * 7 + 4, modalW - 56, 32);
+
+            // Row 8: Reset & Close
             int botBtnW = (modalW - 70) / 2;
-            int botY = _settingsModalRect.Bottom - 48;
-            _btnResetDefaults = new Rectangle(_settingsModalRect.Left + 28, botY, botBtnW, 36);
-            _btnSaveClose = new Rectangle(_settingsModalRect.Left + 42 + botBtnW, botY, botBtnW, 36);
+            int botY = _settingsModalRect.Bottom - 44;
+            _btnResetDefaults = new Rectangle(_settingsModalRect.Left + 28, botY, botBtnW, 34);
+            _btnSaveClose = new Rectangle(_settingsModalRect.Left + 42 + botBtnW, botY, botBtnW, 34);
         }
 
         public void Update(GameTime gameTime)
@@ -256,6 +273,18 @@ namespace SDViOS.Input
             ButtonMenu = false;
             SimulatedMouseLeftDown = false;
             SimulatedMouseRightDown = false;
+
+            // Handle momentary click frames from trackpad taps
+            if (_trackpadLeftClickFrames > 0)
+            {
+                SimulatedMouseLeftDown = true;
+                _trackpadLeftClickFrames--;
+            }
+            if (_trackpadRightClickFrames > 0)
+            {
+                SimulatedMouseRightDown = true;
+                _trackpadRightClickFrames--;
+            }
 
             // 1. Process Settings Menu Interaction
             if (IsSettingsOpen)
@@ -315,11 +344,7 @@ namespace SDViOS.Input
 
                 if (!IsVisible)
                 {
-                    if (Settings.SimulateMouseOnTap)
-                    {
-                        SimulatedMousePosition = pt;
-                        SimulatedMouseLeftDown = (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved);
-                    }
+                    HandleBackgroundTouch(touch, pt, gameTime);
                     continue;
                 }
 
@@ -366,12 +391,8 @@ namespace SDViOS.Input
                 }
                 else
                 {
-                    // Direct screen tap outside controls simulates mouse click if enabled
-                    if (Settings.SimulateMouseOnTap)
-                    {
-                        SimulatedMousePosition = pt;
-                        SimulatedMouseLeftDown = (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved);
-                    }
+                    // Touch on background area (outside virtual buttons)
+                    HandleBackgroundTouch(touch, pt, gameTime);
                 }
             }
 
@@ -383,6 +404,87 @@ namespace SDViOS.Input
             }
 
             ForwardInputToGame();
+        }
+
+        private void HandleBackgroundTouch(TouchLocation touch, Point pt, GameTime gameTime)
+        {
+            if (Settings.MouseControlMode == MouseMode.Disabled)
+            {
+                return;
+            }
+
+            if (Settings.MouseControlMode == MouseMode.PointAndClick)
+            {
+                // Direct Point and Click: cursor jumps to touch coordinate
+                SimulatedMousePosition = pt;
+                SimulatedMouseLeftDown = (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved);
+                return;
+            }
+
+            if (Settings.MouseControlMode == MouseMode.Trackpad)
+            {
+                // Steam Link style Trackpad Cursor Mode
+                float curTime = (float)gameTime.TotalGameTime.TotalSeconds;
+
+                if (touch.State == TouchLocationState.Pressed)
+                {
+                    if (_trackpadPrimaryTouchId == -1)
+                    {
+                        _trackpadPrimaryTouchId = touch.Id;
+                        _trackpadLastTouchPos = touch.Position;
+                        _trackpadTouchStartTime = curTime;
+                        _trackpadTotalDistMoved = 0f;
+                    }
+                    else if (_trackpadSecondTouchId == -1 && touch.Id != _trackpadPrimaryTouchId)
+                    {
+                        // Second finger touch down
+                        _trackpadSecondTouchId = touch.Id;
+                    }
+                }
+                else if (touch.State == TouchLocationState.Moved)
+                {
+                    if (touch.Id == _trackpadPrimaryTouchId)
+                    {
+                        Vector2 delta = touch.Position - _trackpadLastTouchPos;
+                        _trackpadLastTouchPos = touch.Position;
+                        _trackpadTotalDistMoved += delta.Length();
+
+                        _trackpadCursorPos += delta * Settings.TrackpadSensitivity;
+                        _trackpadCursorPos.X = Math.Clamp(_trackpadCursorPos.X, 0, _viewportWidth - 1);
+                        _trackpadCursorPos.Y = Math.Clamp(_trackpadCursorPos.Y, 0, _viewportHeight - 1);
+                    }
+                }
+                else if (touch.State == TouchLocationState.Released)
+                {
+                    if (touch.Id == _trackpadPrimaryTouchId)
+                    {
+                        float duration = curTime - _trackpadTouchStartTime;
+
+                        // Check if two-finger tap occurred (Right Click)
+                        if (_trackpadSecondTouchId != -1)
+                        {
+                            _trackpadRightClickFrames = 8;
+                            _trackpadSecondTouchId = -1;
+                        }
+                        // Single-finger tap (Left Click): short tap with minimal movement
+                        else if (duration < 0.32f && _trackpadTotalDistMoved < 20f)
+                        {
+                            _trackpadLeftClickFrames = 8;
+                        }
+
+                        _trackpadPrimaryTouchId = -1;
+                    }
+                    else if (touch.Id == _trackpadSecondTouchId)
+                    {
+                        // Second finger released while primary was down: trigger Right Click
+                        if (_trackpadPrimaryTouchId != -1)
+                        {
+                            _trackpadRightClickFrames = 8;
+                        }
+                        _trackpadSecondTouchId = -1;
+                    }
+                }
+            }
         }
 
         private void UpdateSettingsTouches(TouchCollection touches)
@@ -469,10 +571,30 @@ namespace SDViOS.Input
                     break;
                 }
 
-                // Simulate mouse tap toggle
-                if (_btnToggleMouseTap.Contains(pt))
+                // Mouse Mode toggle (Point & Click -> Trackpad -> Disabled -> Point & Click)
+                if (_btnToggleMouseMode.Contains(pt))
                 {
-                    Settings.SimulateMouseOnTap = !Settings.SimulateMouseOnTap;
+                    if (Settings.MouseControlMode == MouseMode.PointAndClick)
+                        Settings.MouseControlMode = MouseMode.Trackpad;
+                    else if (Settings.MouseControlMode == MouseMode.Trackpad)
+                        Settings.MouseControlMode = MouseMode.Disabled;
+                    else
+                        Settings.MouseControlMode = MouseMode.PointAndClick;
+
+                    Settings.Save();
+                    break;
+                }
+
+                // Trackpad Sensitivity controls
+                if (_btnSensitivityMinus.Contains(pt))
+                {
+                    Settings.TrackpadSensitivity = (float)Math.Round(Math.Clamp(Settings.TrackpadSensitivity - 0.20f, 0.40f, 3.0f), 1);
+                    Settings.Save();
+                    break;
+                }
+                if (_btnSensitivityPlus.Contains(pt))
+                {
+                    Settings.TrackpadSensitivity = (float)Math.Round(Math.Clamp(Settings.TrackpadSensitivity + 0.20f, 0.40f, 3.0f), 1);
                     Settings.Save();
                     break;
                 }
@@ -491,6 +613,7 @@ namespace SDViOS.Input
                 if (_btnResetDefaults.Contains(pt))
                 {
                     Settings.ResetToDefaults();
+                    _trackpadCursorPos = new Vector2(_viewportWidth / 2f, _viewportHeight / 2f);
                     UpdateLayout(_viewportWidth, _viewportHeight);
                     break;
                 }
@@ -583,6 +706,12 @@ namespace SDViOS.Input
                     SimulatedMouseLeftDown = false;
                     SimulatedMouseRightDown = false;
                     LeftStick = Vector2.Zero;
+                }
+
+                // In Trackpad mode, mouse position is tied to the trackpad cursor
+                if (Settings.MouseControlMode == MouseMode.Trackpad)
+                {
+                    SimulatedMousePosition = new Point((int)_trackpadCursorPos.X, (int)_trackpadCursorPos.Y);
                 }
 
                 bool isLeftDown = SimulatedMouseLeftDown || ButtonA;
@@ -698,7 +827,7 @@ namespace SDViOS.Input
                 bool controlsActive = (LeftStick != Vector2.Zero || ButtonA || ButtonB || ButtonX || ButtonY || ButtonMenu);
                 if (_lastCursorMotionWasMouseField != null)
                 {
-                    if (SimulatedMouseLeftDown)
+                    if (Settings.MouseControlMode == MouseMode.Trackpad || SimulatedMouseLeftDown)
                     {
                         _lastCursorMotionWasMouseField.SetValue(null, true);
                     }
@@ -713,11 +842,11 @@ namespace SDViOS.Input
                     var options = _optionsProp.GetValue(null);
                     if (options != null)
                     {
-                        if (controlsActive)
+                        if (controlsActive && Settings.MouseControlMode != MouseMode.Trackpad)
                         {
                             _gamepadControlsField.SetValue(options, true);
                         }
-                        else if (SimulatedMouseLeftDown)
+                        else if (SimulatedMouseLeftDown || Settings.MouseControlMode == MouseMode.Trackpad)
                         {
                             _gamepadControlsField.SetValue(options, false);
                         }
@@ -852,21 +981,40 @@ namespace SDViOS.Input
                 DrawButton(spriteBatch, _btnMenuRect, "MENU", ButtonMenu ? Color.Orange * 0.9f : Color.DarkOrange * Math.Max(0.5f, alpha), Color.White, 2);
             }
 
-            if (!IsVisible) return;
+            if (IsVisible)
+            {
+                // Draw joystick base & thumb
+                DrawFilledRect(spriteBatch, _joystickBaseRect, Color.Black * (alpha * 0.5f));
+                DrawRectBorder(spriteBatch, _joystickBaseRect, 2, Color.White * (alpha * 0.4f));
 
-            // Draw joystick base & thumb
-            DrawFilledRect(spriteBatch, _joystickBaseRect, Color.Black * (alpha * 0.5f));
-            DrawRectBorder(spriteBatch, _joystickBaseRect, 2, Color.White * (alpha * 0.4f));
+                Rectangle stickThumbRect = new Rectangle((int)(_currentStickPos.X - 25), (int)(_currentStickPos.Y - 25), 50, 50);
+                DrawFilledRect(spriteBatch, stickThumbRect, Color.White * (alpha * 0.85f));
+                DrawRectBorder(spriteBatch, stickThumbRect, 2, Color.Black * (alpha * 0.6f));
 
-            Rectangle stickThumbRect = new Rectangle((int)(_currentStickPos.X - 25), (int)(_currentStickPos.Y - 25), 50, 50);
-            DrawFilledRect(spriteBatch, stickThumbRect, Color.White * (alpha * 0.85f));
-            DrawRectBorder(spriteBatch, stickThumbRect, 2, Color.Black * (alpha * 0.6f));
+                // Draw Action buttons with text labels (A, X, Y, B)
+                DrawButton(spriteBatch, _btnARect, "A", ButtonA ? Color.Lime * 0.95f : Color.DarkGreen * alpha, Color.White, 3);
+                DrawButton(spriteBatch, _btnXRect, "X", ButtonX ? Color.CornflowerBlue * 0.95f : Color.DarkBlue * alpha, Color.White, 3);
+                DrawButton(spriteBatch, _btnYRect, "Y", ButtonY ? Color.Yellow * 0.95f : Color.DarkGoldenrod * alpha, Color.White, 3);
+                DrawButton(spriteBatch, _btnBRect, "B", ButtonB ? Color.Red * 0.95f : Color.DarkRed * alpha, Color.White, 3);
+            }
 
-            // Draw Action buttons with text labels (A, X, Y, B)
-            DrawButton(spriteBatch, _btnARect, "A", ButtonA ? Color.Lime * 0.95f : Color.DarkGreen * alpha, Color.White, 3);
-            DrawButton(spriteBatch, _btnXRect, "X", ButtonX ? Color.CornflowerBlue * 0.95f : Color.DarkBlue * alpha, Color.White, 3);
-            DrawButton(spriteBatch, _btnYRect, "Y", ButtonY ? Color.Yellow * 0.95f : Color.DarkGoldenrod * alpha, Color.White, 3);
-            DrawButton(spriteBatch, _btnBRect, "B", ButtonB ? Color.Red * 0.95f : Color.DarkRed * alpha, Color.White, 3);
+            // Draw Trackpad virtual mouse cursor pointer on screen
+            if (Settings.MouseControlMode == MouseMode.Trackpad)
+            {
+                OverlayFont.DrawMouseCursor(spriteBatch, _pixelTexture, _trackpadCursorPos, 2);
+
+                // Small indicator when clicking
+                if (SimulatedMouseLeftDown || ButtonA)
+                {
+                    Rectangle clickDot = new Rectangle((int)_trackpadCursorPos.X + 2, (int)_trackpadCursorPos.Y + 2, 6, 6);
+                    DrawFilledRect(spriteBatch, clickDot, Color.Lime * 0.9f);
+                }
+                else if (SimulatedMouseRightDown || ButtonX)
+                {
+                    Rectangle clickDot = new Rectangle((int)_trackpadCursorPos.X + 2, (int)_trackpadCursorPos.Y + 2, 6, 6);
+                    DrawFilledRect(spriteBatch, clickDot, Color.Cyan * 0.9f);
+                }
+            }
         }
 
         private void DrawEditLayoutScreen(SpriteBatch sb)
@@ -928,50 +1076,69 @@ namespace SDViOS.Input
             DrawButton(sb, _settingsCloseRect, "X", Color.DarkRed * 0.9f, Color.White, 2);
 
             int startX = _settingsModalRect.Left + 28;
-            int startY = _settingsModalRect.Top + 54;
-            int rowSpacing = 42;
+            int startY = _settingsModalRect.Top + 48;
+            int rowSpacing = 37;
 
             // Row 0: Opacity
-            OverlayFont.DrawString(sb, _pixelTexture, "OVERLAY OPACITY", new Vector2(startX, startY + 7), Color.White, 2);
+            OverlayFont.DrawString(sb, _pixelTexture, "OVERLAY OPACITY", new Vector2(startX, startY + 6), Color.White, 2);
             DrawButton(sb, _btnOpacityMinus, "-", Color.DarkSlateGray, Color.White, 2);
             string opacityStr = $"{(int)(Settings.Opacity * 100)}%";
-            Rectangle opTextRect = new Rectangle(_btnOpacityMinus.Right, startY, _btnOpacityPlus.Left - _btnOpacityMinus.Right, 30);
+            Rectangle opTextRect = new Rectangle(_btnOpacityMinus.Right, startY, _btnOpacityPlus.Left - _btnOpacityMinus.Right, 28);
             OverlayFont.DrawCenteredString(sb, _pixelTexture, opacityStr, opTextRect, Color.Yellow, 2);
             DrawButton(sb, _btnOpacityPlus, "+", Color.DarkSlateGray, Color.White, 2);
 
             // Row 1: Scale
-            OverlayFont.DrawString(sb, _pixelTexture, "OVERLAY SCALE", new Vector2(startX, startY + rowSpacing + 7), Color.White, 2);
+            OverlayFont.DrawString(sb, _pixelTexture, "OVERLAY SCALE", new Vector2(startX, startY + rowSpacing + 6), Color.White, 2);
             DrawButton(sb, _btnScaleMinus, "-", Color.DarkSlateGray, Color.White, 2);
             string scaleStr = $"{(int)(Settings.Scale * 100)}%";
-            Rectangle scTextRect = new Rectangle(_btnScaleMinus.Right, startY + rowSpacing, _btnScalePlus.Left - _btnScaleMinus.Right, 30);
+            Rectangle scTextRect = new Rectangle(_btnScaleMinus.Right, startY + rowSpacing, _btnScalePlus.Left - _btnScaleMinus.Right, 28);
             OverlayFont.DrawCenteredString(sb, _pixelTexture, scaleStr, scTextRect, Color.Yellow, 2);
             DrawButton(sb, _btnScalePlus, "+", Color.DarkSlateGray, Color.White, 2);
 
             // Row 2: Handedness
-            OverlayFont.DrawString(sb, _pixelTexture, "HANDEDNESS", new Vector2(startX, startY + rowSpacing * 2 + 7), Color.White, 2);
+            OverlayFont.DrawString(sb, _pixelTexture, "LAYOUT PRESET", new Vector2(startX, startY + rowSpacing * 2 + 6), Color.White, 2);
             string handStr = Settings.LeftHanded ? "LEFT-HANDED" : "RIGHT-HANDED";
             DrawButton(sb, _btnHandedness, handStr, Settings.LeftHanded ? Color.Purple : Color.SteelBlue, Color.White, 2);
 
             // Row 3: Deadzone
-            OverlayFont.DrawString(sb, _pixelTexture, "STICK DEADZONE", new Vector2(startX, startY + rowSpacing * 3 + 7), Color.White, 2);
+            OverlayFont.DrawString(sb, _pixelTexture, "STICK DEADZONE", new Vector2(startX, startY + rowSpacing * 3 + 6), Color.White, 2);
             string dzStr = Settings.Deadzone <= 0.18f ? "LOW (0.15)" : (Settings.Deadzone <= 0.28f ? "NORMAL (0.25)" : "HIGH (0.35)");
             DrawButton(sb, _btnDeadzone, dzStr, Color.DarkSlateBlue, Color.White, 2);
 
             // Row 4: Extra Buttons
-            OverlayFont.DrawString(sb, _pixelTexture, "KEYBOARD / MENU", new Vector2(startX, startY + rowSpacing * 4 + 7), Color.White, 2);
+            OverlayFont.DrawString(sb, _pixelTexture, "KEYBOARD / MENU", new Vector2(startX, startY + rowSpacing * 4 + 6), Color.White, 2);
             DrawButton(sb, _btnToggleKeyboard, Settings.ShowKeyboardBtn ? "KEY: ON" : "KEY: OFF", Settings.ShowKeyboardBtn ? Color.DarkGreen : Color.DarkSlateGray, Color.White, 2);
             DrawButton(sb, _btnToggleMenu, Settings.ShowMenuBtn ? "MENU: ON" : "MENU: OFF", Settings.ShowMenuBtn ? Color.DarkGreen : Color.DarkSlateGray, Color.White, 2);
 
-            // Row 5: Screen Tap Click
-            OverlayFont.DrawString(sb, _pixelTexture, "SCREEN TAP CLICK", new Vector2(startX, startY + rowSpacing * 5 + 7), Color.White, 2);
-            string tapStr = Settings.SimulateMouseOnTap ? "MOUSE CLICK: ON" : "MOUSE CLICK: OFF";
-            DrawButton(sb, _btnToggleMouseTap, tapStr, Settings.SimulateMouseOnTap ? Color.DarkGreen : Color.DarkRed, Color.White, 2);
+            // Row 5: Mouse Mode (Point & Click / Trackpad / Disabled)
+            OverlayFont.DrawString(sb, _pixelTexture, "MOUSE MODE", new Vector2(startX, startY + rowSpacing * 5 + 6), Color.White, 2);
+            string modeStr = Settings.MouseControlMode switch
+            {
+                MouseMode.PointAndClick => "POINT & CLICK",
+                MouseMode.Trackpad => "TRACKPAD",
+                _ => "DISABLED"
+            };
+            Color modeCol = Settings.MouseControlMode switch
+            {
+                MouseMode.PointAndClick => Color.DarkGreen,
+                MouseMode.Trackpad => Color.Indigo,
+                _ => Color.DarkSlateGray
+            };
+            DrawButton(sb, _btnToggleMouseMode, modeStr, modeCol, Color.White, 2);
 
-            // Row 6: Reposition Controls button
+            // Row 6: Trackpad Sensitivity
+            OverlayFont.DrawString(sb, _pixelTexture, "TRACKPAD SPEED", new Vector2(startX, startY + rowSpacing * 6 + 6), Settings.MouseControlMode == MouseMode.Trackpad ? Color.White : Color.Gray, 2);
+            DrawButton(sb, _btnSensitivityMinus, "-", Settings.MouseControlMode == MouseMode.Trackpad ? Color.DarkSlateGray : Color.Black * 0.4f, Color.White, 2);
+            string sensStr = $"{Settings.TrackpadSensitivity:0.0}X";
+            Rectangle sensTextRect = new Rectangle(_btnSensitivityMinus.Right, startY + rowSpacing * 6, _btnSensitivityPlus.Left - _btnSensitivityMinus.Right, 28);
+            OverlayFont.DrawCenteredString(sb, _pixelTexture, sensStr, sensTextRect, Settings.MouseControlMode == MouseMode.Trackpad ? Color.Yellow : Color.Gray, 2);
+            DrawButton(sb, _btnSensitivityPlus, "+", Settings.MouseControlMode == MouseMode.Trackpad ? Color.DarkSlateGray : Color.Black * 0.4f, Color.White, 2);
+
+            // Row 7: Reposition Controls button
             DrawButton(sb, _btnEditLayout, "REPOSITION CONTROLS (DRAG & DROP)", Color.Indigo, Color.White, 2);
             DrawRectBorder(sb, _btnEditLayout, 2, Color.MediumPurple);
 
-            // Row 7: Reset & Close buttons
+            // Row 8: Reset & Close buttons
             DrawButton(sb, _btnResetDefaults, "RESET TO DEFAULTS", Color.DarkRed * 0.8f, Color.White, 2);
             DrawButton(sb, _btnSaveClose, "SAVE & CLOSE", Color.DarkGreen, Color.White, 2);
             DrawRectBorder(sb, _btnSaveClose, 2, Color.Lime);

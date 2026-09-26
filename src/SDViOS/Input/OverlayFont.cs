@@ -138,5 +138,48 @@ namespace SDViOS.Input
             Vector2 pos = new Vector2(rect.X + (rect.Width - size.X) / 2f, rect.Y + (rect.Height - size.Y) / 2f);
             DrawString(sb, pixel, text, pos, color, pixelSize);
         }
+
+        private static readonly string[] CursorBitmap = new[]
+        {
+            "#...........",
+            "##..........",
+            "#O#.........",
+            "#OO#........",
+            "#OOO#.......",
+            "#OOOO#......",
+            "#OOOOO#.....",
+            "#OOOOOO#....",
+            "#OOOOOOO#...",
+            "#OOOO#OO#...",
+            "#OO#..#OO#..",
+            "#O#...#OO#..",
+            "##.....#OO#.",
+            "#......#OO#.",
+            "........##.."
+        };
+
+        public static void DrawMouseCursor(SpriteBatch sb, Texture2D pixel, Vector2 pos, int pixelSize = 2)
+        {
+            if (sb == null || pixel == null) return;
+            int startX = (int)pos.X;
+            int startY = (int)pos.Y;
+
+            for (int y = 0; y < CursorBitmap.Length; y++)
+            {
+                string row = CursorBitmap[y];
+                for (int x = 0; x < row.Length; x++)
+                {
+                    char c = row[x];
+                    if (c == '#')
+                    {
+                        sb.Draw(pixel, new Rectangle(startX + x * pixelSize, startY + y * pixelSize, pixelSize, pixelSize), Color.Black * 0.9f);
+                    }
+                    else if (c == 'O')
+                    {
+                        sb.Draw(pixel, new Rectangle(startX + x * pixelSize, startY + y * pixelSize, pixelSize, pixelSize), Color.White * 0.95f);
+                    }
+                }
+            }
+        }
     }
 }
