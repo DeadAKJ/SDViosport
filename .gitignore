@@ -22,4 +22,6 @@ tools/token.txt
 # Python
 __pycache__/
 *.pyc
+tools/mod_manager/config.json
+tools/mod_manager/downloads/
 

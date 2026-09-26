@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QHeaderView, QFileDialog, QMessageBox, QLineEdit, QTextEdit,
     QProgressBar, QFrame, QSplitter, QCheckBox, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject
 from PyQt6.QtGui import QColor, QFont, QIcon, QDragEnterEvent, QDropEvent
 from PyQt6.QtNetwork import QTcpServer, QHostAddress
 
@@ -166,23 +166,45 @@ QProgressBar::chunk {
 """
 
 
-class AsyncWorker(QThread):
-    finished = pyqtSignal(object)
-    failed = pyqtSignal(str)
+class AsyncDispatcher(QObject):
+    task_done = pyqtSignal(object, object)
+    task_failed = pyqtSignal(object, str)
 
-    def __init__(self, coro):
+    def __init__(self):
         super().__init__()
-        self.coro = coro
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+        self.task_done.connect(self._handle_done)
+        self.task_failed.connect(self._handle_failed)
 
-    def run(self):
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(self.coro)
-            loop.close()
-            self.finished.emit(result)
-        except Exception as e:
-            self.failed.emit(str(e))
+    def _run_loop(self):
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    def _handle_done(self, cb, res):
+        if cb:
+            try:
+                cb(res)
+            except Exception as e:
+                print(f"[Dispatcher] Callback error: {e}")
+
+    def _handle_failed(self, err_cb, err_str):
+        if err_cb:
+            try:
+                err_cb(err_str)
+            except Exception as e:
+                print(f"[Dispatcher] Error callback error: {e}")
+
+    def run_async(self, coro, on_success=None, on_error=None):
+        async def runner():
+            try:
+                res = await coro
+                self.task_done.emit(on_success, res)
+            except Exception as e:
+                self.task_failed.emit(on_error, str(e))
+
+        asyncio.run_coroutine_threadsafe(runner(), self.loop)
 
 
 class DownloadWorker(QThread):
@@ -217,6 +239,7 @@ class ModManagerWindow(QMainWindow):
         self.setStyleSheet(DARK_STYLE)
         self.setAcceptDrops(True)
 
+        self.dispatcher = AsyncDispatcher()
         self.backend = IOSModBackend()
         self.config = load_config()
         self.nexus_api = NexusAPI(self.config.get("nexus_api_key", ""))
@@ -522,11 +545,11 @@ class ModManagerWindow(QMainWindow):
         remaining = paths[1:]
 
         self.status_bar.setText(f" Installing {os.path.basename(next_path)} ({len(remaining) + 1} remaining)...")
-        worker = AsyncWorker(self.backend.install_mod_archive(next_path))
-        worker.finished.connect(lambda res: self._batch_install_paths(remaining))
-        worker.failed.connect(lambda err: self._batch_install_paths(remaining))
-        self._current_worker = worker
-        worker.start()
+        self.dispatcher.run_async(
+            self.backend.install_mod_archive(next_path),
+            on_success=lambda res: self._batch_install_paths(remaining),
+            on_error=lambda err: self._batch_install_paths(remaining)
+        )
 
     # ----------------- 3. NEXUS DOWNLOADS TAB -----------------
     def _setup_nexus_tab(self):
@@ -637,14 +660,13 @@ class ModManagerWindow(QMainWindow):
         self.lbl_nexus_user.setStyleSheet("color: #F1C40F;")
 
         def check():
-            ok, data = self.nexus_api.validate_api_key()
-            return ok, data
+            return self.nexus_api.validate_api_key()
 
-        worker = AsyncWorker(asyncio.to_thread(check))
-        worker.finished.connect(self._on_key_validated)
-        worker.failed.connect(lambda e: self.lbl_nexus_user.setText(f"Validation error: {e}"))
-        self._current_worker = worker
-        worker.start()
+        self.dispatcher.run_async(
+            asyncio.to_thread(check),
+            on_success=self._on_key_validated,
+            on_error=lambda e: self.lbl_nexus_user.setText(f"Validation error: {e}")
+        )
 
     def _on_key_validated(self, res):
         ok, data = res
@@ -706,11 +728,11 @@ class ModManagerWindow(QMainWindow):
                 parsed["key"], parsed["expires"]
             )
 
-        worker = AsyncWorker(asyncio.to_thread(fetch_links))
-        worker.finished.connect(lambda links: self._on_links_resolved(links, parsed))
-        worker.failed.connect(self._on_nxm_failed)
-        self._current_worker = worker
-        worker.start()
+        self.dispatcher.run_async(
+            asyncio.to_thread(fetch_links),
+            on_success=lambda links: self._on_links_resolved(links, parsed),
+            on_error=self._on_nxm_failed
+        )
 
     def _on_links_resolved(self, links: list[str], parsed: dict):
         if not links:
@@ -782,11 +804,11 @@ class ModManagerWindow(QMainWindow):
             return
 
         self.status_bar.setText(" Fetching SMAPI log from device...")
-        worker = AsyncWorker(self.backend.get_smapi_log())
-        worker.finished.connect(lambda text: self.log_viewer.setPlainText(text))
-        worker.failed.connect(lambda e: self.log_viewer.setPlainText(f"Error fetching log: {e}"))
-        self._current_worker = worker
-        worker.start()
+        self.dispatcher.run_async(
+            self.backend.get_smapi_log(),
+            on_success=lambda text: self.log_viewer.setPlainText(text),
+            on_error=lambda e: self.log_viewer.setPlainText(f"Error fetching log: {e}")
+        )
 
     def _copy_log(self):
         text = self.log_viewer.toPlainText()
@@ -837,11 +859,11 @@ class ModManagerWindow(QMainWindow):
         if not self.backend.is_connected:
             return
         self.status_bar.setText(" Listing save games...")
-        worker = AsyncWorker(self.backend.list_saves())
-        worker.finished.connect(self._render_saves)
-        worker.failed.connect(lambda e: self.status_bar.setText(f" Error listing saves: {e}"))
-        self._current_worker = worker
-        worker.start()
+        self.dispatcher.run_async(
+            self.backend.list_saves(),
+            on_success=self._render_saves,
+            on_error=lambda e: self.status_bar.setText(f" Error listing saves: {e}")
+        )
 
     def _render_saves(self, saves: list[str]):
         self.saves_table.setRowCount(len(saves))
@@ -868,11 +890,11 @@ class ModManagerWindow(QMainWindow):
             return
 
         self.status_bar.setText(f" Backing up save {save_name}...")
-        worker = AsyncWorker(self.backend.backup_save(save_name, dest_dir))
-        worker.finished.connect(lambda res: QMessageBox.information(self, "Backup Complete", res[1]))
-        worker.failed.connect(lambda err: QMessageBox.warning(self, "Backup Error", f"Backup failed: {err}"))
-        self._current_worker = worker
-        worker.start()
+        self.dispatcher.run_async(
+            self.backend.backup_save(save_name, dest_dir),
+            on_success=lambda res: QMessageBox.information(self, "Backup Complete", res[1]),
+            on_error=lambda err: QMessageBox.warning(self, "Backup Error", f"Backup failed: {err}")
+        )
 
     # ----------------- 6. DIAGNOSTICS TAB -----------------
     def _setup_info_tab(self):
@@ -913,11 +935,11 @@ class ModManagerWindow(QMainWindow):
         self.device_badge.setStyleSheet("background-color: #2D303E; color: #DA7C21; padding: 6px 14px; border-radius: 14px; font-weight: bold; font-size: 12px;")
         self.status_bar.setText(" Connecting to iPhone over Apple USB AFC...")
 
-        worker = AsyncWorker(self.backend.connect_usb())
-        worker.finished.connect(self._on_usb_connected)
-        worker.failed.connect(self._on_usb_failed)
-        self._current_worker = worker
-        worker.start()
+        self.dispatcher.run_async(
+            self.backend.connect_usb(),
+            on_success=self._on_usb_connected,
+            on_error=self._on_usb_failed
+        )
 
     def _on_usb_connected(self, result):
         ok, msg = result
@@ -958,11 +980,11 @@ class ModManagerWindow(QMainWindow):
         if not self.backend.is_connected:
             return
         self.status_bar.setText(" Fetching installed mods list...")
-        worker = AsyncWorker(self.backend.list_mods())
-        worker.finished.connect(self._render_mods)
-        worker.failed.connect(lambda e: self.status_bar.setText(f" Error fetching mods: {e}"))
-        self._current_worker = worker
-        worker.start()
+        self.dispatcher.run_async(
+            self.backend.list_mods(),
+            on_success=self._render_mods,
+            on_error=lambda e: self.status_bar.setText(f" Error fetching mods: {e}")
+        )
 
     def _render_mods(self, mods: list[ModInfo]):
         self.mods_cache = mods
@@ -1045,11 +1067,11 @@ class ModManagerWindow(QMainWindow):
     def _toggle_mod(self, mod: ModInfo):
         action = "Disabling" if mod.is_enabled else "Enabling"
         self.status_bar.setText(f" {action} {mod.name}...")
-        worker = AsyncWorker(self.backend.toggle_mod(mod))
-        worker.finished.connect(lambda res: self._refresh_mods())
-        worker.failed.connect(lambda err: QMessageBox.warning(self, "Error", f"Failed to toggle mod: {err}"))
-        self._current_worker = worker
-        worker.start()
+        self.dispatcher.run_async(
+            self.backend.toggle_mod(mod),
+            on_success=lambda res: self._refresh_mods(),
+            on_error=lambda err: QMessageBox.warning(self, "Error", f"Failed to toggle mod: {err}")
+        )
 
     def _delete_mod(self, mod: ModInfo):
         reply = QMessageBox.question(
@@ -1059,11 +1081,11 @@ class ModManagerWindow(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.status_bar.setText(f" Deleting {mod.name}...")
-            worker = AsyncWorker(self.backend.delete_mod(mod))
-            worker.finished.connect(lambda res: self._refresh_mods())
-            worker.failed.connect(lambda err: QMessageBox.warning(self, "Error", f"Failed to delete mod: {err}"))
-            self._current_worker = worker
-            worker.start()
+            self.dispatcher.run_async(
+                self.backend.delete_mod(mod),
+                on_success=lambda res: self._refresh_mods(),
+                on_error=lambda err: QMessageBox.warning(self, "Error", f"Failed to delete mod: {err}")
+            )
 
     def _browse_and_install_mod(self):
         if not self.backend.is_connected:
@@ -1081,11 +1103,11 @@ class ModManagerWindow(QMainWindow):
         self.progress_bar.setRange(0, 0)
         self.status_bar.setText(f" Installing {os.path.basename(path)} to iOS device...")
 
-        worker = AsyncWorker(self.backend.install_mod_archive(path, lambda msg: self.status_bar.setText(f" {msg}")))
-        worker.finished.connect(self._on_install_finished)
-        worker.failed.connect(self._on_install_failed)
-        self._current_worker = worker
-        worker.start()
+        self.dispatcher.run_async(
+            self.backend.install_mod_archive(path, lambda msg: self.status_bar.setText(f" {msg}")),
+            on_success=self._on_install_finished,
+            on_error=self._on_install_failed
+        )
 
     def _on_install_finished(self, result):
         self.progress_bar.setVisible(False)
@@ -1111,6 +1133,11 @@ class ModManagerWindow(QMainWindow):
             path = urls[0].toLocalFile()
             if os.path.exists(path):
                 self._install_mod(path)
+
+    def closeEvent(self, event):
+        if hasattr(self, "dispatcher") and self.dispatcher:
+            self.dispatcher.loop.call_soon_threadsafe(self.dispatcher.loop.stop)
+        event.accept()
 
 
 def main():
