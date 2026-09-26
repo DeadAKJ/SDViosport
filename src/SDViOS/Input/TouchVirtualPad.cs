@@ -74,6 +74,8 @@ namespace SDViOS.Input
         private float _trackpadTouchStartTime;
         private float _trackpadTotalDistMoved;
         private int _trackpadSecondTouchId = -1;
+        private bool _trackpadHadSecondTouch = false;
+        private float _lastRightClickTime = -10f;
         private int _trackpadLeftClickFrames = 0;
         private int _trackpadRightClickFrames = 0;
 
@@ -287,11 +289,11 @@ namespace SDViOS.Input
             }
 
             // 1. Process Settings Menu Interaction
-            // 1. Process Settings Menu Interaction
             if (IsSettingsOpen)
             {
                 _trackpadPrimaryTouchId = -1;
                 _trackpadSecondTouchId = -1;
+                _trackpadHadSecondTouch = false;
                 _stickTouchId = -1;
                 UpdateSettingsTouches(touches);
                 ForwardInputToGame();
@@ -303,6 +305,7 @@ namespace SDViOS.Input
             {
                 _trackpadPrimaryTouchId = -1;
                 _trackpadSecondTouchId = -1;
+                _trackpadHadSecondTouch = false;
                 _stickTouchId = -1;
                 UpdateEditModeTouches(touches);
                 ForwardInputToGame();
@@ -310,28 +313,36 @@ namespace SDViOS.Input
             }
 
             // 3. Normal Overlay Interaction
-            // Watchdog: verify active touch IDs still exist in the current touches collection
+            // Watchdog: verify active touch IDs still physically exist in the current touches collection
             bool trackpadPrimaryFound = false;
             bool trackpadSecondFound = false;
             bool stickTouchFound = false;
 
             foreach (var touch in touches)
             {
-                if (touch.Id == _trackpadPrimaryTouchId && touch.State != TouchLocationState.Released)
+                if (touch.Id == _trackpadPrimaryTouchId)
                     trackpadPrimaryFound = true;
-                if (touch.Id == _trackpadSecondTouchId && touch.State != TouchLocationState.Released)
+                if (touch.Id == _trackpadSecondTouchId)
                     trackpadSecondFound = true;
-                if (touch.Id == _stickTouchId && touch.State != TouchLocationState.Released)
+                if (touch.Id == _stickTouchId)
                     stickTouchFound = true;
             }
 
             if (!trackpadPrimaryFound && _trackpadPrimaryTouchId != -1)
             {
                 _trackpadPrimaryTouchId = -1;
+                if (_trackpadSecondTouchId == -1)
+                {
+                    _trackpadHadSecondTouch = false;
+                }
             }
             if (!trackpadSecondFound && _trackpadSecondTouchId != -1)
             {
                 _trackpadSecondTouchId = -1;
+                if (_trackpadPrimaryTouchId == -1)
+                {
+                    _trackpadHadSecondTouch = false;
+                }
             }
             if (!stickTouchFound && _stickTouchId != -1)
             {
@@ -478,22 +489,27 @@ namespace SDViOS.Input
         {
             float curTime = (float)gameTime.TotalGameTime.TotalSeconds;
 
-            if (touch.State == TouchLocationState.Pressed || (_trackpadPrimaryTouchId == -1 && touch.State == TouchLocationState.Moved))
+            if (_trackpadPrimaryTouchId == -1)
             {
-                if (_trackpadPrimaryTouchId == -1)
+                if (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved)
                 {
                     _trackpadPrimaryTouchId = touch.Id;
                     _trackpadLastTouchPos = touch.Position;
                     _trackpadTouchStartTime = curTime;
                     _trackpadTotalDistMoved = 0f;
-                }
-                else if (_trackpadSecondTouchId == -1 && touch.Id != _trackpadPrimaryTouchId)
-                {
-                    // Second finger touch down
-                    _trackpadSecondTouchId = touch.Id;
+                    _trackpadHadSecondTouch = false;
                 }
             }
-            else if (touch.State == TouchLocationState.Moved)
+            else if (touch.Id != _trackpadPrimaryTouchId && _trackpadSecondTouchId == -1)
+            {
+                if (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved)
+                {
+                    _trackpadSecondTouchId = touch.Id;
+                    _trackpadHadSecondTouch = true;
+                }
+            }
+
+            if (touch.State == TouchLocationState.Moved)
             {
                 if (touch.Id == _trackpadPrimaryTouchId)
                 {
@@ -513,27 +529,48 @@ namespace SDViOS.Input
                     float duration = curTime - _trackpadTouchStartTime;
 
                     // Check if two-finger tap occurred (Right Click)
-                    if (_trackpadSecondTouchId != -1)
+                    if (_trackpadHadSecondTouch || _trackpadSecondTouchId != -1)
                     {
-                        _trackpadRightClickFrames = 8;
-                        _trackpadSecondTouchId = -1;
+                        if (duration < 0.55f && _trackpadTotalDistMoved < 50f && (curTime - _lastRightClickTime > 0.35f))
+                        {
+                            _trackpadRightClickFrames = 10;
+                            SimulatedMouseRightDown = true;
+                            _lastRightClickTime = curTime;
+                            EngineLogger.Log($"[TouchVirtualPad] Trackpad 2-finger tap -> Right Click at {(int)_trackpadCursorPos.X},{(int)_trackpadCursorPos.Y}");
+                        }
                     }
                     // Single-finger tap (Left Click): short tap with minimal movement
-                    else if (duration < 0.35f && _trackpadTotalDistMoved < 25f)
+                    else if (duration < 0.45f && _trackpadTotalDistMoved < 45f && (curTime - _lastRightClickTime > 0.40f))
                     {
-                        _trackpadLeftClickFrames = 8;
+                        _trackpadLeftClickFrames = 10;
+                        SimulatedMouseLeftDown = true;
+                        EngineLogger.Log($"[TouchVirtualPad] Trackpad 1-finger tap -> Left Click at {(int)_trackpadCursorPos.X},{(int)_trackpadCursorPos.Y}");
                     }
 
                     _trackpadPrimaryTouchId = -1;
+                    if (_trackpadSecondTouchId == -1)
+                    {
+                        _trackpadHadSecondTouch = false;
+                    }
                 }
                 else if (touch.Id == _trackpadSecondTouchId)
                 {
-                    // Second finger released while primary was down: trigger Right Click
-                    if (_trackpadPrimaryTouchId != -1)
+                    float duration = curTime - _trackpadTouchStartTime;
+
+                    // Second finger released while primary is down or was down
+                    if (duration < 0.55f && _trackpadTotalDistMoved < 50f && (curTime - _lastRightClickTime > 0.35f))
                     {
-                        _trackpadRightClickFrames = 8;
+                        _trackpadRightClickFrames = 10;
+                        SimulatedMouseRightDown = true;
+                        _lastRightClickTime = curTime;
+                        EngineLogger.Log($"[TouchVirtualPad] Trackpad 2-finger tap -> Right Click at {(int)_trackpadCursorPos.X},{(int)_trackpadCursorPos.Y}");
                     }
+
                     _trackpadSecondTouchId = -1;
+                    if (_trackpadPrimaryTouchId == -1)
+                    {
+                        _trackpadHadSecondTouch = false;
+                    }
                 }
             }
         }
@@ -878,7 +915,7 @@ namespace SDViOS.Input
                 bool controlsActive = (LeftStick != Vector2.Zero || ButtonA || ButtonB || ButtonX || ButtonY || ButtonMenu);
                 if (_lastCursorMotionWasMouseField != null)
                 {
-                    if (Settings.MouseControlMode == MouseMode.Trackpad || SimulatedMouseLeftDown)
+                    if (Settings.MouseControlMode == MouseMode.Trackpad || SimulatedMouseLeftDown || SimulatedMouseRightDown)
                     {
                         _lastCursorMotionWasMouseField.SetValue(null, true);
                     }
@@ -897,7 +934,7 @@ namespace SDViOS.Input
                         {
                             _gamepadControlsField.SetValue(options, true);
                         }
-                        else if (SimulatedMouseLeftDown || Settings.MouseControlMode == MouseMode.Trackpad)
+                        else if (SimulatedMouseLeftDown || SimulatedMouseRightDown || Settings.MouseControlMode == MouseMode.Trackpad)
                         {
                             _gamepadControlsField.SetValue(options, false);
                         }

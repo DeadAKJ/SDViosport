@@ -19,24 +19,26 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.2.2-fix-trackpad-tracking-freeze'
+version_name = 'v1.2.3-fix-trackpad-click-registration'
 
-changelog_content = """Version: v1.2.2-fix-trackpad-tracking-freeze
+changelog_content = """Version: v1.2.3-fix-trackpad-click-registration
 Date: 2026-09-26
 
 Changes:
-1. Fix Trackpad Tracking Freeze:
-   - Added per-frame Touch Watchdog in `TouchVirtualPad.Update()`:
-     * Validates whether active primary and secondary trackpad touch IDs are still physically present in MonoGame's `TouchPanel.GetState()`.
-     * Automatically frees stranded touch IDs when fingers lift off, exit bounds, or get cancelled without delivering `TouchLocationState.Released`.
-   - Touch Ownership Routing:
-     * Ongoing trackpad drag touches are routed directly to the trackpad controller regardless of whether the finger trajectory crosses over virtual action buttons (A, B, X, Y, Menu).
-     * Prevents virtual button hitboxes from intercepting active trackpad gestures and causing touch ID state leakage.
-   - Fallback Touch Adoption:
-     * Adopts touches on background even if `Pressed` was missed on the initial contact frame (e.g. state starting at `Moved`).
-   - Coordinate & Modal Safety:
-     * Added NaN/Infinity guards and viewport clamping for cursor position.
-     * Guaranteed reset of active touch IDs when opening or closing the Settings or Edit Layout modal.
+1. Fix Trackpad Tap-to-Click & Multi-touch Right Click Registration:
+   - Root Cause:
+     * The previous watchdog condition `touch.State != TouchLocationState.Released` caused any touch in the `Released` state to be treated as non-existent and wiped active touch IDs before `HandleTrackpadTouch` ever processed the release.
+     * As a result, tap-to-click releases never matched `_trackpadPrimaryTouchId` and click simulation frames were never triggered.
+   - Watchdog Touch Presence:
+     * Watchdog now tests physical presence of touch IDs in `TouchCollection` without excluding the `Released` state, allowing `HandleTrackpadTouch` to properly detect the tap completion.
+   - Immediate Click Frame Dispatch:
+     * On tap release, `SimulatedMouseLeftDown = true` or `SimulatedMouseRightDown = true` is set immediately on the release frame and maintained for 10 frames (~160ms) to ensure MonoGame and Stardew Valley game loops register the complete press-and-release cycle.
+   - Robust Multi-Touch Right Click:
+     * Added `_trackpadHadSecondTouch` tracking and cooldown timer so 2-finger taps reliably register Right Click without accidentally triggering an erroneous 1-finger Left Click when the primary finger lifts slightly later.
+   - Realistic Mobile Tap Tolerances:
+     * Adjusted maximum movement tolerance to 45px (left click) / 50px (right click) and duration to 0.45s / 0.55s, accommodating natural thumb squish and micro-sliding on high-DPI iOS Retina displays.
+   - Synchronized Options & Gamepad Mode:
+     * Included `SimulatedMouseRightDown` in Game1 mouse motion / gamepad controls state updates.
 """
 
 
