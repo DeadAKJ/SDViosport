@@ -37,6 +37,7 @@ def save_config(cfg: dict):
 
 class NexusAPI:
     BASE_URL = "https://api.nexusmods.com/v1"
+    GRAPHQL_URL = "https://api.nexusmods.com/v2/graphql"
     USER_AGENT = "StardewValley-iOS-ModManager/1.0"
 
     def __init__(self, api_key: str = ""):
@@ -134,6 +135,172 @@ class NexusAPI:
         data = r.json()
         return data.get("files", [])
 
+    def get_collection(self, slug: str, domain_name: str = "stardewvalley") -> dict:
+        """Fetch complete collection info, revision, and mod list from Nexus GraphQL."""
+        if not self.api_key:
+            raise ValueError("Nexus API key not configured.")
+
+        query = """
+        query GetCollection($slug: String!, $domainName: String!) {
+          collection(slug: $slug, domainName: $domainName) {
+            id
+            slug
+            name
+            summary
+            user {
+              name
+            }
+            overallRating
+            tileImage {
+              url
+            }
+            latestPublishedRevision {
+              revisionNumber
+              modCount
+              totalSize
+              modFiles {
+                fileId
+                optional
+                version
+                file {
+                  fileId
+                  modId
+                  name
+                  sizeInBytes
+                  version
+                  uri
+                  mod {
+                    name
+                    author
+                    summary
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        headers = {
+            "apikey": self.api_key,
+            "User-Agent": self.USER_AGENT,
+            "Content-Type": "application/json",
+            "accept": "application/json"
+        }
+        variables = {"slug": slug, "domainName": domain_name}
+        r = requests.post(self.GRAPHQL_URL, headers=headers, json={"query": query, "variables": variables}, timeout=25)
+        if r.status_code != 200:
+            raise Exception(f"GraphQL request error ({r.status_code}): {r.text}")
+
+        res = r.json()
+        if "errors" in res:
+            err_msg = "; ".join(e.get("message", "Error") for e in res["errors"])
+            raise Exception(f"Nexus GraphQL error: {err_msg}")
+
+        coll = res.get("data", {}).get("collection")
+        if not coll:
+            raise Exception(f"Collection '{slug}' not found on Nexus Mods.")
+
+        rev = coll.get("latestPublishedRevision") or {}
+        raw_mods = rev.get("modFiles") or []
+
+        mods = []
+        for m in raw_mods:
+            f = m.get("file") or {}
+            mod_data = f.get("mod") or {}
+            name = mod_data.get("name") or f.get("name") or f"Mod #{f.get('modId', m.get('fileId'))}"
+            author = mod_data.get("author") or "Unknown"
+            size_b = f.get("sizeInBytes")
+            size_bytes = int(size_b) if size_b is not None else 0
+
+            mods.append({
+                "mod_id": f.get("modId") or 0,
+                "file_id": m.get("fileId") or f.get("fileId") or 0,
+                "name": name,
+                "file_name": f.get("name") or name,
+                "author": author,
+                "version": m.get("version") or f.get("version") or "1.0.0",
+                "optional": bool(m.get("optional", False)),
+                "size_bytes": size_bytes,
+                "summary": mod_data.get("summary") or ""
+            })
+
+        total_size_b = rev.get("totalSize")
+        total_size = int(total_size_b) if total_size_b is not None else sum(m["size_bytes"] for m in mods)
+
+        return {
+            "id": coll.get("id"),
+            "slug": coll.get("slug", slug),
+            "name": coll.get("name", slug),
+            "summary": coll.get("summary", ""),
+            "author": coll.get("user", {}).get("name", "Unknown"),
+            "rating": coll.get("overallRating", ""),
+            "revision": rev.get("revisionNumber", 1),
+            "mod_count": len(mods),
+            "total_size": total_size,
+            "tile_image": coll.get("tileImage", {}).get("url", "") if coll.get("tileImage") else "",
+            "mods": mods
+        }
+
+    def search_collections(self, count: int = 15, domain_name: str = "stardewvalley") -> list[dict]:
+        """Fetch popular collections for Stardew Valley from Nexus GraphQL."""
+        if not self.api_key:
+            return []
+
+        query = """
+        query SearchCollections($count: Int!) {
+          collectionsV2(
+            filter: {
+              gameId: { value: "1303", op: EQUALS }
+            }
+            count: $count
+          ) {
+            nodes {
+              slug
+              name
+              summary
+              overallRating
+              user {
+                name
+              }
+              latestPublishedRevision {
+                revisionNumber
+                modCount
+                totalSize
+              }
+            }
+          }
+        }
+        """
+        headers = {
+            "apikey": self.api_key,
+            "User-Agent": self.USER_AGENT,
+            "Content-Type": "application/json",
+            "accept": "application/json"
+        }
+        try:
+            r = requests.post(self.GRAPHQL_URL, headers=headers, json={"query": query, "variables": {"count": count}}, timeout=15)
+            if r.status_code == 200:
+                nodes = r.json().get("data", {}).get("collectionsV2", {}).get("nodes", [])
+                out = []
+                for n in nodes:
+                    rev = n.get("latestPublishedRevision") or {}
+                    total_sz = int(rev.get("totalSize") or 0)
+                    out.append({
+                        "slug": n.get("slug"),
+                        "name": n.get("name"),
+                        "summary": n.get("summary", ""),
+                        "author": n.get("user", {}).get("name", "Unknown"),
+                        "rating": n.get("overallRating", ""),
+                        "revision": rev.get("revisionNumber", 1),
+                        "mod_count": rev.get("modCount", 0),
+                        "total_size": total_sz
+                    })
+                return out
+        except Exception as e:
+            print(f"[Nexus] Error searching collections: {e}")
+        return []
+
+
     def get_download_links(self, game_name: str, mod_id: int, file_id: int, key: str = "", expires: str = "") -> list[str]:
         """Request direct CDN download links for an NXM link or mod file."""
         if not self.api_key:
@@ -199,10 +366,12 @@ class NexusAPI:
 
 def parse_any_url(raw: str) -> dict:
     """
-    Parse any mod input string:
+    Parse any mod or collection input string:
     - NXM protocol: nxm://stardewvalley/mods/{mod_id}/files/{file_id}?...
+    - Nexus collection URL: https://next.nexusmods.com/stardewvalley/collections/{slug}
     - Nexus web page: https://www.nexusmods.com/stardewvalley/mods/{mod_id}
     - Numeric Mod ID: 1915 or #1915 or mod:1915
+    - Collection slug: col:htknoa or collection:htknoa
     - Direct archive URL: https://.../something.zip
     """
     s = raw.strip()
@@ -217,7 +386,28 @@ def parse_any_url(raw: str) -> dict:
             return {"type": "nxm", **parsed}
         return {"type": "invalid", "error": "Invalid nxm:// link format"}
 
-    # 2. Nexus Web URL
+    # 2. Nexus Collection URL or Prefix
+    coll_match = re.search(r"nexusmods\.com/(?:next/)?(?:stardewvalley/)?collections/([a-zA-Z0-9_-]+)", s, re.IGNORECASE)
+    if not coll_match and (s.lower().startswith("col:") or s.lower().startswith("collection:")):
+        slug = re.sub(r"^(?:col:|collection:)", "", s, flags=re.IGNORECASE).strip()
+        if slug:
+            return {
+                "type": "nexus_collection",
+                "game": "stardewvalley",
+                "slug": slug,
+                "url": f"https://next.nexusmods.com/stardewvalley/collections/{slug}"
+            }
+
+    if coll_match:
+        slug = coll_match.group(1)
+        return {
+            "type": "nexus_collection",
+            "game": "stardewvalley",
+            "slug": slug,
+            "url": f"https://next.nexusmods.com/stardewvalley/collections/{slug}"
+        }
+
+    # 3. Nexus Web URL
     nexus_match = re.search(r"nexusmods\.com/([^/]+)/mods/(\d+)", s, re.IGNORECASE)
     if nexus_match:
         game = nexus_match.group(1).lower()
@@ -238,7 +428,7 @@ def parse_any_url(raw: str) -> dict:
             "url": f"https://www.nexusmods.com/{game}/mods/{mod_id}"
         }
 
-    # 3. Numeric Mod ID
+    # 4. Numeric Mod ID
     cleaned = re.sub(r"^(?:mod[:\s#]*|#)", "", s, flags=re.IGNORECASE).strip()
     if cleaned.isdigit():
         mod_id = int(cleaned)
@@ -250,7 +440,7 @@ def parse_any_url(raw: str) -> dict:
             "url": f"https://www.nexusmods.com/stardewvalley/mods/{mod_id}"
         }
 
-    # 4. Direct HTTP/HTTPS Archive or Web link
+    # 5. Direct HTTP/HTTPS Archive or Web link
     if s.startswith("http://") or s.startswith("https://"):
         return {
             "type": "direct_url",
@@ -258,6 +448,7 @@ def parse_any_url(raw: str) -> dict:
         }
 
     return {"type": "invalid", "error": "Unrecognized link format"}
+
 
 
 
@@ -309,3 +500,39 @@ def get_vortex_stardew_dirs() -> tuple[Optional[str], Optional[str]]:
     mods_dir = vortex_mods if os.path.isdir(vortex_mods) else None
     dl_dir = vortex_downloads if os.path.isdir(vortex_downloads) else None
     return mods_dir, dl_dir
+
+
+def find_local_vortex_mod(mod_id: int, file_id: Optional[int] = None) -> tuple[Optional[str], bool]:
+    """
+    Check if a mod (by mod_id or file_id) is already in local Vortex downloads or staged mods.
+    Returns (path, is_dir) or (None, False).
+    """
+    mods_dir, dl_dir = get_vortex_stardew_dirs()
+
+    # 1. Check downloaded archives (.zip, .rar, .7z)
+    if dl_dir and os.path.isdir(dl_dir):
+        try:
+            for f in os.listdir(dl_dir):
+                if not f.endswith((".zip", ".rar", ".7z")) or f.startswith("__vortex"):
+                    continue
+                if mod_id and (f"-{mod_id}-" in f or f.endswith(f"-{mod_id}.zip")):
+                    return os.path.join(dl_dir, f), False
+                if file_id and str(file_id) in f:
+                    return os.path.join(dl_dir, f), False
+        except Exception:
+            pass
+
+    # 2. Check staged mods folder
+    if mods_dir and os.path.isdir(mods_dir):
+        try:
+            for d in os.listdir(mods_dir):
+                full_p = os.path.join(mods_dir, d)
+                if not os.path.isdir(full_p):
+                    continue
+                if mod_id and f"-{mod_id}-" in d:
+                    return full_p, True
+        except Exception:
+            pass
+
+    return None, False
+

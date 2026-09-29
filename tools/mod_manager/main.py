@@ -13,8 +13,10 @@ import json
 import socket
 import asyncio
 import threading
+import time
 import webbrowser
 import urllib.parse
+from collections import deque
 from typing import Optional
 
 from PyQt6.QtWidgets import (
@@ -33,15 +35,16 @@ try:
     from tools.mod_manager.nexus import (
         NexusAPI, load_config, save_config, register_nxm_protocol,
         is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR,
-        parse_any_url
+        parse_any_url, find_local_vortex_mod
     )
 except ImportError:
     from backend import IOSModBackend, ModInfo
     from nexus import (
         NexusAPI, load_config, save_config, register_nxm_protocol,
         is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR,
-        parse_any_url
+        parse_any_url, find_local_vortex_mod
     )
+
 
 
 IPC_PORT = 49182
@@ -250,6 +253,638 @@ class DownloadWorker(QThread):
         except Exception as e:
             self.failed.emit(str(e))
 
+class ETATracker:
+    """Calculates rolling download speed, ETA, and progress metrics."""
+    def __init__(self, total_bytes_to_download: int):
+        self.total_bytes = max(1, total_bytes_to_download)
+        self.downloaded_completed_files = 0
+        self.current_file_downloaded = 0
+        self.samples = deque(maxlen=25)  # (timestamp, cumulative_bytes)
+        self.start_time = time.time()
+        self.last_speed = 0.0
+
+    def add_sample(self, current_file_bytes: int):
+        now = time.time()
+        self.current_file_downloaded = current_file_bytes
+        total_dl = self.downloaded_completed_files + self.current_file_downloaded
+        self.samples.append((now, total_dl))
+
+        if len(self.samples) >= 2:
+            t0, b0 = self.samples[0]
+            t1, b1 = self.samples[-1]
+            dt = t1 - t0
+            db = b1 - b0
+            if dt > 0.3:
+                self.last_speed = max(0.0, db / dt)
+
+    def file_completed(self, file_size: int):
+        self.downloaded_completed_files += file_size
+        self.current_file_downloaded = 0
+        self.samples.append((time.time(), self.downloaded_completed_files))
+
+    def get_speed(self) -> float:
+        return self.last_speed
+
+    def get_eta_seconds(self) -> Optional[int]:
+        remaining = max(0, self.total_bytes - (self.downloaded_completed_files + self.current_file_downloaded))
+        if self.last_speed > 1024:
+            return int(remaining / self.last_speed)
+        return None
+
+    @staticmethod
+    def format_eta(seconds: Optional[int]) -> str:
+        if seconds is None:
+            return "Calculating..."
+        if seconds <= 0:
+            return "0s"
+        if seconds < 60:
+            return f"{seconds}s"
+        if seconds < 3600:
+            m = seconds // 60
+            s = seconds % 60
+            return f"{m}m {s:02d}s"
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        return f"{h}h {m:02d}m"
+
+    @staticmethod
+    def format_speed(bps: float) -> str:
+        if bps >= 1024 * 1024:
+            return f"{bps / (1024 * 1024):.1f} MB/s"
+        if bps >= 1024:
+            return f"{bps / 1024:.0f} KB/s"
+        return f"{int(bps)} B/s"
+
+    @staticmethod
+    def format_bytes(bytes_count: int) -> str:
+        if bytes_count >= 1024 * 1024 * 1024:
+            return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
+        if bytes_count >= 1024 * 1024:
+            return f"{bytes_count / (1024 * 1024):.1f} MB"
+        if bytes_count >= 1024:
+            return f"{bytes_count / 1024:.0f} KB"
+        return f"{bytes_count} B"
+
+
+class CollectionInstallWorker(QThread):
+    overall_progress = pyqtSignal(int, int, str)
+    file_progress = pyqtSignal(int, int)
+    metrics_update = pyqtSignal(str, str, str)  # (speed_str, eta_str, downloaded_str)
+    log_message = pyqtSignal(str)
+    finished_all = pyqtSignal(int, int, list)   # (installed_count, fail_count, errors)
+
+    def __init__(self, nexus_api: NexusAPI, backend: IOSModBackend, dispatcher: AsyncDispatcher, selected_mods: list[dict], game_name: str = "stardewvalley"):
+        super().__init__()
+        self.nexus_api = nexus_api
+        self.backend = backend
+        self.dispatcher = dispatcher
+        self.selected_mods = selected_mods
+        self.game_name = game_name
+        self.is_cancelled = False
+
+    def cancel(self):
+        self.is_cancelled = True
+
+    def run(self):
+        total_count = len(self.selected_mods)
+        net_download_bytes = sum(m.get("size_bytes", 0) for m in self.selected_mods if not m.get("is_local"))
+        tracker = ETATracker(net_download_bytes)
+
+        installed_count = 0
+        failed_count = 0
+        errors = []
+
+        self.log_message.emit(f"🚀 Starting collection install ({total_count} mods selected, {ETATracker.format_bytes(net_download_bytes)} to download)...")
+
+        for idx, mod in enumerate(self.selected_mods):
+            if self.is_cancelled:
+                self.log_message.emit("⏹ Collection installation was cancelled by user.")
+                break
+
+            mod_name = mod.get("name", "Unknown Mod")
+            ver = mod.get("version", "")
+            mod_id = mod.get("mod_id", 0)
+            file_id = mod.get("file_id", 0)
+            size_b = mod.get("size_bytes", 0)
+
+            self.overall_progress.emit(idx + 1, total_count, mod_name)
+            self.file_progress.emit(0, 100)
+
+            # 1. Local Vortex Cache hit
+            if mod.get("is_local") and mod.get("local_path"):
+                local_p = mod["local_path"]
+                fname = os.path.basename(local_p)
+                self.log_message.emit(f"⚡ [{idx+1}/{total_count}] Installing {mod_name} from local Vortex cache ({fname})...")
+
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.backend.install_mod_archive(local_p),
+                        self.dispatcher.loop
+                    )
+                    ok, msg = future.result(timeout=180)
+                    if ok:
+                        installed_count += 1
+                        self.log_message.emit(f"  ✓ {mod_name} installed successfully.")
+                    else:
+                        failed_count += 1
+                        errors.append((mod_name, msg))
+                        self.log_message.emit(f"  ❌ Failed installing {mod_name}: {msg}")
+                except Exception as e:
+                    failed_count += 1
+                    errors.append((mod_name, str(e)))
+                    self.log_message.emit(f"  ❌ Error installing {mod_name}: {e}")
+
+                tracker.file_completed(size_b)
+                continue
+
+            # 2. Remote Download from Nexus CDN
+            self.log_message.emit(f"⬇ [{idx+1}/{total_count}] Downloading {mod_name} (v{ver}, {ETATracker.format_bytes(size_b)})...")
+            try:
+                links = self.nexus_api.get_download_links(self.game_name, mod_id, file_id)
+                if not links:
+                    raise Exception("No download CDN link returned by Nexus.")
+
+                def dl_callback(dl, tot):
+                    tracker.add_sample(dl)
+                    self.file_progress.emit(dl, tot)
+                    speed_str = ETATracker.format_speed(tracker.get_speed())
+                    eta_str = ETATracker.format_eta(tracker.get_eta_seconds())
+                    cum_dl = tracker.downloaded_completed_files + dl
+                    dl_str = f"{ETATracker.format_bytes(cum_dl)} / {ETATracker.format_bytes(tracker.total_bytes)}"
+                    self.metrics_update.emit(speed_str, eta_str, dl_str)
+
+                downloaded_file = self.nexus_api.download_file(links[0], DEFAULT_DOWNLOAD_DIR, progress_callback=dl_callback)
+                tracker.file_completed(size_b)
+
+                self.log_message.emit(f"  📱 Extracting and transferring {mod_name} to iPhone...")
+                future = asyncio.run_coroutine_threadsafe(
+                    self.backend.install_mod_archive(downloaded_file),
+                    self.dispatcher.loop
+                )
+                ok, msg = future.result(timeout=180)
+                if ok:
+                    installed_count += 1
+                    self.log_message.emit(f"  ✓ {mod_name} installed to iPhone.")
+                else:
+                    failed_count += 1
+                    errors.append((mod_name, msg))
+                    self.log_message.emit(f"  ❌ Installation failed for {mod_name}: {msg}")
+
+            except Exception as e:
+                failed_count += 1
+                errors.append((mod_name, str(e)))
+                self.log_message.emit(f"  ⚠ Skipped {mod_name}: {e}")
+
+        self.finished_all.emit(installed_count, failed_count, errors)
+
+
+class CollectionProgressDialog(QDialog):
+    def __init__(self, parent, collection_name: str, worker: CollectionInstallWorker):
+        super().__init__(parent)
+        self.setWindowTitle(f"Installing Collection: {collection_name}")
+        self.resize(720, 520)
+        self.setStyleSheet(DARK_STYLE)
+        self.worker = worker
+
+        self._build_ui(collection_name)
+        self._wire_signals()
+
+    def _build_ui(self, coll_name: str):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        # Header
+        header_box = QVBoxLayout()
+        title_lbl = QLabel(f"📦 Installing: {coll_name}")
+        title_lbl.setStyleSheet("font-weight: bold; font-size: 16px; color: #DA7C21;")
+        self.sub_lbl = QLabel("Starting batch installation to iOS device over USB AFC...")
+        self.sub_lbl.setStyleSheet("color: #8F94A6; font-size: 12px;")
+        header_box.addWidget(title_lbl)
+        header_box.addWidget(self.sub_lbl)
+        layout.addLayout(header_box)
+
+        # Progress bars section
+        prog_card = QFrame()
+        prog_card.setStyleSheet("background-color: #21242D; border: 1px solid #313543; border-radius: 6px; padding: 14px;")
+        p_layout = QVBoxLayout(prog_card)
+        p_layout.setSpacing(10)
+
+        self.lbl_overall = QLabel("Overall Collection Progress:")
+        self.lbl_overall.setStyleSheet("font-weight: bold; font-size: 12px; color: #FFFFFF;")
+        p_layout.addWidget(self.lbl_overall)
+
+        self.bar_overall = QProgressBar()
+        self.bar_overall.setFixedHeight(18)
+        self.bar_overall.setRange(0, 100)
+        self.bar_overall.setValue(0)
+        p_layout.addWidget(self.bar_overall)
+
+        self.lbl_file = QLabel("Current Mod Download:")
+        self.lbl_file.setStyleSheet("color: #9A9EAB; font-size: 11px;")
+        p_layout.addWidget(self.lbl_file)
+
+        self.bar_file = QProgressBar()
+        self.bar_file.setFixedHeight(14)
+        self.bar_file.setRange(0, 100)
+        self.bar_file.setValue(0)
+        p_layout.addWidget(self.bar_file)
+
+        # Metrics row
+        metrics_row = QHBoxLayout()
+        self.metric_speed = QLabel("⚡ Speed: --")
+        self.metric_speed.setStyleSheet("color: #2ECC71; font-weight: bold; font-size: 12px;")
+        metrics_row.addWidget(self.metric_speed)
+
+        self.metric_eta = QLabel("⏳ ETA: Calculating...")
+        self.metric_eta.setStyleSheet("color: #F1C40F; font-weight: bold; font-size: 12px;")
+        metrics_row.addWidget(self.metric_eta)
+
+        self.metric_dl = QLabel("📦 Progress: 0 MB / 0 MB")
+        self.metric_dl.setStyleSheet("color: #3498DB; font-weight: bold; font-size: 12px;")
+        metrics_row.addWidget(self.metric_dl)
+
+        metrics_row.addStretch()
+        p_layout.addLayout(metrics_row)
+
+        layout.addWidget(prog_card)
+
+        # Log Console
+        log_label = QLabel("Installation Log:")
+        log_label.setStyleSheet("color: #8F94A6; font-size: 11px; font-weight: bold;")
+        layout.addWidget(log_label)
+
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setStyleSheet("background-color: #121317; color: #BDC3C7; font-family: 'Consolas', monospace; font-size: 11px; border: 1px solid #2A2E3B; border-radius: 4px;")
+        layout.addWidget(self.log_view)
+
+        # Action Buttons
+        btn_row = QHBoxLayout()
+        self.btn_cancel = QPushButton("⏹ Cancel Installation")
+        self.btn_cancel.setObjectName("DangerBtn")
+        self.btn_cancel.clicked.connect(self._on_cancel_clicked)
+        btn_row.addWidget(self.btn_cancel)
+
+        btn_row.addStretch()
+
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setVisible(False)
+        self.btn_close.clicked.connect(self.accept)
+        btn_row.addWidget(self.btn_close)
+
+        layout.addLayout(btn_row)
+
+    def _wire_signals(self):
+        self.worker.overall_progress.connect(self._on_overall_progress)
+        self.worker.file_progress.connect(self._on_file_progress)
+        self.worker.metrics_update.connect(self._on_metrics_update)
+        self.worker.log_message.connect(self._on_log_message)
+        self.worker.finished_all.connect(self._on_finished_all)
+
+    def _on_overall_progress(self, current: int, total: int, mod_name: str):
+        pct = int((current / max(1, total)) * 100)
+        self.bar_overall.setValue(pct)
+        self.lbl_overall.setText(f"Overall Progress: Mod {current} of {total} ({pct}%)")
+        self.sub_lbl.setText(f"Currently installing: {mod_name}")
+
+    def _on_file_progress(self, dl: int, tot: int):
+        if tot > 0:
+            pct = int((dl / tot) * 100)
+            self.bar_file.setValue(pct)
+            mb_dl = dl / (1024 * 1024)
+            mb_tot = tot / (1024 * 1024)
+            self.lbl_file.setText(f"Downloading: {mb_dl:.1f} MB / {mb_tot:.1f} MB ({pct}%)")
+        else:
+            self.bar_file.setRange(0, 0)
+
+    def _on_metrics_update(self, speed_str: str, eta_str: str, dl_str: str):
+        self.metric_speed.setText(f"⚡ Speed: {speed_str}")
+        self.metric_eta.setText(f"⏳ ETA: {eta_str}")
+        self.metric_dl.setText(f"📦 Progress: {dl_str}")
+
+    def _on_log_message(self, msg: str):
+        self.log_view.append(msg)
+        sb = self.log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _on_cancel_clicked(self):
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setText("Cancelling...")
+        self.worker.cancel()
+
+    def _on_finished_all(self, installed: int, failed: int, errors: list):
+        self.bar_overall.setValue(100)
+        self.bar_file.setValue(100)
+        self.btn_cancel.setVisible(False)
+        self.btn_close.setVisible(True)
+        self.metric_eta.setText("⏳ ETA: Finished")
+
+        summary = f"🎉 Installation Complete! {installed} mods installed successfully."
+        if failed > 0:
+            summary += f" ({failed} skipped or failed)"
+        self.sub_lbl.setText(summary)
+        self.log_view.append("\n" + "=" * 50)
+        self.log_view.append(summary)
+
+
+class CollectionInstallerDialog(QDialog):
+    def __init__(self, parent, collection_data: dict, nexus_api: NexusAPI, dispatcher: AsyncDispatcher, backend: IOSModBackend):
+        super().__init__(parent)
+        self.collection = collection_data
+        self.nexus_api = nexus_api
+        self.dispatcher = dispatcher
+        self.backend = backend
+
+        self.setWindowTitle(f"Nexus Collection: {self.collection.get('name', 'Mod Collection')}")
+        self.resize(920, 640)
+        self.setStyleSheet(DARK_STYLE)
+
+        self.mods = self.collection.get("mods", [])
+        # Check local vortex cache for each mod
+        for m in self.mods:
+            local_p, is_dir = find_local_vortex_mod(m["mod_id"], m["file_id"])
+            m["local_path"] = local_p
+            m["is_local"] = bool(local_p)
+            if local_p and m.get("size_bytes", 0) == 0:
+                try:
+                    m["size_bytes"] = os.path.getsize(local_p)
+                except Exception:
+                    pass
+
+        self._build_ui()
+        self._update_summary()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        # 1. Collection Header
+        header_card = QFrame()
+        header_card.setStyleSheet("background-color: #21242D; border: 1px solid #313543; border-radius: 6px; padding: 14px;")
+        h_layout = QVBoxLayout(header_card)
+        h_layout.setSpacing(6)
+
+        title_row = QHBoxLayout()
+        name_lbl = QLabel(f"📦 {self.collection.get('name', 'Collection')}")
+        name_lbl.setStyleSheet("font-weight: 900; font-size: 16px; color: #DA7C21;")
+        title_row.addWidget(name_lbl)
+
+        title_row.addStretch()
+
+        curator = self.collection.get("author", "Unknown")
+        rev = self.collection.get("revision", 1)
+        meta_lbl = QLabel(f"Curated by <b>{curator}</b> • Rev {rev}")
+        meta_lbl.setStyleSheet("color: #8F94A6; font-size: 12px;")
+        title_row.addWidget(meta_lbl)
+        h_layout.addLayout(title_row)
+
+        summary = self.collection.get("summary", "")
+        if summary:
+            sum_lbl = QLabel(summary)
+            sum_lbl.setWordWrap(True)
+            sum_lbl.setStyleSheet("color: #BDC3C7; font-size: 12px;")
+            h_layout.addWidget(sum_lbl)
+
+        layout.addWidget(header_card)
+
+        # 2. Optionals Callout Banner
+        req_count = sum(1 for m in self.mods if not m["optional"])
+        opt_count = sum(1 for m in self.mods if m["optional"])
+
+        opt_card = QFrame()
+        opt_card.setStyleSheet("background-color: #2A2E3B; border: 1px solid #DA7C21; border-radius: 6px; padding: 10px 14px;")
+        opt_layout = QVBoxLayout(opt_card)
+        opt_layout.setSpacing(8)
+
+        opt_title = QLabel(f"⭐ Optional Mods: {opt_count} Available (Choose which optionals you want)")
+        opt_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #F1C40F;")
+        opt_layout.addWidget(opt_title)
+
+        opt_controls = QHBoxLayout()
+        self.btn_select_all_opt = QPushButton("☑ Select All Optionals")
+        self.btn_select_all_opt.setObjectName("SecondaryBtn")
+        self.btn_select_all_opt.clicked.connect(self._select_all_optionals)
+        opt_controls.addWidget(self.btn_select_all_opt)
+
+        self.btn_deselect_all_opt = QPushButton("☐ Deselect All Optionals")
+        self.btn_deselect_all_opt.setObjectName("SecondaryBtn")
+        self.btn_deselect_all_opt.clicked.connect(self._deselect_all_optionals)
+        opt_controls.addWidget(self.btn_deselect_all_opt)
+
+        self.btn_reset_defaults = QPushButton("⟳ Default (Required Only)")
+        self.btn_reset_defaults.setObjectName("SecondaryBtn")
+        self.btn_reset_defaults.clicked.connect(self._reset_to_defaults)
+        opt_controls.addWidget(self.btn_reset_defaults)
+
+        opt_controls.addSpacing(16)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 Filter mods in collection...")
+        self.search_input.textChanged.connect(self._filter_table)
+        opt_controls.addWidget(self.search_input)
+
+        opt_layout.addLayout(opt_controls)
+        layout.addWidget(opt_card)
+
+        # 3. Table of Mods
+        self.table = QTableWidget()
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["Install", "Mod Name", "Author", "Version", "Type", "Size", "Vortex Cache"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table)
+
+        self._populate_table()
+
+        # 4. Summary & Pre-download ETA Banner
+        self.lbl_summary = QLabel()
+        self.lbl_summary.setStyleSheet("background-color: #21242D; border: 1px solid #313543; border-radius: 6px; padding: 10px 14px; font-size: 12px;")
+        layout.addWidget(self.lbl_summary)
+
+        # 5. Bottom Action Buttons
+        btn_row = QHBoxLayout()
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setObjectName("SecondaryBtn")
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(self.btn_cancel)
+
+        self.btn_open_web = QPushButton("🌐 View on Nexus")
+        self.btn_open_web.setObjectName("SecondaryBtn")
+        self.btn_open_web.clicked.connect(self._open_web_page)
+        btn_row.addWidget(self.btn_open_web)
+
+        btn_row.addStretch()
+
+        self.btn_install = QPushButton("🚀 Download & Install to iPhone")
+        self.btn_install.clicked.connect(self._on_start_install_clicked)
+        btn_row.addWidget(self.btn_install)
+
+        layout.addLayout(btn_row)
+
+    def _populate_table(self):
+        self.table.setRowCount(len(self.mods))
+        for row, mod in enumerate(self.mods):
+            is_opt = mod["optional"]
+
+            # Col 0: Checkbox
+            chk = QCheckBox()
+            # Required mods checked by default; optional mods unchecked by default
+            chk.setChecked(not is_opt)
+            chk.clicked.connect(self._update_summary)
+            cell_w = QWidget()
+            cl = QHBoxLayout(cell_w)
+            cl.addWidget(chk)
+            cl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cl.setContentsMargins(4, 2, 4, 2)
+            self.table.setCellWidget(row, 0, cell_w)
+
+            # Col 1: Mod Name
+            name_item = QTableWidgetItem(mod["name"])
+            name_item.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            self.table.setItem(row, 1, name_item)
+
+            # Col 2: Author
+            auth_item = QTableWidgetItem(mod["author"])
+            self.table.setItem(row, 2, auth_item)
+
+            # Col 3: Version
+            ver_item = QTableWidgetItem(mod["version"])
+            ver_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 3, ver_item)
+
+            # Col 4: Type (Required vs Optional)
+            type_item = QTableWidgetItem("🟡 Optional" if is_opt else "🔵 Required")
+            type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            type_item.setForeground(QColor("#F1C40F" if is_opt else "#3498DB"))
+            self.table.setItem(row, 4, type_item)
+
+            # Col 5: Size
+            sz_str = ETATracker.format_bytes(mod.get("size_bytes", 0)) if mod.get("size_bytes") else "--"
+            sz_item = QTableWidgetItem(sz_str)
+            sz_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.table.setItem(row, 5, sz_item)
+
+            # Col 6: Local Status
+            is_local = mod.get("is_local", False)
+            stat_item = QTableWidgetItem("🟢 In Vortex Cache" if is_local else "⬇ Needs Download")
+            stat_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            stat_item.setForeground(QColor("#2ECC71" if is_local else "#E67E22"))
+            self.table.setItem(row, 6, stat_item)
+
+    def _get_selected_mods(self) -> list[dict]:
+        selected = []
+        for row in range(self.table.rowCount()):
+            cell_w = self.table.cellWidget(row, 0)
+            if cell_w:
+                chk = cell_w.findChild(QCheckBox)
+                if chk and chk.isChecked():
+                    selected.append(self.mods[row])
+        return selected
+
+    def _update_summary(self):
+        sel_mods = self._get_selected_mods()
+        total_sel = len(sel_mods)
+        req_sel = sum(1 for m in sel_mods if not m["optional"])
+        opt_sel = sum(1 for m in sel_mods if m["optional"])
+
+        total_bytes = sum(m.get("size_bytes", 0) for m in sel_mods)
+        local_bytes = sum(m.get("size_bytes", 0) for m in sel_mods if m.get("is_local"))
+        download_bytes = max(0, total_bytes - local_bytes)
+
+        # Pre-download ETA at common download rates
+        eta_5mb = ETATracker.format_eta(int(download_bytes / (5 * 1024 * 1024)))
+        eta_15mb = ETATracker.format_eta(int(download_bytes / (15 * 1024 * 1024)))
+
+        summary_text = (
+            f"<b>Selected:</b> {total_sel} / {len(self.mods)} mods ({req_sel} required, {opt_sel} optional) &bull; "
+            f"<b>Total Size:</b> {ETATracker.format_bytes(total_bytes)} "
+            f"(<span style='color: #2ECC71;'>{ETATracker.format_bytes(local_bytes)} ready in Vortex cache</span>, "
+            f"<span style='color: #DA7C21;'>{ETATracker.format_bytes(download_bytes)} to download</span>)<br>"
+            f"<b>⏳ Estimated Download Time:</b> ~{eta_5mb} at 5 MB/s &bull; ~{eta_15mb} at 15 MB/s"
+        )
+        self.lbl_summary.setText(summary_text)
+        self.btn_install.setEnabled(total_sel > 0)
+
+    def _select_all_optionals(self):
+        for row in range(self.table.rowCount()):
+            if self.mods[row]["optional"]:
+                cell_w = self.table.cellWidget(row, 0)
+                if cell_w:
+                    chk = cell_w.findChild(QCheckBox)
+                    if chk:
+                        chk.setChecked(True)
+        self._update_summary()
+
+    def _deselect_all_optionals(self):
+        for row in range(self.table.rowCount()):
+            if self.mods[row]["optional"]:
+                cell_w = self.table.cellWidget(row, 0)
+                if cell_w:
+                    chk = cell_w.findChild(QCheckBox)
+                    if chk:
+                        chk.setChecked(False)
+        self._update_summary()
+
+    def _reset_to_defaults(self):
+        for row in range(self.table.rowCount()):
+            is_opt = self.mods[row]["optional"]
+            cell_w = self.table.cellWidget(row, 0)
+            if cell_w:
+                chk = cell_w.findChild(QCheckBox)
+                if chk:
+                    chk.setChecked(not is_opt)
+        self._update_summary()
+
+    def _filter_table(self):
+        query = self.search_input.text().strip().lower()
+        for row in range(self.table.rowCount()):
+            name = self.mods[row]["name"].lower()
+            author = self.mods[row]["author"].lower()
+            hidden = bool(query and (query not in name and query not in author))
+            self.table.setRowHidden(row, hidden)
+
+    def _open_web_page(self):
+        slug = self.collection.get("slug")
+        if slug:
+            webbrowser.open(f"https://next.nexusmods.com/stardewvalley/collections/{slug}")
+
+    def _on_start_install_clicked(self):
+        if not self.backend.is_connected:
+            QMessageBox.warning(self, "Not Connected", "Please connect your iOS device via USB or select a local folder first.")
+            return
+
+        selected = self._get_selected_mods()
+        if not selected:
+            QMessageBox.warning(self, "No Selection", "Please select at least one mod to install.")
+            return
+
+        coll_name = self.collection.get("name", "Collection")
+        worker = CollectionInstallWorker(
+            nexus_api=self.nexus_api,
+            backend=self.backend,
+            dispatcher=self.dispatcher,
+            selected_mods=selected,
+            game_name="stardewvalley"
+        )
+
+        progress_dlg = CollectionProgressDialog(self, coll_name, worker)
+        worker.start()
+        progress_dlg.exec()
+        self.accept()
+        if self.parent() and hasattr(self.parent(), "_refresh_mods"):
+            self.parent()._refresh_mods()
+
+
 class InstallFromLinkDialog(QDialog):
     def __init__(self, parent=None, nexus_api: Optional[NexusAPI] = None, dispatcher: Optional[AsyncDispatcher] = None, initial_url: str = ""):
         super().__init__(parent)
@@ -385,13 +1020,25 @@ class InstallFromLinkDialog(QDialog):
         if link_type == "invalid":
             self.lbl_title.setText("❌ Unrecognized Link Format")
             self.lbl_author.setText("")
-            self.lbl_desc.setText("Supported formats:\n• Nexus URL: https://www.nexusmods.com/stardewvalley/mods/1915\n• Mod ID: 1915\n• Nexus NXM: nxm://stardewvalley/mods/1915/files/...\n• Direct URL: https://example.com/mod.zip")
+            self.lbl_desc.setText("Supported formats:\n• Nexus Collection: https://next.nexusmods.com/stardewvalley/collections/htknoa\n• Nexus URL: https://www.nexusmods.com/stardewvalley/mods/1915\n• Mod ID: 1915\n• Nexus NXM: nxm://stardewvalley/mods/1915/files/...\n• Direct URL: https://example.com/mod.zip")
             self.combo_label.setVisible(False)
             self.combo_files.setVisible(False)
             self.btn_open_browser.setVisible(False)
             self.btn_install.setEnabled(False)
 
+        elif link_type == "nexus_collection":
+            slug = parsed["slug"]
+            self.lbl_title.setText(f"📦 Nexus Collection: {slug}")
+            self.lbl_author.setText("Nexus Mods Collection detected")
+            self.lbl_desc.setText("Click below to inspect collection mods, choose which optional mods you want, check download ETA, and install directly to iPhone.")
+            self.combo_label.setVisible(False)
+            self.combo_files.setVisible(False)
+            self.btn_open_browser.setVisible(True)
+            self.btn_install.setEnabled(True)
+            self.btn_install.setText("📦 Inspect & Install Collection")
+
         elif link_type == "nxm":
+
             self.lbl_title.setText("🔗 Nexus One-Click Link (NXM Protocol)")
             self.lbl_author.setText(f"Game: {parsed.get('game', 'stardewvalley')} | Mod #{parsed.get('mod_id')} | File #{parsed.get('file_id')}")
             self.lbl_desc.setText("Validated security tokens detected. Ready to download from Nexus CDN and install directly to your iPhone.")
@@ -522,11 +1169,18 @@ class InstallFromLinkDialog(QDialog):
 
         link_type = self.parsed_data.get("type")
 
-        if link_type == "nxm":
+        if link_type == "nexus_collection":
+            slug = self.parsed_data.get("slug")
+            self.accept()
+            if self.parent() and hasattr(self.parent(), "_open_collection_installer"):
+                self.parent()._open_collection_installer(slug)
+
+        elif link_type == "nxm":
             url = self.parsed_data.get("url")
             self.accept()
             if self.parent():
                 self.parent()._handle_nxm_url(url)
+
 
         elif link_type == "direct_url":
             url = self.parsed_data.get("url")
@@ -688,11 +1342,13 @@ class ModManagerWindow(QMainWindow):
         self.tab_mods = QWidget()
         self.tab_vortex = QWidget()
         self.tab_nexus = QWidget()
+        self.tab_collections = QWidget()
         self.tab_logs = QWidget()
         self.tab_saves = QWidget()
         self.tab_info = QWidget()
 
         self.tabs.addTab(self.tab_mods, "  🎮 INSTALLED MODS  ")
+        self.tabs.addTab(self.tab_collections, "  📦 COLLECTIONS  ")
         self.tabs.addTab(self.tab_vortex, "  🌪️ VORTEX LIBRARY  ")
         self.tabs.addTab(self.tab_nexus, "  🌐 NEXUS DOWNLOADS  ")
         self.tabs.addTab(self.tab_logs, "  📋 SMAPI LOGS  ")
@@ -700,11 +1356,13 @@ class ModManagerWindow(QMainWindow):
         self.tabs.addTab(self.tab_info, "  ⚙️ DIAGNOSTICS  ")
 
         self._setup_mods_tab()
+        self._setup_collections_tab()
         self._setup_vortex_tab()
         self._setup_nexus_tab()
         self._setup_logs_tab()
         self._setup_saves_tab()
         self._setup_info_tab()
+
 
         main_layout.addWidget(self.tabs)
 
@@ -769,8 +1427,159 @@ class ModManagerWindow(QMainWindow):
 
         layout.addLayout(info_row)
 
-    # ----------------- 2. VORTEX LIBRARY TAB -----------------
+    # ----------------- 2. COLLECTIONS TAB -----------------
+    def _setup_collections_tab(self):
+        layout = QVBoxLayout(self.tab_collections)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        desc = QLabel("Explore and install complete Nexus Mod Collections with 1-click. Select which optional mods you want, see real-time download ETA, and install directly to your iPhone.")
+        desc.setStyleSheet("color: #9A9EAB; font-size: 12px;")
+        layout.addWidget(desc)
+
+        # Toolbar
+        toolbar = QHBoxLayout()
+        self.coll_url_input = QLineEdit()
+        self.coll_url_input.setPlaceholderText("Paste collection link (e.g. https://next.nexusmods.com/stardewvalley/collections/htknoa) or slug...")
+        self.coll_url_input.returnPressed.connect(lambda: self._open_collection_installer(self.coll_url_input.text()))
+        toolbar.addWidget(self.coll_url_input)
+
+        self.btn_inspect_input_coll = QPushButton("🔍 Inspect Collection")
+        self.btn_inspect_input_coll.clicked.connect(lambda: self._open_collection_installer(self.coll_url_input.text()))
+        toolbar.addWidget(self.btn_inspect_input_coll)
+
+        self.btn_load_popular_colls = QPushButton("⟳ Popular Collections")
+        self.btn_load_popular_colls.setObjectName("SecondaryBtn")
+        self.btn_load_popular_colls.clicked.connect(self._load_popular_collections)
+        toolbar.addWidget(self.btn_load_popular_colls)
+
+        layout.addLayout(toolbar)
+
+        # Popular Collections Table
+        self.coll_table = QTableWidget()
+        self.coll_table.setColumnCount(6)
+        self.coll_table.setHorizontalHeaderLabels(["Collection Name", "Curator", "Rating", "Mods Count", "Total Size", "Action"])
+        self.coll_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.coll_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.coll_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.coll_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.coll_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.coll_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.coll_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.coll_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.coll_table.verticalHeader().setVisible(False)
+        self.coll_table.doubleClicked.connect(self._on_collection_row_double_clicked)
+        layout.addWidget(self.coll_table)
+
+        self.popular_colls_cache = []
+        QTimer.singleShot(1500, self._load_popular_collections)
+
+    def _load_popular_collections(self):
+        if not self.nexus_api.api_key:
+            return
+
+        self.status_bar.setText(" Fetching popular Stardew Valley collections...")
+        def fetch():
+            return self.nexus_api.search_collections(count=15)
+
+        self.dispatcher.run_async(
+            asyncio.to_thread(fetch),
+            on_success=self._render_popular_collections,
+            on_error=lambda e: self.status_bar.setText(f" Failed loading collections: {e}")
+        )
+
+    def _render_popular_collections(self, colls: list[dict]):
+        self.popular_colls_cache = colls
+        self.coll_table.setRowCount(len(colls))
+
+        for row, c in enumerate(colls):
+            name_item = QTableWidgetItem(c.get("name", "Unknown"))
+            name_item.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            self.coll_table.setItem(row, 0, name_item)
+
+            auth_item = QTableWidgetItem(c.get("author", "Unknown"))
+            self.coll_table.setItem(row, 1, auth_item)
+
+            rating = c.get("rating", "")
+            rating_str = f"⭐ {float(rating):.1f}%" if rating else "--"
+            rate_item = QTableWidgetItem(rating_str)
+            rate_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            rate_item.setForeground(QColor("#F1C40F"))
+            self.coll_table.setItem(row, 2, rate_item)
+
+            count_item = QTableWidgetItem(f"{c.get('mod_count', 0)} mods")
+            count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.coll_table.setItem(row, 3, count_item)
+
+            sz_item = QTableWidgetItem(ETATracker.format_bytes(c.get("total_size", 0)))
+            sz_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.coll_table.setItem(row, 4, sz_item)
+
+            btn = QPushButton("📦 Inspect & Install")
+            btn.setFixedHeight(26)
+            btn.clicked.connect(lambda _, slug=c.get("slug"): self._open_collection_installer(slug))
+            cell_w = QWidget()
+            cl = QHBoxLayout(cell_w)
+            cl.addWidget(btn)
+            cl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cl.setContentsMargins(4, 2, 4, 2)
+            self.coll_table.setCellWidget(row, 5, cell_w)
+
+        self.status_bar.setText(f" Loaded {len(colls)} popular Stardew Valley collections.")
+
+    def _on_collection_row_double_clicked(self, index):
+        row = index.row()
+        if 0 <= row < len(self.popular_colls_cache):
+            slug = self.popular_colls_cache[row].get("slug")
+            if slug:
+                self._open_collection_installer(slug)
+
+    def _open_collection_installer(self, slug_or_url: str):
+        slug_or_url = slug_or_url.strip()
+        if not slug_or_url:
+            return
+
+        parsed = parse_any_url(slug_or_url)
+        slug = parsed.get("slug", slug_or_url) if parsed.get("type") == "nexus_collection" else slug_or_url
+
+        if not self.nexus_api.api_key:
+            self.tabs.setCurrentIndex(3)
+            QMessageBox.warning(self, "API Key Required", "Please configure your Nexus Mods API Key in the 'Nexus Downloads' tab to inspect collections.")
+            return
+
+        self.status_bar.setText(f" Fetching collection '{slug}' from Nexus Mods...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+
+        def fetch():
+            return self.nexus_api.get_collection(slug)
+
+        def on_success(coll_data):
+            self.progress_bar.setVisible(False)
+            self.status_bar.setText(f" Collection '{coll_data.get('name')}' loaded.")
+            dlg = CollectionInstallerDialog(
+                parent=self,
+                collection_data=coll_data,
+                nexus_api=self.nexus_api,
+                dispatcher=self.dispatcher,
+                backend=self.backend
+            )
+            dlg.exec()
+
+        def on_error(err):
+            self.progress_bar.setVisible(False)
+            self.status_bar.setText(" Error loading collection.")
+            QMessageBox.warning(self, "Collection Error", f"Failed to fetch collection details for '{slug}':\n{err}")
+
+        self.dispatcher.run_async(
+            asyncio.to_thread(fetch),
+            on_success=on_success,
+            on_error=on_error
+        )
+
+    # ----------------- 3. VORTEX LIBRARY TAB -----------------
     def _setup_vortex_tab(self):
+
         layout = QVBoxLayout(self.tab_vortex)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
@@ -1159,12 +1968,15 @@ class ModManagerWindow(QMainWindow):
             return
 
         parsed = parse_any_url(raw)
-        if parsed.get("type") == "nxm":
+        if parsed.get("type") == "nexus_collection":
+            self._open_collection_installer(parsed.get("slug", raw))
+        elif parsed.get("type") == "nxm":
             self._handle_nxm_url(raw)
         elif parsed.get("type") == "direct_url":
             self._handle_direct_download_url(parsed["url"])
         else:
             self._show_install_url_dialog(raw)
+
 
     def _handle_direct_download_url(self, url: str):
         if not self.backend.is_connected:
