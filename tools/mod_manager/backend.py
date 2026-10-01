@@ -10,6 +10,7 @@ import zipfile
 import shutil
 import tempfile
 import asyncio
+import subprocess
 from typing import Optional, Callable, Any
 from dataclasses import dataclass, field
 
@@ -338,7 +339,28 @@ class IOSModBackend:
             elif os.path.isdir(archive_path):
                 shutil.copytree(archive_path, os.path.join(temp_dir, os.path.basename(archive_path)))
             else:
-                return False, "Unsupported file format. Please choose a .zip or folder."
+                # Attempt extraction via system bsdtar (built-in Windows tar.exe handles .7z, .rar, .tar, .zip, etc.)
+                extracted = False
+                try:
+                    subprocess.check_call(["tar", "-xf", archive_path, "-C", temp_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    extracted = True
+                except Exception:
+                    pass
+
+                # If tar failed or not available, check 7z / WinRAR
+                if not extracted:
+                    for archiver in ["7z", "7za", "winrar"]:
+                        archiver_path = shutil.which(archiver)
+                        if archiver_path:
+                            try:
+                                subprocess.check_call([archiver_path, "x", "-y", f"-o{temp_dir}", archive_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                extracted = True
+                                break
+                            except Exception:
+                                pass
+
+                if not extracted:
+                    return False, f"Unsupported file format ({os.path.splitext(archive_path)[1]}). Please choose a .zip, .7z, .rar, or folder."
 
             # 2. Discover all mod roots (directories containing manifest.json)
             mod_dirs = []
@@ -347,7 +369,55 @@ class IOSModBackend:
                     mod_dirs.append(root)
 
             if not mod_dirs:
-                return False, "No valid Stardew Valley mod (manifest.json) found in archive."
+                # 2a. Check if this is a config pack (archive containing config.json files for existing mods)
+                config_files = []
+                for root, dirs, files in os.walk(temp_dir):
+                    if "config.json" in files:
+                        config_files.append((root, os.path.join(root, "config.json")))
+
+                if config_files:
+                    if progress_callback:
+                        progress_callback(f"Deploying {len(config_files)} mod configuration(s)...")
+
+                    applied_count = 0
+                    existing_mods = set()
+                    if self.local_mode_dir:
+                        mods_dir = self.local_mode_dir if os.path.basename(self.local_mode_dir).lower() == "mods" else os.path.join(self.local_mode_dir, "Mods")
+                        if os.path.exists(mods_dir):
+                            existing_mods = set(os.listdir(mods_dir))
+                    elif self.house_arrest:
+                        try:
+                            existing_mods = set(await self.house_arrest.listdir("/Documents/Mods"))
+                        except Exception:
+                            pass
+
+                    for cfg_dir, cfg_path in config_files:
+                        cfg_folder = os.path.basename(cfg_dir)
+                        # Match folder name against installed mod folders
+                        matched = next((m for m in existing_mods if m.lower() == cfg_folder.lower()), None)
+                        if not matched:
+                            parent_folder = os.path.basename(os.path.dirname(cfg_dir))
+                            matched = next((m for m in existing_mods if m.lower() == parent_folder.lower()), None)
+
+                        if matched:
+                            if self.local_mode_dir:
+                                dest_cfg = os.path.join(mods_dir, matched, "config.json")
+                                shutil.copy2(cfg_path, dest_cfg)
+                            elif self.house_arrest:
+                                dest_cfg = f"/Documents/Mods/{matched}/config.json"
+                                with open(cfg_path, "rb") as f_cfg:
+                                    await self.house_arrest.set_file_contents(dest_cfg, f_cfg.read())
+                            applied_count += 1
+
+                    if applied_count > 0:
+                        return True, f"Config pack applied to {applied_count} mod(s)."
+
+                # 2b. Check if this is the SMAPI installer
+                for root, dirs, files in os.walk(temp_dir):
+                    if any("StardewModdingAPI" in f for f in files) and any("install" in f.lower() for f in files):
+                        return True, "SMAPI installer detected (SMAPI is already built-in on SDViOS)."
+
+                return False, "No valid Stardew Valley mod (manifest.json) or mod configurations found in archive."
 
             installed_names = []
 

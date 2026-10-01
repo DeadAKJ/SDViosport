@@ -432,8 +432,14 @@ class CollectionInstallWorker(QThread):
 
             except Exception as e:
                 failed_count += 1
-                errors.append((mod_name, str(e)))
-                self.log_message.emit(f"  ⚠ Skipped {mod_name}: {e}")
+                err_str = str(e)
+                errors.append((mod_name, err_str))
+                if "premium" in err_str.lower() or "403" in err_str:
+                    mod_id = mod.get("mod_id", "")
+                    url = f"https://www.nexusmods.com/stardewvalley/mods/{mod_id}" if mod_id else "https://www.nexusmods.com"
+                    self.log_message.emit(f"  ⚠ Skipped {mod_name}: Direct API download is for Nexus Premium users only. Download free in Vortex or at: {url}")
+                else:
+                    self.log_message.emit(f"  ⚠ Skipped {mod_name}: {e}")
 
         self.finished_all.emit(installed_count, failed_count, errors)
 
@@ -603,7 +609,7 @@ class CollectionInstallerDialog(QDialog):
         self.mods = self.collection.get("mods", [])
         # Check local vortex cache for each mod
         for m in self.mods:
-            local_p, is_dir = find_local_vortex_mod(m["mod_id"], m["file_id"])
+            local_p, is_dir = find_local_vortex_mod(m.get("mod_id", 0), m.get("file_id"), m.get("name"))
             m["local_path"] = local_p
             m["is_local"] = bool(local_p)
             if local_p and m.get("size_bytes", 0) == 0:

@@ -502,12 +502,18 @@ def get_vortex_stardew_dirs() -> tuple[Optional[str], Optional[str]]:
     return mods_dir, dl_dir
 
 
-def find_local_vortex_mod(mod_id: int, file_id: Optional[int] = None) -> tuple[Optional[str], bool]:
+def find_local_vortex_mod(mod_id: int, file_id: Optional[int] = None, mod_name: Optional[str] = None) -> tuple[Optional[str], bool]:
     """
-    Check if a mod (by mod_id or file_id) is already in local Vortex downloads or staged mods.
+    Check if a mod (by mod_id, file_id, or mod_name) is already in local Vortex downloads or staged mods.
     Returns (path, is_dir) or (None, False).
     """
     mods_dir, dl_dir = get_vortex_stardew_dirs()
+
+    # Normalize mod_name keywords if provided
+    name_tokens = []
+    if mod_name:
+        clean = "".join(c if c.isalnum() or c in (" ", "_", "-") else " " for c in mod_name).lower()
+        name_tokens = [t for t in clean.split() if len(t) >= 4 and t not in ("mod", "stardew", "valley", "custom", "continued", "redux", "revisited")]
 
     # 1. Check downloaded archives (.zip, .rar, .7z)
     if dl_dir and os.path.isdir(dl_dir):
@@ -519,6 +525,11 @@ def find_local_vortex_mod(mod_id: int, file_id: Optional[int] = None) -> tuple[O
                     return os.path.join(dl_dir, f), False
                 if file_id and str(file_id) in f:
                     return os.path.join(dl_dir, f), False
+                # Fallback: check matching tokens in filename
+                if name_tokens and len(name_tokens) >= 2:
+                    f_lower = f.lower()
+                    if all(t in f_lower for t in name_tokens[:3]):
+                        return os.path.join(dl_dir, f), False
         except Exception:
             pass
 
@@ -531,6 +542,10 @@ def find_local_vortex_mod(mod_id: int, file_id: Optional[int] = None) -> tuple[O
                     continue
                 if mod_id and f"-{mod_id}-" in d:
                     return full_p, True
+                if name_tokens and len(name_tokens) >= 2:
+                    d_lower = d.lower()
+                    if all(t in d_lower for t in name_tokens[:3]):
+                        return full_p, True
         except Exception:
             pass
 
