@@ -46,6 +46,67 @@ public class SafeDetourRuntimePlatform : IDetourRuntimePlatform
     }
 }
 
+// Custom safe IDetourNativePlatform to satisfy MonoMod.RuntimeDetour.DetourHelper.Native.
+// Bypasses MonoMod's dangerous ARM64 shellcode in GC heap which violates iOS W^X / codesigning.
+// Uses Apple's official sys_icache_invalidate from libSystem.dylib.
+public class SafeDetourNativePlatform : IDetourNativePlatform
+{
+    [System.Runtime.InteropServices.DllImport("libSystem.dylib", EntryPoint = "sys_icache_invalidate")]
+    private static extern void sys_icache_invalidate(IntPtr start, nuint len);
+
+    [System.Runtime.InteropServices.DllImport("libSystem.dylib", EntryPoint = "mprotect")]
+    private static extern int mprotect(IntPtr addr, nuint len, int prot);
+
+    private readonly IDetourNativePlatform _innerArm = new MonoMod.RuntimeDetour.Platforms.DetourNativeARMPlatform();
+    private static readonly long _pageSize = Environment.SystemPageSize;
+
+    public SafeDetourNativePlatform()
+    {
+        if (_innerArm is MonoMod.RuntimeDetour.Platforms.DetourNativeARMPlatform arm)
+        {
+            arm.ShouldFlushICache = false;
+        }
+    }
+
+    public NativeDetourData Create(IntPtr from, IntPtr to, byte? type) => _innerArm.Create(from, to, type);
+    public void Free(NativeDetourData data) => _innerArm.Free(data);
+    public void Apply(NativeDetourData data) => _innerArm.Apply(data);
+    public void Copy(IntPtr src, IntPtr dst, byte type) => _innerArm.Copy(src, dst, type);
+
+    public void MakeWritable(IntPtr addr, uint size) => SetMemPerms(addr, size, 7);
+    public void MakeExecutable(IntPtr addr, uint size) => SetMemPerms(addr, size, 5);
+    public void MakeReadWriteExecutable(IntPtr addr, uint size) => SetMemPerms(addr, size, 7);
+
+    public void FlushICache(IntPtr addr, uint size)
+    {
+        try
+        {
+            sys_icache_invalidate(addr, (nuint)size);
+        }
+        catch (Exception ex)
+        {
+            EngineLogger.LogWarning($"[SafeDetourNativePlatform] sys_icache_invalidate warning: {ex.Message}");
+        }
+    }
+
+    public IntPtr MemAlloc(uint size) => _innerArm.MemAlloc(size);
+    public void MemFree(IntPtr ptr) => _innerArm.MemFree(ptr);
+
+    private void SetMemPerms(IntPtr addr, uint size, int prot)
+    {
+        try
+        {
+            long start = addr.ToInt64() & ~(_pageSize - 1);
+            long end = (addr.ToInt64() + size + _pageSize - 1) & ~(_pageSize - 1);
+            mprotect((IntPtr)start, (nuint)(end - start), prot);
+        }
+        catch (Exception ex)
+        {
+            EngineLogger.LogWarning($"[SafeDetourNativePlatform] SetMemPerms error: {ex.Message}");
+        }
+    }
+}
+
 namespace SDViOS.Loader
 {
     public static class GameHost
@@ -254,11 +315,12 @@ namespace SDViOS.Loader
             try
             {
                 MonoMod.RuntimeDetour.DetourHelper.Runtime = new SafeDetourRuntimePlatform();
-                EngineLogger.Log("[GameHost] Pre-initialized DetourHelper.Runtime to SafeDetourRuntimePlatform.");
+                MonoMod.RuntimeDetour.DetourHelper.Native = new SafeDetourNativePlatform();
+                EngineLogger.Log("[GameHost] Pre-initialized DetourHelper.Runtime and Native to Safe platforms.");
             }
             catch (Exception ex)
             {
-                EngineLogger.LogWarning($"[GameHost] Failed to pre-initialize DetourHelper.Runtime: {ex.Message}");
+                EngineLogger.LogWarning($"[GameHost] Failed to pre-initialize DetourHelper: {ex.Message}");
             }
         }
 
@@ -346,6 +408,7 @@ namespace SDViOS.Loader
                     // Auto-patch SMAPI and Stardew Valley dlls if in writable location to prevent premature disposal / kill
                     sdvPath = RuntimeSmapiPatcher.EnsureGameRunnerPatched(sdvPath);
                     smapiPath = RuntimeSmapiPatcher.EnsureSmapiPatched(smapiPath);
+                    RuntimeSmapiPatcher.EnsureModsPatched(ModsDir);
 
                     Environment.SetEnvironmentVariable("SMAPI_INTERNAL_PATH", smapiInternalDir);
                     Environment.SetEnvironmentVariable("SMAPI_MODS_PATH", ModsDir);
@@ -359,11 +422,12 @@ namespace SDViOS.Loader
                     try
                     {
                         MonoMod.RuntimeDetour.DetourHelper.Runtime = new SafeDetourRuntimePlatform();
-                        EngineLogger.Log("[GameHost] Confirmed DetourHelper.Runtime set to SafeDetourRuntimePlatform.");
+                        MonoMod.RuntimeDetour.DetourHelper.Native = new SafeDetourNativePlatform();
+                        EngineLogger.Log("[GameHost] Confirmed DetourHelper.Runtime and Native set to Safe platforms.");
                     }
                     catch (Exception ex)
                     {
-                        EngineLogger.LogWarning($"[GameHost] Could not confirm DetourHelper.Runtime: {ex.Message}");
+                        EngineLogger.LogWarning($"[GameHost] Could not confirm DetourHelper: {ex.Message}");
                     }
 
                     // Redirect SMAPI Constants.InternalFilesPath and Constants.LogDir to Documents to prevent sandbox violations

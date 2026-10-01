@@ -576,5 +576,46 @@ namespace SDViOS.Compatibility
                 return false;
             }
         }
+
+        public static void EnsureModsPatched(string modsDir)
+        {
+            if (string.IsNullOrEmpty(modsDir) || !Directory.Exists(modsDir))
+                return;
+
+            try
+            {
+                string[] candidates = Directory.GetFiles(modsDir, "SpaceCore.dll", SearchOption.AllDirectories);
+                foreach (var spaceCorePath in candidates)
+                {
+                    try
+                    {
+                        var resolver = CreateResolver(spaceCorePath);
+                        var readerParams = new ReaderParameters { AssemblyResolver = resolver, ReadWrite = true };
+                        using var asm = AssemblyDefinition.ReadAssembly(spaceCorePath, readerParams);
+                        var spaceCoreType = asm.MainModule.GetType("SpaceCore.SpaceCore");
+                        var gather = spaceCoreType?.Methods.FirstOrDefault(m => m.Name == "GatherLocals");
+                        if (gather != null && gather.HasBody && gather.Body.Instructions.Count > 0)
+                        {
+                            if (gather.Body.Instructions[0].OpCode != OpCodes.Ret)
+                            {
+                                var il = gather.Body.GetILProcessor();
+                                var first = gather.Body.Instructions[0];
+                                il.InsertBefore(first, Instruction.Create(OpCodes.Ret));
+                                asm.Write();
+                                EngineLogger.Log($"[RuntimeSmapiPatcher] Successfully patched SpaceCore.GatherLocals in '{spaceCorePath}' for iOS compatibility.");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        EngineLogger.LogWarning($"[RuntimeSmapiPatcher] Could not patch SpaceCore at '{spaceCorePath}': {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[RuntimeSmapiPatcher] EnsureModsPatched warning: {ex.Message}");
+            }
+        }
     }
 }
