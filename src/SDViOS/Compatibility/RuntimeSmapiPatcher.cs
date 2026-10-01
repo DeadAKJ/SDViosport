@@ -104,6 +104,14 @@ namespace SDViOS.Compatibility
                     }
                 }
 
+                // 4. ConfigureAssemblyResolver: Add AppContext.BaseDirectory so Mono.Cecil can resolve BCL runtime assemblies
+                if (PatchConfigureAssemblyResolver(mod))
+                    modified = true;
+
+                // 5. ReferenceToInvalidMemberFinder: Guard method validation to only target game assemblies
+                if (PatchReferenceToInvalidMemberFinder(mod))
+                    modified = true;
+
                 if (!modified)
                 {
                     EngineLogger.Log($"[RuntimeSmapiPatcher] '{smapiDllPath}' is already patched.");
@@ -435,6 +443,137 @@ namespace SDViOS.Compatibility
             {
                 EngineLogger.LogError($"[RuntimeSmapiPatcher] Failed to save patched assembly to cache: {ex2.Message}");
                 return originalPath;
+            }
+        }
+
+        private static bool PatchConfigureAssemblyResolver(ModuleDefinition mod)
+        {
+            try
+            {
+                var constType = mod.GetType("StardewModdingAPI.Constants");
+                if (constType == null) return false;
+
+                var cfgMethod = constType.Methods.FirstOrDefault(m => m.Name == "ConfigureAssemblyResolver");
+                if (cfgMethod == null || !cfgMethod.HasBody) return false;
+
+                if (cfgMethod.Body.Instructions.Any(i => i.OpCode == OpCodes.Call && i.Operand is MethodReference mr && mr.Name == "get_BaseDirectory"))
+                {
+                    EngineLogger.Log("[RuntimeSmapiPatcher] Constants.ConfigureAssemblyResolver is already patched with BaseDirectory.");
+                    return false;
+                }
+
+                var tryAddDirInst = cfgMethod.Body.Instructions.FirstOrDefault(i =>
+                    i.OpCode == OpCodes.Callvirt && i.Operand is MethodReference mr && mr.Name == "TryAddSearchDirectory");
+                if (tryAddDirInst == null || !(tryAddDirInst.Operand is MethodReference tryAddDirMethod))
+                {
+                    EngineLogger.LogWarning("[RuntimeSmapiPatcher] TryAddSearchDirectory not found in ConfigureAssemblyResolver.");
+                    return false;
+                }
+
+                var popInst = tryAddDirInst.Next;
+                if (popInst == null) return false;
+                var targetInst = popInst.Next;
+                if (targetInst == null) return false;
+
+                var il = cfgMethod.Body.GetILProcessor();
+                var appContextType = new TypeReference("System", "AppContext", mod, mod.TypeSystem.CoreLibrary);
+                var getBaseDir = new MethodReference("get_BaseDirectory", mod.TypeSystem.String, appContextType);
+
+                il.InsertBefore(targetInst, il.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(targetInst, il.Create(OpCodes.Call, getBaseDir));
+                il.InsertBefore(targetInst, il.Create(OpCodes.Callvirt, tryAddDirMethod));
+                il.InsertBefore(targetInst, il.Create(OpCodes.Pop));
+
+                EngineLogger.Log("[RuntimeSmapiPatcher] Patched Constants.ConfigureAssemblyResolver to add AppContext.BaseDirectory.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogError($"[RuntimeSmapiPatcher] Failed to patch ConfigureAssemblyResolver: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static bool PatchReferenceToInvalidMemberFinder(ModuleDefinition mod)
+        {
+            try
+            {
+                var finderType = mod.GetType("StardewModdingAPI.Framework.ModLoading.Finders.ReferenceToInvalidMemberFinder");
+                if (finderType == null) return false;
+
+                var handleMethod = finderType.Methods.FirstOrDefault(m => m.Name == "Handle");
+                if (handleMethod == null || !handleMethod.HasBody) return false;
+
+                var shouldValidate = finderType.Methods.FirstOrDefault(m => m.Name == "ShouldValidate");
+                if (shouldValidate == null) return false;
+
+                // Find the exit target: last ldc.i4.0 before ret
+                var lastRet = handleMethod.Body.Instructions.LastOrDefault(i => i.OpCode == OpCodes.Ret);
+                if (lastRet == null || lastRet.Previous == null) return false;
+                var exitTarget = lastRet.Previous; // ldc.i4.0
+
+                bool modified = false;
+
+                // 1. Retarget any ShouldValidate brfalse in method validation to exitTarget instead of broken-code block (IL_02a2)
+                for (int i = 0; i < handleMethod.Body.Instructions.Count; i++)
+                {
+                    var inst = handleMethod.Body.Instructions[i];
+                    if (inst.OpCode == OpCodes.Call && inst.Operand is MethodReference mr && mr.Name == "ShouldValidate")
+                    {
+                        var brInst = inst.Next;
+                        if (brInst != null && (brInst.OpCode == OpCodes.Brfalse || brInst.OpCode == OpCodes.Brfalse_S))
+                        {
+                            if (brInst.Operand is Instruction target && target != exitTarget && i > 50)
+                            {
+                                brInst.OpCode = OpCodes.Brfalse;
+                                brInst.Operand = exitTarget;
+                                modified = true;
+                                EngineLogger.Log("[RuntimeSmapiPatcher] Retargeted method ShouldValidate brfalse to exitTarget.");
+                            }
+                        }
+                    }
+                }
+
+                // 2. Insert early ShouldValidate guard before method resolution
+                int shouldValidateCalls = handleMethod.Body.Instructions.Count(i =>
+                    i.OpCode == OpCodes.Call && i.Operand is MethodReference mr && mr.Name == "ShouldValidate");
+                if (shouldValidateCalls < 3)
+                {
+                    var isUnsupportedInst = handleMethod.Body.Instructions.FirstOrDefault(i =>
+                        i.OpCode == OpCodes.Call && i.Operand is MethodReference mr && mr.Name == "IsUnsupported");
+                    if (isUnsupportedInst != null)
+                    {
+                        var brAfter = isUnsupportedInst.Next;
+                        if (brAfter != null && brAfter.OpCode == OpCodes.Brtrue)
+                        {
+                            var nextInst = brAfter.Next;
+                            var ldfldMethodRef = handleMethod.Body.Instructions.FirstOrDefault(i =>
+                                i.OpCode == OpCodes.Ldfld && i.Operand is FieldReference fr && fr.Name == "methodRef")?.Operand as FieldReference;
+                            var getDeclaringType = handleMethod.Body.Instructions.FirstOrDefault(i =>
+                                i.OpCode == OpCodes.Callvirt && i.Operand is MethodReference mr && mr.Name == "get_DeclaringType")?.Operand as MethodReference;
+
+                            if (ldfldMethodRef != null && getDeclaringType != null && nextInst != null)
+                            {
+                                var il = handleMethod.Body.GetILProcessor();
+                                il.InsertBefore(nextInst, il.Create(OpCodes.Ldarg_0));
+                                il.InsertBefore(nextInst, il.Create(OpCodes.Ldloc_0));
+                                il.InsertBefore(nextInst, il.Create(OpCodes.Ldfld, ldfldMethodRef));
+                                il.InsertBefore(nextInst, il.Create(OpCodes.Callvirt, getDeclaringType));
+                                il.InsertBefore(nextInst, il.Create(OpCodes.Call, shouldValidate));
+                                il.InsertBefore(nextInst, il.Create(OpCodes.Brfalse, exitTarget));
+                                modified = true;
+                                EngineLogger.Log("[RuntimeSmapiPatcher] Patched ReferenceToInvalidMemberFinder.Handle with early ShouldValidate guard.");
+                            }
+                        }
+                    }
+                }
+
+                return modified;
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogError($"[RuntimeSmapiPatcher] Failed to patch ReferenceToInvalidMemberFinder: {ex.Message}");
+                return false;
             }
         }
     }

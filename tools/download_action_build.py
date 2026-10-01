@@ -19,26 +19,23 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.2.3-fix-trackpad-click-registration'
+version_name = 'v1.2.4-fix-mod-loading-compatibility'
 
-changelog_content = """Version: v1.2.3-fix-trackpad-click-registration
-Date: 2026-09-26
+changelog_content = """Version: v1.2.4-fix-mod-loading-compatibility
+Date: 2026-10-01
 
 Changes:
-1. Fix Trackpad Tap-to-Click & Multi-touch Right Click Registration:
+1. Fix SMAPI Mod Loading Compatibility on iOS:
    - Root Cause:
-     * The previous watchdog condition `touch.State != TouchLocationState.Released` caused any touch in the `Released` state to be treated as non-existent and wiped active touch IDs before `HandleTrackpadTouch` ever processed the release.
-     * As a result, tap-to-click releases never matched `_trackpadPrimaryTouchId` and click simulation frames were never triggered.
-   - Watchdog Touch Presence:
-     * Watchdog now tests physical presence of touch IDs in `TouchCollection` without excluding the `Released` state, allowing `HandleTrackpadTouch` to properly detect the tap completion.
-   - Immediate Click Frame Dispatch:
-     * On tap release, `SimulatedMouseLeftDown = true` or `SimulatedMouseRightDown = true` is set immediately on the release frame and maintained for 10 frames (~160ms) to ensure MonoGame and Stardew Valley game loops register the complete press-and-release cycle.
-   - Robust Multi-Touch Right Click:
-     * Added `_trackpadHadSecondTouch` tracking and cooldown timer so 2-finger taps reliably register Right Click without accidentally triggering an erroneous 1-finger Left Click when the primary finger lifts slightly later.
-   - Realistic Mobile Tap Tolerances:
-     * Adjusted maximum movement tolerance to 45px (left click) / 50px (right click) and duration to 0.45s / 0.55s, accommodating natural thumb squish and micro-sliding on high-DPI iOS Retina displays.
-   - Synchronized Options & Gamepad Mode:
-     * Included `SimulatedMouseRightDown` in Game1 mouse motion / gamepad controls state updates.
+     * When SMAPI loads mods (e.g. Content Patcher, Generic Mod Config Menu), Mono.Cecil validates assembly metadata references.
+     * On desktop platforms, BCL assemblies reside next to the game executable. On iOS, BCL runtime assemblies reside in the app bundle (`SDViOS.app`).
+     * `Constants.ConfigureAssemblyResolver` previously only registered `GamePath` and `InternalFilesPath`, omitting `AppContext.BaseDirectory` (`SDViOS.app`). Consequently, Cecil failed to resolve standard .NET BCL assemblies (`System.Linq`, `System.Collections`, `System.Private.CoreLib`, etc.), returning null for valid standard method calls.
+     * Furthermore, `ReferenceToInvalidMemberFinder.Handle` lacked an early `ShouldValidate` guard for method calls, and routed unresolved methods directly to `IL_02a2` (the broken code reporter), flagging hundreds of standard .NET methods (like `Enumerable.Concat`, `Action` constructors, `LinkedList` members) as "no such method" and marking mods as incompatible.
+   - AppContext.BaseDirectory Resolver Registration:
+     * Patched `Constants.ConfigureAssemblyResolver` in `RuntimeSmapiPatcher` to automatically add `AppContext.BaseDirectory` (`SDViOS.app`) to Cecil's search directories.
+   - Early ShouldValidate Method Guard:
+     * Patched `ReferenceToInvalidMemberFinder.Handle` to check `ShouldValidate(methodRef.DeclaringType)` before resolving methods. Third-party and BCL method calls outside the core game assemblies are no longer falsely flagged as broken code.
+     * Retargeted the method-level `ShouldValidate` `brfalse` branch to the clean method exit rather than the broken code reporting block.
 """
 
 
