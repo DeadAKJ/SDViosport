@@ -914,8 +914,7 @@ namespace SDViOSTouchControls
                                      Game1.graphics.PreferredBackBufferHeight != targetH ||
                                      gd.PresentationParameters.BackBufferWidth != targetW ||
                                      gd.PresentationParameters.BackBufferHeight != targetH ||
-                                     Game1.graphics.IsFullScreen ||
-                                     Game1.viewport.Width < targetW / 2);
+                                     Game1.graphics.IsFullScreen);
 
                 if (sizeNeedsSync || force)
                 {

@@ -96,6 +96,8 @@ namespace SDViOSTouchControls
                     AddOptionKeys(keys, opt?.moveRightButton);
                 }
 
+                bool isGamepad = opt != null && opt.gamepadControls;
+
                 if (ButtonA)
                 {
                     keys.Add(Keys.X);
@@ -107,18 +109,15 @@ namespace SDViOSTouchControls
                     keys.Add(Keys.C);
                     AddOptionKeys(keys, opt?.useToolButton);
                 }
-                if (ButtonY)
+                if (ButtonY && !isGamepad)
                 {
                     keys.Add(Keys.E);
                     AddOptionKeys(keys, opt?.menuButton);
                 }
-                if (ButtonB || ButtonMenu)
+                if ((ButtonB || ButtonMenu) && !isGamepad)
                 {
-                    if (ButtonMenu || Game1.activeClickableMenu != null || Game1.dialogueUp || Game1.currentMinigame != null || Game1.eventUp)
-                    {
-                        keys.Add(Keys.Escape);
-                        AddOptionKeys(keys, opt?.cancelButton);
-                    }
+                    keys.Add(Keys.Escape);
+                    AddOptionKeys(keys, opt?.cancelButton);
                 }
 
                 return new KeyboardState(keys.ToArray());
@@ -129,13 +128,13 @@ namespace SDViOSTouchControls
         {
             get
             {
-                bool canCancel = Game1.activeClickableMenu != null || Game1.dialogueUp || Game1.currentMinigame != null || Game1.eventUp;
+                bool isGamepad = Game1.options != null && Game1.options.gamepadControls;
                 var buttons = new GamePadButtons(
                     (ButtonA ? Buttons.A : 0) |
-                    ((ButtonB && canCancel) ? Buttons.B : 0) |
+                    ((ButtonB && isGamepad) ? Buttons.B : 0) |
                     (ButtonX ? Buttons.X : 0) |
-                    (ButtonY ? Buttons.Y : 0) |
-                    (ButtonMenu ? Buttons.Start : 0)
+                    ((ButtonY && isGamepad) ? Buttons.Y : 0) |
+                    ((ButtonMenu && isGamepad) ? Buttons.Start : 0)
                 );
                 var dpad = new GamePadDPad(
                     DPadUp ? ButtonState.Pressed : ButtonState.Released,
@@ -539,9 +538,9 @@ namespace SDViOSTouchControls
                     if (Settings.ShowMenuBtn && !_btnMenuRect.IsEmpty && _btnMenuRect.Contains(pt))
                     {
                         menuTouchFound = true;
-                        if (!_menuTouchActive && (curTime - _lastMenuPressTime > 0.35))
+                        if (!_menuTouchActive && (curTime - _lastMenuPressTime > 0.25))
                         {
-                            _menuPulseFrames = 2;
+                            _menuPulseFrames = 1;
                             _lastMenuPressTime = curTime;
                         }
                         continue;
@@ -564,9 +563,9 @@ namespace SDViOSTouchControls
                 {
                     yTouchFound = true;
                     hitButton = true;
-                    if (!_yTouchActive && (curTime - _lastYPressTime > 0.35))
+                    if (!_yTouchActive && (curTime - _lastYPressTime > 0.25))
                     {
-                        _yPulseFrames = 2;
+                        _yPulseFrames = 1;
                         _lastYPressTime = curTime;
                     }
                 }
@@ -575,10 +574,9 @@ namespace SDViOSTouchControls
                 {
                     bTouchFound = true;
                     hitButton = true;
-                    bool canCancel = Game1.activeClickableMenu != null || Game1.dialogueUp || Game1.currentMinigame != null || Game1.eventUp;
-                    if (canCancel && !_bTouchActive && (curTime - _lastBPressTime > 0.35))
+                    if (!_bTouchActive && (curTime - _lastBPressTime > 0.25))
                     {
-                        _bPulseFrames = 2;
+                        _bPulseFrames = 1;
                         _lastBPressTime = curTime;
                     }
                 }
@@ -1007,9 +1005,12 @@ namespace SDViOSTouchControls
                 // 3. StardewValley Game1 mouse visibility & motion flags
                 try
                 {
-                    Game1.lastCursorMotionWasMouse = true;
-                    Game1.mouseCursorTransparency = 1f;
-                    Game1.wasMouseVisibleThisFrame = true;
+                    if (IsMouseOverridden && (SimulatedMouseLeftDown || SimulatedMouseRightDown || _trackpadPrimaryTouchId != -1 || _pointClickTouchId != -1))
+                    {
+                        Game1.lastCursorMotionWasMouse = true;
+                        Game1.mouseCursorTransparency = 1f;
+                        Game1.wasMouseVisibleThisFrame = true;
+                    }
                 }
                 catch { }
 
@@ -1020,19 +1021,16 @@ namespace SDViOSTouchControls
                 if (DPadLeft) { activeKeys.Add(Keys.A); activeKeys.Add(Keys.Left); }
                 if (DPadRight) { activeKeys.Add(Keys.D); activeKeys.Add(Keys.Right); }
 
+                bool isGamepad = Game1.options != null && Game1.options.gamepadControls;
+
                 if (ButtonA)
                 {
                     activeKeys.Add(Keys.X);
                     activeKeys.Add(Keys.Space);
                 }
                 if (ButtonX) activeKeys.Add(Keys.C);
-                if (ButtonY) activeKeys.Add(Keys.E);
-                if (ButtonB)
-                {
-                    if (Game1.activeClickableMenu != null || Game1.dialogueUp || Game1.currentMinigame != null || Game1.eventUp)
-                        activeKeys.Add(Keys.Escape);
-                }
-                if (ButtonMenu) activeKeys.Add(Keys.Escape);
+                if (ButtonY && !isGamepad) activeKeys.Add(Keys.E);
+                if ((ButtonB || ButtonMenu) && !isGamepad) activeKeys.Add(Keys.Escape);
 
                 try
                 {
@@ -1101,7 +1099,7 @@ namespace SDViOSTouchControls
                 catch { }
 
                 // 7. Ensure Game1 cursor remains visible
-                if (_lastCursorMotionWasMouseField != null)
+                if (_lastCursorMotionWasMouseField != null && IsMouseOverridden && (SimulatedMouseLeftDown || SimulatedMouseRightDown || _trackpadPrimaryTouchId != -1 || _pointClickTouchId != -1))
                 {
                     _lastCursorMotionWasMouseField.SetValue(null, true);
                 }
