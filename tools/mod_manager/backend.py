@@ -1029,6 +1029,7 @@ class IOSModBackend:
                 "has_update": has_update,
                 "url": url,
                 "nexus_id": mod_id,
+                "github_repo": github_repo,
                 "source": source
             })
 

@@ -1074,7 +1074,7 @@ class PrerequisitesCheckDialog(QDialog):
 
 
 class UpdateCheckDialog(QDialog):
-    def __init__(self, parent, sys_status: dict, mod_updates: list[dict], nexus_api: NexusAPI, dispatcher: AsyncDispatcher):
+    def __init__(self, parent, sys_status: dict, mod_updates: list[dict], nexus_api: NexusAPI, dispatcher: AsyncDispatcher, on_update_mod: Optional[Callable] = None):
         super().__init__(parent)
         self.setWindowTitle("Update Checker — Stardew Valley & Mods")
         self.resize(840, 620)
@@ -1083,6 +1083,7 @@ class UpdateCheckDialog(QDialog):
         self.mod_updates = mod_updates
         self.nexus_api = nexus_api
         self.dispatcher = dispatcher
+        self.on_update_mod = on_update_mod
 
         self._build_ui()
 
@@ -1207,16 +1208,25 @@ class UpdateCheckDialog(QDialog):
             act_widget = QWidget()
             act_layout = QHBoxLayout(act_widget)
             act_layout.setContentsMargins(4, 2, 4, 2)
+            act_layout.setSpacing(6)
             act_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            if u.get("has_update") and self.on_update_mod:
+                btn_upd = QPushButton("⚡ Update Mod")
+                btn_upd.setObjectName("SuccessBtn")
+                btn_upd.setFixedHeight(26)
+                btn_upd.setToolTip(f"Download and install update for {u['name']} ({u['latest_version']}) directly to iPhone")
+                btn_upd.clicked.connect(lambda _, item=u: (self.accept(), self.on_update_mod(item)))
+                act_layout.addWidget(btn_upd)
+
             if u.get("url"):
-                btn_open = QPushButton("View Page ↗" if not u.get("has_update") else "Update / View ↗")
+                btn_open = QPushButton("Web ↗")
                 btn_open.setFixedHeight(26)
-                if u.get("has_update"):
-                    btn_open.setObjectName("SuccessBtn")
-                else:
-                    btn_open.setObjectName("SecondaryBtn")
+                btn_open.setObjectName("SecondaryBtn")
+                btn_open.setToolTip(f"Open {u['name']} page in browser")
                 btn_open.clicked.connect(lambda _, url=u["url"]: QDesktopServices.openUrl(QUrl(url)))
                 act_layout.addWidget(btn_open)
+
             self.table.setCellWidget(row, 4, act_widget)
 
         layout.addWidget(self.table)
@@ -2870,12 +2880,12 @@ class ModManagerWindow(QMainWindow):
             act_layout.setSpacing(6)
             act_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            if update_info and update_info.get("has_update") and update_info.get("url"):
+            if update_info and update_info.get("has_update"):
                 btn_upd = QPushButton("⚡ Update")
                 btn_upd.setObjectName("SuccessBtn")
                 btn_upd.setFixedHeight(26)
-                btn_upd.setToolTip(f"Open update page for {mod.name} ({update_info['latest_version']})")
-                btn_upd.clicked.connect(lambda _, u=update_info["url"]: QDesktopServices.openUrl(QUrl(u)))
+                btn_upd.setToolTip(f"Download and install update for {mod.name} ({update_info['latest_version']}) directly to iPhone")
+                btn_upd.clicked.connect(lambda _, u=update_info: self._trigger_mod_update(u))
                 act_layout.addWidget(btn_upd)
 
             btn_del = QPushButton("Delete")
@@ -3099,7 +3109,8 @@ class ModManagerWindow(QMainWindow):
                 sys_status=sys_status,
                 mod_updates=mod_updates,
                 nexus_api=self.nexus_api,
-                dispatcher=self.dispatcher
+                dispatcher=self.dispatcher,
+                on_update_mod=self._trigger_mod_update
             )
             dlg.exec()
 
@@ -3111,6 +3122,101 @@ class ModManagerWindow(QMainWindow):
             QMessageBox.warning(self, "Update Check Error", f"Failed to check updates:\n{err}")
 
         self.dispatcher.run_async(run_update_check(), on_success=on_done, on_error=on_fail)
+
+    def _trigger_mod_update(self, update_info: dict):
+        """Intelligently download and install a mod update directly to the iOS device."""
+        if not self.backend.is_connected:
+            QMessageBox.warning(self, "Not Connected", "Please connect your iOS device via USB or select a local folder first.")
+            return
+
+        mod_name = update_info.get("name", "Mod")
+        mod_id = update_info.get("nexus_id")
+        github_repo = update_info.get("github_repo")
+        if not github_repo and "github.com/" in update_info.get("url", ""):
+            m = re.search(r"github\.com/([^/]+/[^/]+)", update_info["url"])
+            if m:
+                github_repo = m.group(1).rstrip("/")
+
+        # 1. GitHub Direct Download & Installation
+        if github_repo:
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 0)
+            self.status_bar.setText(f" Resolving GitHub release asset for {mod_name}...")
+
+            def fetch_gh_asset():
+                req = urllib.request.Request(
+                    f"https://api.github.com/repos/{github_repo}/releases/latest",
+                    headers={"User-Agent": "SDViOS-ModManager"}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode())
+                    for a in data.get("assets", []):
+                        if a.get("name", "").lower().endswith(".zip"):
+                            return a.get("browser_download_url")
+                return None
+
+            def on_gh_asset(url):
+                if url:
+                    self._handle_direct_download_url(url)
+                else:
+                    QDesktopServices.openUrl(QUrl(f"https://github.com/{github_repo}/releases"))
+
+            self.dispatcher.run_async(
+                asyncio.to_thread(fetch_gh_asset),
+                on_success=on_gh_asset,
+                on_error=lambda err: QDesktopServices.openUrl(QUrl(f"https://github.com/{github_repo}/releases"))
+            )
+            return
+
+        # 2. Nexus Mods Download & Installation
+        if mod_id:
+            files_url = f"https://www.nexusmods.com/stardewvalley/mods/{mod_id}?tab=files"
+
+            if not self.nexus_api.api_key:
+                QDesktopServices.openUrl(QUrl(files_url))
+                return
+
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 0)
+            self.status_bar.setText(f" Requesting download link for {mod_name} from Nexus...")
+
+            def check_nexus():
+                pfile = self.nexus_api.get_primary_mod_file("stardewvalley", mod_id)
+                if not pfile:
+                    return None, "No downloadable files found on Nexus for this mod."
+                file_id = pfile.get("file_id")
+                try:
+                    links = self.nexus_api.get_download_links("stardewvalley", mod_id, file_id)
+                    return links, None
+                except Exception as e:
+                    return None, str(e)
+
+            def on_nexus_res(res):
+                links, err = res
+                if links and len(links) > 0:
+                    self._handle_direct_download_url(links[0])
+                else:
+                    self.progress_bar.setVisible(False)
+                    self.status_bar.setText(f" Opening Nexus files page for {mod_name}...")
+                    QMessageBox.information(
+                        self, "Nexus Download Notice",
+                        f"Nexus Mods requires free accounts to initiate downloads from their website (direct API download links are restricted to Premium accounts).\n\n"
+                        f"Opening the Files page for '{mod_name}' in your browser now.\n\n"
+                        f"👉 Click 'MOD MANAGER DOWNLOAD' (or 'VORTEX') on that page and this Mod Manager will automatically receive it and install it straight to your iPhone!",
+                        QMessageBox.StandardButton.Ok
+                    )
+                    QDesktopServices.openUrl(QUrl(files_url))
+
+            self.dispatcher.run_async(
+                asyncio.to_thread(check_nexus),
+                on_success=on_nexus_res,
+                on_error=lambda err: QDesktopServices.openUrl(QUrl(files_url))
+            )
+            return
+
+        # Fallback
+        if update_info.get("url"):
+            QDesktopServices.openUrl(QUrl(update_info["url"]))
 
     def _browse_and_install_mod(self):
         if not self.backend.is_connected:
