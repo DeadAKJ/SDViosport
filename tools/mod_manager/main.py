@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
     QDialog, QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject
-from PyQt6.QtGui import QColor, QFont, QIcon, QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import QColor, QFont, QIcon, QDragEnterEvent, QDropEvent, QTextCursor
 from PyQt6.QtNetwork import QTcpServer, QHostAddress
 
 try:
@@ -2036,6 +2036,16 @@ class ModManagerWindow(QMainWindow):
         self.log_viewer.setPlaceholderText("Click 'Fetch Latest SMAPI Log' to stream logs directly from your iPhone over USB...")
         layout.addWidget(self.log_viewer)
 
+    def _on_smapi_log_received(self, text: str):
+        self.log_viewer.setPlainText(text)
+        cursor = self.log_viewer.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.log_viewer.setTextCursor(cursor)
+        vsb = self.log_viewer.verticalScrollBar()
+        if vsb:
+            vsb.setValue(vsb.maximum())
+        self.status_bar.setText(" SMAPI log fetched from device (scrolled to bottom).")
+
     def _fetch_smapi_log(self):
         if not self.backend.is_connected:
             QMessageBox.warning(self, "Not Connected", "Please connect your device first.")
@@ -2044,7 +2054,7 @@ class ModManagerWindow(QMainWindow):
         self.status_bar.setText(" Fetching SMAPI log from device...")
         self.dispatcher.run_async(
             self.backend.get_smapi_log(),
-            on_success=lambda text: self.log_viewer.setPlainText(text),
+            on_success=self._on_smapi_log_received,
             on_error=lambda e: self.log_viewer.setPlainText(f"Error fetching log: {e}")
         )
 

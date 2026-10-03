@@ -191,6 +191,9 @@ namespace SDViOS.Loader
                 }
             }
 
+            // Always ensure built-in SDViOSTouchControls mod is deployed
+            EnsureDefaultModsDeployed();
+
             // Clean up any stale BCL DLL that may have been placed into Documents in older builds
             string staleCoreLib = Path.Combine(GameRootDir, "System.Private.CoreLib.dll");
             if (File.Exists(staleCoreLib))
@@ -218,6 +221,51 @@ namespace SDViOS.Loader
             }
 
             SetupAssemblyResolver(BundleDir);
+        }
+
+        public static void EnsureDefaultModsDeployed()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ModsDir)) return;
+                string targetDir = Path.Combine(ModsDir, "SDViOSTouchControls");
+                Directory.CreateDirectory(targetDir);
+
+                string targetDll = Path.Combine(targetDir, "SDViOSTouchControls.dll");
+                string targetManifest = Path.Combine(targetDir, "manifest.json");
+
+                var currentAsm = Assembly.GetExecutingAssembly();
+                using (var dllStream = currentAsm.GetManifestResourceStream("SDViOS.Resources.Mods.SDViOSTouchControls.SDViOSTouchControls.dll"))
+                {
+                    if (dllStream != null)
+                    {
+                        bool needDeploy = !File.Exists(targetDll) || new FileInfo(targetDll).Length != dllStream.Length;
+                        if (needDeploy)
+                        {
+                            using var fs = new FileStream(targetDll, FileMode.Create, FileAccess.Write, FileShare.None);
+                            dllStream.CopyTo(fs);
+                            EngineLogger.Log("[GameHost] Deployed embedded SDViOSTouchControls.dll to Documents/Mods.");
+                        }
+                    }
+                }
+
+                using (var mfStream = currentAsm.GetManifestResourceStream("SDViOS.Resources.Mods.SDViOSTouchControls.manifest.json"))
+                {
+                    if (mfStream != null)
+                    {
+                        if (!File.Exists(targetManifest))
+                        {
+                            using var fs = new FileStream(targetManifest, FileMode.Create, FileAccess.Write, FileShare.None);
+                            mfStream.CopyTo(fs);
+                            EngineLogger.Log("[GameHost] Deployed embedded manifest.json to Documents/Mods.");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[GameHost] Could not deploy embedded default mods: {ex.Message}");
+            }
         }
 
         private static void SyncBundledDirectory(string sourceDir, string targetDir, bool forceOverwrite = false)
@@ -533,15 +581,30 @@ namespace SDViOS.Loader
                             {
                                 Directory.CreateDirectory(dir);
                                 string userConfigPath = Path.Combine(dir, "config.user.json");
-                                File.WriteAllText(userConfigPath, "{\"ConsoleColorScheme\":\"DarkBackground\",\"ListenForConsoleInput\":false,\"CheckForUpdates\":false,\"CheckForBlacklistUpdates\":false}");
+                                File.WriteAllText(userConfigPath, "{\"ConsoleColorScheme\":\"DarkBackground\",\"ListenForConsoleInput\":false,\"CheckForUpdates\":false,\"CheckForBlacklistUpdates\":false,\"UseCaseInsensitivePaths\":true}");
 
                                 string configPath = Path.Combine(dir, "config.json");
                                 if (File.Exists(configPath))
                                 {
                                     string cfg = File.ReadAllText(configPath);
+                                    bool modified = false;
                                     if (cfg.Contains("\"AutoDetect\""))
                                     {
                                         cfg = cfg.Replace("\"AutoDetect\"", "\"DarkBackground\"");
+                                        modified = true;
+                                    }
+                                    if (cfg.Contains("\"UseCaseInsensitivePaths\": false"))
+                                    {
+                                        cfg = cfg.Replace("\"UseCaseInsensitivePaths\": false", "\"UseCaseInsensitivePaths\": true");
+                                        modified = true;
+                                    }
+                                    else if (cfg.Contains("\"UseCaseInsensitivePaths\": null"))
+                                    {
+                                        cfg = cfg.Replace("\"UseCaseInsensitivePaths\": null", "\"UseCaseInsensitivePaths\": true");
+                                        modified = true;
+                                    }
+                                    if (modified)
+                                    {
                                         File.WriteAllText(configPath, cfg);
                                     }
                                 }
@@ -555,7 +618,7 @@ namespace SDViOS.Loader
                             {
                                 Directory.CreateDirectory(ModsDir);
                                 string smapiConfigPath = Path.Combine(ModsDir, "SMAPI-config.json");
-                                File.WriteAllText(smapiConfigPath, "{\"ConsoleColorScheme\":\"DarkBackground\",\"ListenForConsoleInput\":false,\"CheckForUpdates\":false,\"CheckForBlacklistUpdates\":false}");
+                                File.WriteAllText(smapiConfigPath, "{\"ConsoleColorScheme\":\"DarkBackground\",\"ListenForConsoleInput\":false,\"CheckForUpdates\":false,\"CheckForBlacklistUpdates\":false,\"UseCaseInsensitivePaths\":true}");
                             }
                             catch { }
                         }
@@ -607,7 +670,8 @@ namespace SDViOS.Loader
                                 st.GetProperty("ListenForConsoleInput", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.SetValue(settings, false);
                                 st.GetProperty("CheckForUpdates", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.SetValue(settings, false);
                                 st.GetProperty("CheckForBlacklistUpdates", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.SetValue(settings, false);
-                                EngineLogger.Log("[GameHost] Configured SCore.Settings: ListenForConsoleInput=false, CheckForUpdates=false.");
+                                st.GetProperty("UseCaseInsensitivePaths", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.SetValue(settings, true);
+                                EngineLogger.Log("[GameHost] Configured SCore.Settings: ListenForConsoleInput=false, CheckForUpdates=false, UseCaseInsensitivePaths=true.");
                             }
                         }
                         catch (Exception ex)

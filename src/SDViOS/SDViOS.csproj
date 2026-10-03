@@ -46,5 +46,7 @@
     <None Include="Info.plist" />
     <None Include="Entitlements.plist" />
     <EmbeddedResource Include="Resources\0Harmony.dll" />
+    <EmbeddedResource Include="Resources\Mods\SDViOSTouchControls\manifest.json" />
+    <EmbeddedResource Include="Resources\Mods\SDViOSTouchControls\SDViOSTouchControls.dll" />
   </ItemGroup>
 </Project>

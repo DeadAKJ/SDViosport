@@ -133,6 +133,122 @@ class Program
             }
         }
 
+        // 4. Neutralize PatchClassProcessor.Patch() and ProcessPatchJob
+        var pcp = mod.GetType("HarmonyLib.PatchClassProcessor");
+        if (pcp != null)
+        {
+            var pcpPatch = pcp.Methods.FirstOrDefault(m => m.Name == "Patch" && m.Parameters.Count == 0);
+            if (pcpPatch != null)
+            {
+                Console.WriteLine("  Neutralizing PatchClassProcessor.Patch() -> returns empty List<MethodInfo>...");
+                pcpPatch.Body.Instructions.Clear();
+                pcpPatch.Body.Variables.Clear();
+                pcpPatch.Body.ExceptionHandlers.Clear();
+                var il = pcpPatch.Body.GetILProcessor();
+                var listCtor = mod.ImportReference(typeof(List<MethodInfo>).GetConstructor(Type.EmptyTypes));
+                il.Emit(OpCodes.Newobj, listCtor);
+                il.Emit(OpCodes.Ret);
+            }
+
+            var pcpJob = pcp.Methods.FirstOrDefault(m => m.Name == "ProcessPatchJob");
+            if (pcpJob != null)
+            {
+                Console.WriteLine("  Neutralizing PatchClassProcessor.ProcessPatchJob() -> ret...");
+                pcpJob.Body.Instructions.Clear();
+                pcpJob.Body.Variables.Clear();
+                pcpJob.Body.ExceptionHandlers.Clear();
+                pcpJob.Body.GetILProcessor().Emit(OpCodes.Ret);
+            }
+        }
+
+        // 5. Neutralize PatchFunctions.UpdateWrapper
+        var pf = mod.GetType("HarmonyLib.PatchFunctions");
+        if (pf != null)
+        {
+            var updateWrapper = pf.Methods.FirstOrDefault(m => m.Name == "UpdateWrapper");
+            if (updateWrapper != null)
+            {
+                Console.WriteLine("  Neutralizing PatchFunctions.UpdateWrapper() -> returns original as MethodInfo...");
+                updateWrapper.Body.Instructions.Clear();
+                updateWrapper.Body.Variables.Clear();
+                updateWrapper.Body.ExceptionHandlers.Clear();
+                var il = updateWrapper.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldarg_0);
+                var methodInfoRef = mod.ImportReference(typeof(MethodInfo));
+                il.Emit(OpCodes.Isinst, methodInfoRef);
+                il.Emit(OpCodes.Ret);
+            }
+        }
+
+        // 6. Neutralize HarmonyLib.Memory native detour operations
+        var mem = mod.GetType("HarmonyLib.Memory");
+        if (mem != null)
+        {
+            var writeJump = mem.Methods.FirstOrDefault(m => m.Name == "WriteJump");
+            if (writeJump != null)
+            {
+                Console.WriteLine("  Neutralizing Memory.WriteJump() -> returns null...");
+                writeJump.Body.Instructions.Clear();
+                writeJump.Body.Variables.Clear();
+                writeJump.Body.ExceptionHandlers.Clear();
+                var il = writeJump.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldnull);
+                il.Emit(OpCodes.Ret);
+            }
+
+            var detourMethod = mem.Methods.FirstOrDefault(m => m.Name == "DetourMethod");
+            if (detourMethod != null)
+            {
+                Console.WriteLine("  Neutralizing Memory.DetourMethod() -> returns null...");
+                detourMethod.Body.Instructions.Clear();
+                detourMethod.Body.Variables.Clear();
+                detourMethod.Body.ExceptionHandlers.Clear();
+                var il = detourMethod.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldnull);
+                il.Emit(OpCodes.Ret);
+            }
+
+            var detourPersist = mem.Methods.FirstOrDefault(m => m.Name == "DetourMethodAndPersist");
+            if (detourPersist != null)
+            {
+                Console.WriteLine("  Neutralizing Memory.DetourMethodAndPersist() -> ret...");
+                detourPersist.Body.Instructions.Clear();
+                detourPersist.Body.Variables.Clear();
+                detourPersist.Body.ExceptionHandlers.Clear();
+                detourPersist.Body.GetILProcessor().Emit(OpCodes.Ret);
+            }
+
+            var getMethodStart = mem.Methods.FirstOrDefault(m => m.Name == "GetMethodStart");
+            if (getMethodStart != null)
+            {
+                Console.WriteLine("  Neutralizing Memory.GetMethodStart() -> returns 0L...");
+                getMethodStart.Body.Instructions.Clear();
+                getMethodStart.Body.Variables.Clear();
+                getMethodStart.Body.ExceptionHandlers.Clear();
+                var il = getMethodStart.Body.GetILProcessor();
+                il.Emit(OpCodes.Ldarg_1);
+                il.Emit(OpCodes.Ldnull);
+                il.Emit(OpCodes.Stind_Ref);
+                il.Emit(OpCodes.Ldc_I4_0);
+                il.Emit(OpCodes.Conv_I8);
+                il.Emit(OpCodes.Ret);
+            }
+        }
+
+        // 7. Neutralize HarmonySharedState.UpdatePatchInfo
+        if (t != null)
+        {
+            var updateInfo = t.Methods.FirstOrDefault(m => m.Name == "UpdatePatchInfo");
+            if (updateInfo != null)
+            {
+                Console.WriteLine("  Neutralizing HarmonySharedState.UpdatePatchInfo() -> ret...");
+                updateInfo.Body.Instructions.Clear();
+                updateInfo.Body.Variables.Clear();
+                updateInfo.Body.ExceptionHandlers.Clear();
+                updateInfo.Body.GetILProcessor().Emit(OpCodes.Ret);
+            }
+        }
+
         asm.Write();
         asm.Dispose();
         Console.WriteLine("=== Successfully patched 0Harmony.dll for iOS compatibility! ===");
