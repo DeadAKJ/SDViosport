@@ -58,22 +58,41 @@ KNOWN_FRAMEWORK_NEXUS_IDS = {
 }
 
 
-def is_requirement_installed(req_mod_id: int, req_name: str, installed_mods: list[ModInfo]) -> bool:
+def clean_json(text: str) -> str:
+    """Strip C-style comments (/* ... */ and // ...) and trailing commas from JSON for SMAPI manifest compatibility."""
+    # 1. Strip block comments /* ... */
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    # 2. Strip line comments // ... but preserve http:// and https://
+    lines = []
+    for line in text.splitlines():
+        clean_line = re.sub(r'(?<!http:)(?<!https:)//.*$', '', line)
+        lines.append(clean_line)
+    text = '\n'.join(lines)
+    # 3. Strip trailing commas before } or ] (repeat for nested structures)
+    for _ in range(3):
+        text = re.sub(r',\s*([}\]])', r'\1', text)
+    return text
+
+
+def is_requirement_installed(req_mod_id: Optional[int], req_name: str, installed_mods: list[ModInfo]) -> bool:
     """Check if a required mod is satisfied by any of the installed mods."""
     if req_mod_id == 2400 or "smapi" in req_name.lower():
         return True
 
-    # Normalize req name (strip notes/framework indicators)
-    clean_req = re.sub(r"\([^)]*\)", "", req_name).strip().lower()
+    # Normalize req name (strip notes/framework indicators and spaces/punctuation)
+    clean_req = re.sub(r"\([^)]*\)", "", req_name).strip().lower().replace(" ", "").replace("_", "").replace("-", "")
 
     for m in installed_mods:
-        if m.nexus_id and m.nexus_id == req_mod_id:
+        if req_mod_id and m.nexus_id and m.nexus_id == req_mod_id:
             return True
-        if m.unique_id and m.unique_id.lower() in KNOWN_FRAMEWORK_NEXUS_IDS:
+        if m.unique_id and req_mod_id and m.unique_id.lower() in KNOWN_FRAMEWORK_NEXUS_IDS:
             if KNOWN_FRAMEWORK_NEXUS_IDS[m.unique_id.lower()] == req_mod_id:
                 return True
-        m_name_lower = m.name.lower()
-        if clean_req and (clean_req == m_name_lower or clean_req in m_name_lower or m_name_lower in clean_req):
+        m_uid_clean = m.unique_id.lower().replace(".", "").replace(" ", "").replace("_", "").replace("-", "")
+        if clean_req and (clean_req == m_uid_clean or clean_req in m_uid_clean or m_uid_clean in clean_req):
+            return True
+        m_name_clean = m.name.lower().replace(" ", "").replace("_", "").replace("-", "")
+        if clean_req and (clean_req == m_name_clean or clean_req in m_name_clean or m_name_clean in clean_req):
             return True
 
     return False
@@ -243,7 +262,8 @@ class IOSModBackend:
         try:
             if await self.house_arrest.exists(manifest_path):
                 raw = await self.house_arrest.get_file_contents(manifest_path)
-                data = json.loads(raw.decode("utf-8-sig", errors="ignore"))
+                raw_str = clean_json(raw.decode("utf-8-sig", errors="ignore"))
+                data = json.loads(raw_str)
                 mod.name = data.get("Name", clean_name)
                 mod.author = data.get("Author", "Unknown")
                 mod.version = str(data.get("Version", "1.0.0"))
@@ -260,7 +280,10 @@ class IOSModBackend:
 
                 deps = data.get("Dependencies", [])
                 if isinstance(deps, list):
-                    mod.dependencies = [d.get("UniqueID", "") for d in deps if isinstance(d, dict) and "UniqueID" in d]
+                    mod.dependencies = [
+                        d.get("UniqueID", "") for d in deps 
+                        if isinstance(d, dict) and "UniqueID" in d and d.get("IsRequired", True)
+                    ]
 
                 update_keys = data.get("UpdateKeys", [])
                 if isinstance(update_keys, list):
@@ -292,7 +315,8 @@ class IOSModBackend:
         if os.path.isfile(manifest_path):
             try:
                 with open(manifest_path, "r", encoding="utf-8-sig", errors="ignore") as f:
-                    data = json.load(f)
+                    raw_str = clean_json(f.read())
+                    data = json.loads(raw_str)
                     mod.name = data.get("Name", clean_name)
                     mod.author = data.get("Author", "Unknown")
                     mod.version = str(data.get("Version", "1.0.0"))
@@ -309,7 +333,10 @@ class IOSModBackend:
 
                     deps = data.get("Dependencies", [])
                     if isinstance(deps, list):
-                        mod.dependencies = [d.get("UniqueID", "") for d in deps if isinstance(d, dict) and "UniqueID" in d]
+                        mod.dependencies = [
+                            d.get("UniqueID", "") for d in deps 
+                            if isinstance(d, dict) and "UniqueID" in d and d.get("IsRequired", True)
+                        ]
 
                     update_keys = data.get("UpdateKeys", [])
                     if isinstance(update_keys, list):

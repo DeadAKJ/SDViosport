@@ -2698,12 +2698,13 @@ class ModManagerWindow(QMainWindow):
                 # 1. ContentPackFor
                 if mod.is_content_pack and mod.content_pack_for:
                     target_uid = mod.content_pack_for.lower()
-                    if not any(m.unique_id.lower() == target_uid for m in self.mods_cache):
-                        cp_name = mod.content_pack_for
+                    nexus_id = KNOWN_FRAMEWORK_NEXUS_IDS.get(target_uid, 1915)
+                    cp_name = mod.content_pack_for
+                    if not any(m.unique_id.lower() == target_uid for m in self.mods_cache) and not is_requirement_installed(nexus_id, cp_name, self.mods_cache):
                         if cp_name not in missing_map:
                             missing_map[cp_name] = {
                                 "name": cp_name,
-                                "mod_id": KNOWN_FRAMEWORK_NEXUS_IDS.get(target_uid, 1915),
+                                "mod_id": nexus_id,
                                 "required_by": []
                             }
                         if mod.name not in missing_map[cp_name]["required_by"]:
@@ -2714,9 +2715,9 @@ class ModManagerWindow(QMainWindow):
                     dep_lower = dep_uid.lower()
                     if dep_lower in ["smapi", "pathoschild.smapi"]:
                         continue
-                    if not any(m.unique_id.lower() == dep_lower for m in self.mods_cache):
-                        nexus_id = KNOWN_FRAMEWORK_NEXUS_IDS.get(dep_lower)
-                        dep_name = dep_uid.split(".")[-1]
+                    nexus_id = KNOWN_FRAMEWORK_NEXUS_IDS.get(dep_lower)
+                    dep_name = dep_uid.split(".")[-1]
+                    if not any(m.unique_id.lower() == dep_lower for m in self.mods_cache) and not is_requirement_installed(nexus_id, dep_name, self.mods_cache):
                         if dep_name not in missing_map:
                             missing_map[dep_name] = {
                                 "name": dep_name,
