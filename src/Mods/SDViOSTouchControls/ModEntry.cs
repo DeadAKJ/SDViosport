@@ -287,16 +287,9 @@ namespace SDViOSTouchControls
                 Monitor.Log($"[SDViOSTouchControls] Error in keyboard patches: {ex.Message}", LogLevel.Error);
             }
 
-            // 3. GamePad and Gamepad Mode Patches
+            // 3. GamePad State Patches
             try
             {
-                var mCheckGamepadMode = typeof(Game1).GetMethod("CheckGamepadMode", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, null, Type.EmptyTypes, null);
-                if (mCheckGamepadMode != null)
-                {
-                    harmony.Patch(mCheckGamepadMode, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixFalse), BindingFlags.Static | BindingFlags.NonPublic)));
-                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.CheckGamepadMode -> false.", LogLevel.Info);
-                }
-
                 var mInputGetPad = typeof(InputState).GetMethod("GetGamePadState", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
                 if (mInputGetPad != null)
                 {
@@ -716,9 +709,13 @@ namespace SDViOSTouchControls
 
         private static bool PrefixGetGamePadState(ref GamePadState __result)
         {
-            // Always report empty/disconnected gamepad state so iOS/MonoGame doesn't trigger CheckGamepadMode toast loop or open pause menu!
-            __result = default(GamePadState);
-            return false;
+            var pad = TouchVirtualPad.Instance;
+            if (pad != null && pad.HasActiveInput)
+            {
+                __result = pad.CurrentSimulatedGamePadState;
+                return false;
+            }
+            return true;
         }
 
         private static FieldInfo? _hooksField = null;
@@ -772,15 +769,10 @@ namespace SDViOSTouchControls
         {
             try
             {
-                if (Game1.options != null)
-                {
-                    Game1.options.gamepadMode = Options.GamepadModes.ForceOff;
-                    Game1.options.gamepadControls = false;
-                }
                 EnsureNativeResolution(true);
                 EnsurePadInitialized();
                 EnsureModHooksWrapped();
-                Monitor.Log("[SDViOSTouchControls] GameLaunched: Full native resolution locked, ForceOff gamepad enforced & touch overlay ready.", LogLevel.Info);
+                Monitor.Log("[SDViOSTouchControls] GameLaunched: Full native resolution locked & touch overlay ready.", LogLevel.Info);
             }
             catch (Exception ex)
             {
@@ -846,31 +838,6 @@ namespace SDViOSTouchControls
 
                 // Ensure native resolution remains locked
                 EnsureNativeResolution(false);
-
-                // Enforce GamepadModes.ForceOff so Stardew never checks GamePad.GetState(), never shows toast, and never opens pause menu
-                if (Game1.options != null)
-                {
-                    if (Game1.options.gamepadMode != Options.GamepadModes.ForceOff)
-                    {
-                        Game1.options.gamepadMode = Options.GamepadModes.ForceOff;
-                    }
-                    Game1.options.gamepadControls = false;
-                }
-
-                // Purge any lingering or queued gamepad messages
-                if (Game1.hudMessages != null && Game1.hudMessages.Count > 0)
-                {
-                    for (int i = Game1.hudMessages.Count - 1; i >= 0; i--)
-                    {
-                        var msg = Game1.hudMessages[i];
-                        if (msg?.message != null && (
-                            msg.message.IndexOf("Gamepad", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            msg.message.IndexOf("Game1.cs.257", StringComparison.OrdinalIgnoreCase) >= 0))
-                        {
-                            Game1.hudMessages.RemoveAt(i);
-                        }
-                    }
-                }
 
                 if (!_legacyNeutralized && Game1.game1 != null)
                 {
