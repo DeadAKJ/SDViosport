@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import asyncio
 import subprocess
+import urllib.request
 from typing import Optional, Callable, Any
 from dataclasses import dataclass, field
 
@@ -96,6 +97,45 @@ def is_requirement_installed(req_mod_id: Optional[int], req_name: str, installed
             return True
 
     return False
+
+
+def parse_version_tuple(v: str) -> list:
+    """Parse version string into comparable token list."""
+    if not v:
+        return []
+    clean = re.sub(r'^[vV]', '', str(v).strip())
+    tokens = re.findall(r'\d+|[a-zA-Z]+', clean)
+    parsed = []
+    for t in tokens:
+        if t.isdigit():
+            parsed.append(int(t))
+        else:
+            parsed.append(t.lower())
+    return parsed
+
+
+def is_version_newer(remote_v: str, local_v: str) -> bool:
+    """Return True if remote_v is strictly newer than local_v."""
+    if not remote_v or not local_v:
+        return False
+    r = parse_version_tuple(remote_v)
+    l = parse_version_tuple(local_v)
+    while len(r) > 0 and r[-1] == 0:
+        r.pop()
+    while len(l) > 0 and l[-1] == 0:
+        l.pop()
+    for ri, li in zip(r, l):
+        if type(ri) is type(li):
+            if ri > li:
+                return True
+            if ri < li:
+                return False
+        else:
+            if isinstance(ri, int) and isinstance(li, str):
+                return True
+            elif isinstance(ri, str) and isinstance(li, int):
+                return False
+    return len(r) > len(l)
 
 
 class IOSModBackend:
@@ -857,3 +897,139 @@ class IOSModBackend:
             return False, f"Import failed: {e}"
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    async def get_system_update_status(self) -> dict:
+        """Check Stardew Valley game version, SDViOS port version, and SMAPI version against latest upstream releases."""
+        local_game_version = "1.6.15"
+        local_port_version = "v3.0.0"
+        local_smapi_version = "4.5.2"
+
+        if self.is_connected and not self.local_mode_dir and self.lockdown:
+            try:
+                async with InstallationProxyService(self.lockdown) as ip:
+                    apps = await ip.get_apps()
+                    for bid, meta in apps.items():
+                        if "sdvios" in bid.lower() or "stardew" in bid.lower():
+                            local_game_version = meta.get("CFBundleShortVersionString", local_game_version)
+                            break
+            except Exception:
+                pass
+
+        # 1. Check latest SDViOS GitHub release tag
+        latest_port_version = "v3.0.0"
+        port_release_url = "https://github.com/DeadAKJ/SDViosport/releases"
+        try:
+            req = urllib.request.Request("https://api.github.com/repos/DeadAKJ/SDViosport/tags", headers={"User-Agent": "SDViOS-ModManager"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                tags = json.loads(resp.read().decode())
+                if tags and isinstance(tags, list):
+                    latest_port_version = tags[0].get("name", latest_port_version)
+        except Exception as e:
+            print(f"[Backend] Port update check: {e}")
+
+        # 2. Check latest SMAPI release on GitHub
+        latest_smapi_version = "4.5.2"
+        smapi_release_url = "https://github.com/Pathoschild/SMAPI/releases"
+        try:
+            req = urllib.request.Request("https://api.github.com/repos/Pathoschild/SMAPI/releases/latest", headers={"User-Agent": "SDViOS-ModManager"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                det = json.loads(resp.read().decode())
+                latest_smapi_version = det.get("tag_name", latest_smapi_version).lstrip("v")
+        except Exception as e:
+            print(f"[Backend] SMAPI update check: {e}")
+
+        # 3. Check official Stardew Valley version (1.6.15 is latest official 1.6 branch)
+        latest_game_version = "1.6.15"
+        game_wiki_url = "https://stardewvalleywiki.com/Version_History"
+
+        return {
+            "game": {
+                "name": "Stardew Valley (iOS)",
+                "installed_version": local_game_version,
+                "latest_version": latest_game_version,
+                "has_update": is_version_newer(latest_game_version, local_game_version),
+                "url": game_wiki_url,
+            },
+            "port": {
+                "name": "SDViOS Port Engine",
+                "installed_version": local_port_version,
+                "latest_version": latest_port_version,
+                "has_update": is_version_newer(latest_port_version, local_port_version),
+                "url": port_release_url,
+            },
+            "smapi": {
+                "name": "SMAPI for iOS",
+                "installed_version": local_smapi_version,
+                "latest_version": latest_smapi_version,
+                "has_update": is_version_newer(latest_smapi_version, local_smapi_version),
+                "url": smapi_release_url,
+            }
+        }
+
+    async def check_all_mod_updates(self, mods: list[ModInfo], nexus_api: Optional[Any] = None) -> list[dict]:
+        """Check online repositories (Nexus Mods, GitHub) for updates to installed mods."""
+        results = []
+
+        for m in mods:
+            mod_id = m.nexus_id
+            github_repo = None
+
+            for uk in m.update_keys:
+                uk_lower = uk.lower().strip()
+                if uk_lower.startswith("nexus:"):
+                    part = uk[6:].split("@")[0].strip()
+                    if part.isdigit():
+                        mod_id = int(part)
+                elif uk_lower.startswith("github:"):
+                    github_repo = uk[7:].strip()
+
+            if not mod_id and m.unique_id:
+                uid_lower = m.unique_id.lower()
+                if uid_lower in KNOWN_FRAMEWORK_NEXUS_IDS:
+                    mod_id = KNOWN_FRAMEWORK_NEXUS_IDS[uid_lower]
+                elif uid_lower.startswith("flashshifter.stardewvalleyexpanded"):
+                    mod_id = 3753
+
+            latest_v = None
+            url = ""
+            source = "Unknown"
+
+            if mod_id and nexus_api and getattr(nexus_api, "api_key", None):
+                try:
+                    det = nexus_api.get_mod_details("stardewvalley", mod_id)
+                    latest_v = det.get("version")
+                    url = f"https://www.nexusmods.com/stardewvalley/mods/{mod_id}"
+                    source = "Nexus Mods"
+                except Exception:
+                    pass
+
+            if not latest_v and github_repo:
+                try:
+                    req = urllib.request.Request(
+                        f"https://api.github.com/repos/{github_repo}/releases/latest",
+                        headers={"User-Agent": "SDViOS-ModManager"}
+                    )
+                    with urllib.request.urlopen(req, timeout=6) as resp:
+                        det = json.loads(resp.read().decode())
+                        latest_v = det.get("tag_name", "").lstrip("v")
+                        url = f"https://github.com/{github_repo}/releases"
+                        source = "GitHub"
+                except Exception:
+                    pass
+
+            has_update = is_version_newer(latest_v, m.version) if latest_v else False
+
+            results.append({
+                "mod": m,
+                "name": m.name,
+                "unique_id": m.unique_id,
+                "folder_name": m.folder_name,
+                "installed_version": m.version,
+                "latest_version": latest_v or m.version,
+                "has_update": has_update,
+                "url": url,
+                "nexus_id": mod_id,
+                "source": source
+            })
+
+        return results

@@ -36,19 +36,19 @@ from PyQt6.QtWidgets import (
     QProgressBar, QFrame, QSplitter, QCheckBox, QAbstractItemView,
     QDialog, QComboBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject
-from PyQt6.QtGui import QColor, QFont, QIcon, QDragEnterEvent, QDropEvent, QTextCursor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QUrl
+from PyQt6.QtGui import QColor, QFont, QIcon, QDragEnterEvent, QDropEvent, QTextCursor, QDesktopServices
 from PyQt6.QtNetwork import QTcpServer, QHostAddress
 
 try:
-    from tools.mod_manager.backend import IOSModBackend, ModInfo, KNOWN_FRAMEWORK_NEXUS_IDS, is_requirement_installed
+    from tools.mod_manager.backend import IOSModBackend, ModInfo, KNOWN_FRAMEWORK_NEXUS_IDS, is_requirement_installed, is_version_newer
     from tools.mod_manager.nexus import (
         NexusAPI, load_config, save_config, register_nxm_protocol,
         is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR,
         parse_any_url, find_local_vortex_mod
     )
 except ImportError:
-    from backend import IOSModBackend, ModInfo, KNOWN_FRAMEWORK_NEXUS_IDS, is_requirement_installed
+    from backend import IOSModBackend, ModInfo, KNOWN_FRAMEWORK_NEXUS_IDS, is_requirement_installed, is_version_newer
     from nexus import (
         NexusAPI, load_config, save_config, register_nxm_protocol,
         is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR,
@@ -1073,6 +1073,199 @@ class PrerequisitesCheckDialog(QDialog):
         )
 
 
+class UpdateCheckDialog(QDialog):
+    def __init__(self, parent, sys_status: dict, mod_updates: list[dict], nexus_api: NexusAPI, dispatcher: AsyncDispatcher):
+        super().__init__(parent)
+        self.setWindowTitle("Update Checker — Stardew Valley & Mods")
+        self.resize(840, 620)
+        self.setStyleSheet(DARK_STYLE)
+        self.sys_status = sys_status
+        self.mod_updates = mod_updates
+        self.nexus_api = nexus_api
+        self.dispatcher = dispatcher
+
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        # Header
+        hdr = QVBoxLayout()
+        title = QLabel("✨ Stardew Valley & Mod Update Checker")
+        title.setStyleSheet("font-weight: bold; font-size: 16px; color: #DA7C21;")
+        sub = QLabel("Online version check across Stardew Valley game engine, SDViOS iOS port, SMAPI, and installed mods.")
+        sub.setStyleSheet("color: #8F94A6; font-size: 12px;")
+        hdr.addWidget(title)
+        hdr.addWidget(sub)
+        layout.addLayout(hdr)
+
+        # 1. System / Core Stardew Valley Status Card
+        sys_card = QFrame()
+        sys_card.setStyleSheet("background-color: #21242D; border: 1px solid #313543; border-radius: 8px; padding: 12px;")
+        sys_layout = QVBoxLayout(sys_card)
+        sys_layout.setSpacing(8)
+
+        card_title = QLabel("🎮 Game & Platform Engine Status:")
+        card_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #FFFFFF;")
+        sys_layout.addWidget(card_title)
+
+        items_grid = QHBoxLayout()
+        items_grid.setSpacing(12)
+
+        # Sub-card: Stardew Valley Game
+        game_info = self.sys_status.get("game", {})
+        game_box = self._create_status_pill(
+            title="🌾 Stardew Valley (Game)",
+            installed=game_info.get("installed_version", "1.6.15"),
+            latest=game_info.get("latest_version", "1.6.15"),
+            has_update=game_info.get("has_update", False),
+            url=game_info.get("url", "")
+        )
+        items_grid.addWidget(game_box)
+
+        # Sub-card: SDViOS Port
+        port_info = self.sys_status.get("port", {})
+        port_box = self._create_status_pill(
+            title="📱 SDViOS Port App",
+            installed=port_info.get("installed_version", "v3.0.0"),
+            latest=port_info.get("latest_version", "v3.0.0"),
+            has_update=port_info.get("has_update", False),
+            url=port_info.get("url", "")
+        )
+        items_grid.addWidget(port_box)
+
+        # Sub-card: SMAPI
+        smapi_info = self.sys_status.get("smapi", {})
+        smapi_box = self._create_status_pill(
+            title="⚙️ SMAPI for iOS",
+            installed=smapi_info.get("installed_version", "4.5.2"),
+            latest=smapi_info.get("latest_version", "4.5.2"),
+            has_update=smapi_info.get("has_update", False),
+            url=smapi_info.get("url", "")
+        )
+        items_grid.addWidget(smapi_box)
+
+        sys_layout.addLayout(items_grid)
+        layout.addWidget(sys_card)
+
+        # 2. Installed Mods Section
+        updates_found = [u for u in self.mod_updates if u.get("has_update")]
+        mods_hdr = QHBoxLayout()
+        if updates_found:
+            lbl_mods = QLabel(f"⚡ Mod Updates Available ({len(updates_found)} of {len(self.mod_updates)} mods):")
+            lbl_mods.setStyleSheet("font-weight: bold; font-size: 13px; color: #F1C40F;")
+        else:
+            lbl_mods = QLabel(f"🎉 All {len(self.mod_updates)} Installed Mods Are Up to Date!")
+            lbl_mods.setStyleSheet("font-weight: bold; font-size: 13px; color: #2ECC71;")
+        mods_hdr.addWidget(lbl_mods)
+        mods_hdr.addStretch()
+        layout.addLayout(mods_hdr)
+
+        # Table of mods
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Mod Name", "Installed", "Latest Version", "Status", "Action"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setRowCount(len(self.mod_updates))
+
+        # Sort: mods with updates at the top
+        sorted_mods = sorted(self.mod_updates, key=lambda x: (not x.get("has_update"), x.get("name", "")))
+
+        for row, u in enumerate(sorted_mods):
+            name_item = QTableWidgetItem(u["name"])
+            name_item.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            self.table.setItem(row, 0, name_item)
+
+            inst_item = QTableWidgetItem(u["installed_version"])
+            inst_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 1, inst_item)
+
+            lat_item = QTableWidgetItem(u["latest_version"])
+            lat_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if u.get("has_update"):
+                lat_item.setForeground(QColor("#F1C40F"))
+                lat_item.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            self.table.setItem(row, 2, lat_item)
+
+            if u.get("has_update"):
+                stat_item = QTableWidgetItem("⚡ Update Available")
+                stat_item.setForeground(QColor("#F1C40F"))
+            else:
+                stat_item = QTableWidgetItem("🟢 Up to date")
+                stat_item.setForeground(QColor("#2ECC71"))
+            stat_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 3, stat_item)
+
+            act_widget = QWidget()
+            act_layout = QHBoxLayout(act_widget)
+            act_layout.setContentsMargins(4, 2, 4, 2)
+            act_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if u.get("url"):
+                btn_open = QPushButton("View Page ↗" if not u.get("has_update") else "Update / View ↗")
+                btn_open.setFixedHeight(26)
+                if u.get("has_update"):
+                    btn_open.setObjectName("SuccessBtn")
+                else:
+                    btn_open.setObjectName("SecondaryBtn")
+                btn_open.clicked.connect(lambda _, url=u["url"]: QDesktopServices.openUrl(QUrl(url)))
+                act_layout.addWidget(btn_open)
+            self.table.setCellWidget(row, 4, act_widget)
+
+        layout.addWidget(self.table)
+
+        # Bottom Buttons
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.accept)
+        btn_box.addWidget(btn_close)
+        layout.addLayout(btn_box)
+
+    def _create_status_pill(self, title: str, installed: str, latest: str, has_update: bool, url: str) -> QFrame:
+        pill = QFrame()
+        bg_col = "#2A1F1D" if has_update else "#18261E"
+        border_col = "#E74C3C" if has_update else "#2ECC71"
+        pill.setStyleSheet(f"background-color: {bg_col}; border: 1px solid {border_col}; border-radius: 6px; padding: 10px;")
+        p_layout = QVBoxLayout(pill)
+        p_layout.setSpacing(6)
+
+        t_lbl = QLabel(title)
+        t_lbl.setStyleSheet("font-weight: bold; font-size: 12px; color: #FFFFFF;")
+        p_layout.addWidget(t_lbl)
+
+        v_lbl = QLabel(f"Installed: {installed}\nLatest:    {latest}")
+        v_lbl.setStyleSheet("font-family: 'Consolas', monospace; font-size: 11px; color: #BDC3C7;")
+        p_layout.addWidget(v_lbl)
+
+        status_row = QHBoxLayout()
+        if has_update:
+            s_lbl = QLabel("⚡ UPDATE AVAILABLE")
+            s_lbl.setStyleSheet("font-weight: bold; font-size: 10px; color: #E74C3C;")
+            status_row.addWidget(s_lbl)
+            if url:
+                btn = QPushButton("View Release ↗")
+                btn.setFixedHeight(22)
+                btn.setObjectName("SecondaryBtn")
+                btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(url)))
+                status_row.addWidget(btn)
+        else:
+            s_lbl = QLabel("✓ UP TO DATE")
+            s_lbl.setStyleSheet("font-weight: bold; font-size: 10px; color: #2ECC71;")
+            status_row.addWidget(s_lbl)
+        status_row.addStretch()
+        p_layout.addLayout(status_row)
+
+        return pill
+
+
 class InstallFromLinkDialog(QDialog):
     def __init__(self, parent=None, nexus_api: Optional[NexusAPI] = None, dispatcher: Optional[AsyncDispatcher] = None, initial_url: str = ""):
         super().__init__(parent)
@@ -1474,6 +1667,7 @@ class ModManagerWindow(QMainWindow):
         self.config = load_config()
         self.nexus_api = NexusAPI(self.config.get("nexus_api_key", ""))
         self.mods_cache: list[ModInfo] = []
+        self.updates_cache: dict[str, dict] = {}
 
         self.nxm_received.connect(self._handle_nxm_url)
 
@@ -1616,6 +1810,12 @@ class ModManagerWindow(QMainWindow):
         self.btn_check_prereqs.setToolTip("Inspect all installed mods for missing dependencies or framework mods")
         self.btn_check_prereqs.clicked.connect(self._check_all_prerequisites)
         toolbar.addWidget(self.btn_check_prereqs)
+
+        self.btn_check_updates = QPushButton("✨ Check for Updates")
+        self.btn_check_updates.setObjectName("SecondaryBtn")
+        self.btn_check_updates.setToolTip("Check if Stardew Valley, SMAPI, or any installed mods have newer versions available")
+        self.btn_check_updates.clicked.connect(self._check_all_updates)
+        toolbar.addWidget(self.btn_check_updates)
 
         self.btn_refresh_mods = QPushButton("⟳ Refresh")
         self.btn_refresh_mods.setObjectName("SecondaryBtn")
@@ -2640,7 +2840,15 @@ class ModManagerWindow(QMainWindow):
             self.mod_table.setItem(row, 1, name_item)
 
             # Col 2: Version
-            ver_item = QTableWidgetItem(mod.version)
+            update_info = self.updates_cache.get(mod.unique_id) or self.updates_cache.get(mod.folder_name)
+            if update_info and update_info.get("has_update"):
+                ver_text = f"{mod.version} ➔ {update_info['latest_version']}"
+                ver_item = QTableWidgetItem(ver_text)
+                ver_item.setForeground(QColor("#F1C40F"))
+                ver_item.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+                ver_item.setToolTip(f"Update available: {update_info['latest_version']}\nClick '⚡ Update' to view.")
+            else:
+                ver_item = QTableWidgetItem(mod.version)
             ver_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.mod_table.setItem(row, 2, ver_item)
 
@@ -2655,17 +2863,28 @@ class ModManagerWindow(QMainWindow):
             type_item.setForeground(QColor("#DA7C21" if mod.is_content_pack else "#3498DB"))
             self.mod_table.setItem(row, 4, type_item)
 
-            # Col 5: Delete
+            # Col 5: Actions
+            act_widget = QWidget()
+            act_layout = QHBoxLayout(act_widget)
+            act_layout.setContentsMargins(4, 2, 4, 2)
+            act_layout.setSpacing(6)
+            act_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            if update_info and update_info.get("has_update") and update_info.get("url"):
+                btn_upd = QPushButton("⚡ Update")
+                btn_upd.setObjectName("SuccessBtn")
+                btn_upd.setFixedHeight(26)
+                btn_upd.setToolTip(f"Open update page for {mod.name} ({update_info['latest_version']})")
+                btn_upd.clicked.connect(lambda _, u=update_info["url"]: QDesktopServices.openUrl(QUrl(u)))
+                act_layout.addWidget(btn_upd)
+
             btn_del = QPushButton("Delete")
             btn_del.setObjectName("DangerBtn")
             btn_del.setFixedHeight(26)
             btn_del.clicked.connect(lambda _, m=mod: self._delete_mod(m))
-            del_widget = QWidget()
-            del_layout = QHBoxLayout(del_widget)
-            del_layout.addWidget(btn_del)
-            del_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            del_layout.setContentsMargins(4, 2, 4, 2)
-            self.mod_table.setCellWidget(row, 5, del_widget)
+            act_layout.addWidget(btn_del)
+
+            self.mod_table.setCellWidget(row, 5, act_widget)
 
         enabled_count = sum(1 for m in self.mods_cache if m.is_enabled)
         self.lbl_mod_stats.setText(f"Total: {len(self.mods_cache)} mods ({enabled_count} enabled, {len(self.mods_cache) - enabled_count} disabled)")
@@ -2839,6 +3058,59 @@ class ModManagerWindow(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Prerequisites check failed: {err}")
             )
         )
+
+    def _check_all_updates(self):
+        if not self.backend.is_connected:
+            QMessageBox.warning(self, "Not Connected", "Please connect your iOS device via USB or select a local folder first.")
+            return
+
+        if not self.mods_cache:
+            QMessageBox.information(self, "No Mods", "There are no mods installed on your iOS device to check.")
+            return
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.status_bar.setText(f" Checking updates for Stardew Valley, SMAPI, and {len(self.mods_cache)} installed mods...")
+        self.btn_check_updates.setEnabled(False)
+        self.btn_check_updates.setText("Checking Updates...")
+
+        async def run_update_check():
+            sys_status = await self.backend.get_system_update_status()
+            mod_updates = await self.backend.check_all_mod_updates(self.mods_cache, self.nexus_api)
+            return sys_status, mod_updates
+
+        def on_done(result):
+            self.progress_bar.setVisible(False)
+            self.btn_check_updates.setEnabled(True)
+            self.btn_check_updates.setText("✨ Check for Updates")
+            sys_status, mod_updates = result
+
+            self.updates_cache = {
+                u["unique_id"]: u for u in mod_updates if u.get("has_update")
+            }
+            for u in mod_updates:
+                if u.get("has_update") and u.get("folder_name"):
+                    self.updates_cache[u["folder_name"]] = u
+
+            self._filter_mods()
+
+            dlg = UpdateCheckDialog(
+                parent=self,
+                sys_status=sys_status,
+                mod_updates=mod_updates,
+                nexus_api=self.nexus_api,
+                dispatcher=self.dispatcher
+            )
+            dlg.exec()
+
+        def on_fail(err):
+            self.progress_bar.setVisible(False)
+            self.btn_check_updates.setEnabled(True)
+            self.btn_check_updates.setText("✨ Check for Updates")
+            self.status_bar.setText(f" Error checking updates: {err}")
+            QMessageBox.warning(self, "Update Check Error", f"Failed to check updates:\n{err}")
+
+        self.dispatcher.run_async(run_update_check(), on_success=on_done, on_error=on_fail)
 
     def _browse_and_install_mod(self):
         if not self.backend.is_connected:
