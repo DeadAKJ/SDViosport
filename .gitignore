@@ -27,3 +27,4 @@ tools/mod_manager/downloads/
 # Local debug tools
 tools/deploy_hotfix.py
 tools/parse_ips.py
+tools/sync_hotfix.py
