@@ -661,7 +661,6 @@ namespace SDViOSTouchControls
 
         private static bool PrefixWindowClientSizeChanged(Game1 __instance)
         {
-            __instance.SetWindowSize(_staticNativeWidth, _staticNativeHeight);
             return false;
         }
 
@@ -791,18 +790,8 @@ namespace SDViOSTouchControls
 
         private void OnMenuChanged(object? sender, MenuChangedEventArgs e)
         {
-            EnsureNativeResolution(force: true);
-            if (e.NewMenu != null)
-            {
-                try
-                {
-                    e.NewMenu.gameWindowSizeChanged(
-                        new Rectangle(0, 0, _nativeWidth, _nativeHeight),
-                        new Rectangle(0, 0, _nativeWidth, _nativeHeight)
-                    );
-                }
-                catch { }
-            }
+            // Do NOT call SetWindowSize or EnsureNativeResolution(force: true) here!
+            // SetWindowSize destroys and re-creates GameMenu in an infinite recursion loop!
         }
 
         private void OnAssetReady(object? sender, AssetReadyEventArgs e)
@@ -972,18 +961,6 @@ namespace SDViOSTouchControls
                     // Let Stardew Valley natively allocate screen & uiScreen render targets
                     // and update viewport & uiViewport with zoom & uiScale calculations!
                     Game1.game1.SetWindowSize(targetW, targetH);
-
-                    if (Game1.activeClickableMenu != null)
-                    {
-                        try
-                        {
-                            Game1.activeClickableMenu.gameWindowSizeChanged(
-                                new Rectangle(0, 0, targetW, targetH),
-                                new Rectangle(0, 0, targetW, targetH)
-                            );
-                        }
-                        catch { }
-                    }
 
                     Monitor.Log($"[SDViOSTouchControls] Synchronized game native resolution to {targetW}x{targetH} via SetWindowSize.", LogLevel.Info);
                 }

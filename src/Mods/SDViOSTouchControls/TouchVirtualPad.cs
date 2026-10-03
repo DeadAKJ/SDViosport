@@ -27,6 +27,26 @@ namespace SDViOSTouchControls
         public bool ButtonY { get; private set; } = false;
         public bool ButtonMenu { get; private set; } = false;
 
+        // Visual states for drawing
+        public bool IsVisualButtonA => ButtonA;
+        public bool IsVisualButtonX => ButtonX;
+        public bool IsVisualButtonY => _yTouchActive || _yPulseFrames > 0;
+        public bool IsVisualButtonB => _bTouchActive || _bPulseFrames > 0;
+        public bool IsVisualButtonMenu => _menuTouchActive || _menuPulseFrames > 0;
+
+        // Pulse and debounce state for menu toggle / cancel buttons
+        private bool _yTouchActive = false;
+        private int _yPulseFrames = 0;
+        private double _lastYPressTime = 0;
+
+        private bool _bTouchActive = false;
+        private int _bPulseFrames = 0;
+        private double _lastBPressTime = 0;
+
+        private bool _menuTouchActive = false;
+        private int _menuPulseFrames = 0;
+        private double _lastMenuPressTime = 0;
+
         public bool DPadUp => LeftStick.Y < -Settings.Deadzone;
         public bool DPadDown => LeftStick.Y > Settings.Deadzone;
         public bool DPadLeft => LeftStick.X < -Settings.Deadzone;
@@ -94,8 +114,11 @@ namespace SDViOSTouchControls
                 }
                 if (ButtonB || ButtonMenu)
                 {
-                    keys.Add(Keys.Escape);
-                    AddOptionKeys(keys, opt?.cancelButton);
+                    if (ButtonMenu || Game1.activeClickableMenu != null || Game1.dialogueUp || Game1.currentMinigame != null || Game1.eventUp)
+                    {
+                        keys.Add(Keys.Escape);
+                        AddOptionKeys(keys, opt?.cancelButton);
+                    }
                 }
 
                 return new KeyboardState(keys.ToArray());
@@ -106,9 +129,10 @@ namespace SDViOSTouchControls
         {
             get
             {
+                bool canCancel = Game1.activeClickableMenu != null || Game1.dialogueUp || Game1.currentMinigame != null || Game1.eventUp;
                 var buttons = new GamePadButtons(
                     (ButtonA ? Buttons.A : 0) |
-                    (ButtonB ? Buttons.B : 0) |
+                    ((ButtonB && canCancel) ? Buttons.B : 0) |
                     (ButtonX ? Buttons.X : 0) |
                     (ButtonY ? Buttons.Y : 0) |
                     (ButtonMenu ? Buttons.Start : 0)
@@ -415,12 +439,19 @@ namespace SDViOSTouchControls
             _rawScreenWidth = rawW > 0 ? rawW : _viewportWidth;
             _rawScreenHeight = rawH > 0 ? rawH : _viewportHeight;
 
+            double curTime = gameTime.TotalGameTime.TotalSeconds;
+
+            if (_yPulseFrames > 0) _yPulseFrames--;
+            if (_bPulseFrames > 0) _bPulseFrames--;
+            if (_menuPulseFrames > 0) _menuPulseFrames--;
+
+            bool yTouchFound = false;
+            bool bTouchFound = false;
+            bool menuTouchFound = false;
+
             // Reset momentary states
             ButtonA = false;
             ButtonX = false;
-            ButtonY = false;
-            ButtonB = false;
-            ButtonMenu = false;
             SimulatedMouseRightDown = false;
 
             // Update hold frames for point-and-click tap recognition
@@ -486,16 +517,18 @@ namespace SDViOSTouchControls
                 Point pt = MapTouchToViewport(touch.Position);
 
                 // Top utility bar check
-                if (touch.State == TouchLocationState.Pressed)
+                if (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved)
                 {
                     if (_btnToggleRect.Contains(pt))
                     {
-                        IsVisible = !IsVisible;
+                        if (touch.State == TouchLocationState.Pressed)
+                            IsVisible = !IsVisible;
                         continue;
                     }
                     if (_btnSettingsRect.Contains(pt))
                     {
-                        IsSettingsOpen = true;
+                        if (touch.State == TouchLocationState.Pressed)
+                            IsSettingsOpen = true;
                         continue;
                     }
                     if (Settings.ShowKeyboardBtn && !_btnKeyboardRect.IsEmpty && _btnKeyboardRect.Contains(pt))
@@ -505,7 +538,12 @@ namespace SDViOSTouchControls
                     }
                     if (Settings.ShowMenuBtn && !_btnMenuRect.IsEmpty && _btnMenuRect.Contains(pt))
                     {
-                        ButtonMenu = true;
+                        menuTouchFound = true;
+                        if (!_menuTouchActive && (curTime - _lastMenuPressTime > 0.35))
+                        {
+                            _menuPulseFrames = 2;
+                            _lastMenuPressTime = curTime;
+                        }
                         continue;
                     }
                 }
@@ -520,9 +558,30 @@ namespace SDViOSTouchControls
                 // Check Action Buttons
                 bool hitButton = false;
                 if (_btnARect.Contains(pt)) { ButtonA = true; hitButton = true; }
-                if (_btnBRect.Contains(pt)) { ButtonB = true; hitButton = true; }
                 if (_btnXRect.Contains(pt)) { ButtonX = true; hitButton = true; }
-                if (_btnYRect.Contains(pt)) { ButtonY = true; hitButton = true; }
+
+                if (_btnYRect.Contains(pt))
+                {
+                    yTouchFound = true;
+                    hitButton = true;
+                    if (!_yTouchActive && (curTime - _lastYPressTime > 0.35))
+                    {
+                        _yPulseFrames = 2;
+                        _lastYPressTime = curTime;
+                    }
+                }
+
+                if (_btnBRect.Contains(pt))
+                {
+                    bTouchFound = true;
+                    hitButton = true;
+                    bool canCancel = Game1.activeClickableMenu != null || Game1.dialogueUp || Game1.currentMinigame != null || Game1.eventUp;
+                    if (canCancel && !_bTouchActive && (curTime - _lastBPressTime > 0.35))
+                    {
+                        _bPulseFrames = 2;
+                        _lastBPressTime = curTime;
+                    }
+                }
 
                 if (hitButton) continue;
 
@@ -579,6 +638,14 @@ namespace SDViOSTouchControls
                 _pointClickTouchId = -1;
             }
 
+            _yTouchActive = yTouchFound;
+            _bTouchActive = bTouchFound;
+            _menuTouchActive = menuTouchFound;
+
+            ButtonY = _yPulseFrames > 0;
+            ButtonB = _bPulseFrames > 0;
+            ButtonMenu = _menuPulseFrames > 0;
+
             ForwardInputToGame();
         }
 
@@ -603,7 +670,12 @@ namespace SDViOSTouchControls
             {
                 if (_joystickBaseRect.Contains(pt) || Vector2.Distance(new Vector2(pt.X, pt.Y), _joystickCenter) <= _joystickRadius * 2.0f)
                     return;
-                if (_btnARect.Contains(pt) || _btnBRect.Contains(pt) || _btnXRect.Contains(pt) || _btnYRect.Contains(pt))
+                if (_btnARect.Contains(pt) || _btnBRect.Contains(pt) || _btnXRect.Contains(pt) || _btnYRect.Contains(pt) ||
+                    Vector2.Distance(new Vector2(pt.X, pt.Y), _buttonsCenter) <= 125f)
+                    return;
+                if (_btnToggleRect.Contains(pt) || _btnSettingsRect.Contains(pt) ||
+                    (!_btnKeyboardRect.IsEmpty && _btnKeyboardRect.Contains(pt)) ||
+                    (!_btnMenuRect.IsEmpty && _btnMenuRect.Contains(pt)))
                     return;
             }
 
@@ -957,7 +1029,7 @@ namespace SDViOSTouchControls
                 if (ButtonY) activeKeys.Add(Keys.E);
                 if (ButtonB)
                 {
-                    if (Game1.activeClickableMenu != null)
+                    if (Game1.activeClickableMenu != null || Game1.dialogueUp || Game1.currentMinigame != null || Game1.eventUp)
                         activeKeys.Add(Keys.Escape);
                 }
                 if (ButtonMenu) activeKeys.Add(Keys.Escape);
@@ -1153,7 +1225,7 @@ namespace SDViOSTouchControls
 
             if (Settings.ShowMenuBtn && !_btnMenuRect.IsEmpty)
             {
-                DrawButton(spriteBatch, _btnMenuRect, "MENU", ButtonMenu ? Color.Orange * 0.9f : Color.DarkOrange * Math.Max(0.5f, alpha), Color.White, 2);
+                DrawButton(spriteBatch, _btnMenuRect, "MENU", IsVisualButtonMenu ? Color.Orange * 0.9f : Color.DarkOrange * Math.Max(0.5f, alpha), Color.White, 2);
             }
 
             if (IsVisible)
@@ -1169,8 +1241,8 @@ namespace SDViOSTouchControls
                 // Draw Action buttons with text labels (A, X, Y, B)
                 DrawButton(spriteBatch, _btnARect, "A", ButtonA ? Color.Lime * 0.95f : Color.DarkGreen * Math.Max(0.75f, alpha), Color.White, 3);
                 DrawButton(spriteBatch, _btnXRect, "X", ButtonX ? Color.CornflowerBlue * 0.95f : Color.DarkBlue * Math.Max(0.75f, alpha), Color.White, 3);
-                DrawButton(spriteBatch, _btnYRect, "Y", ButtonY ? Color.Yellow * 0.95f : Color.DarkGoldenrod * Math.Max(0.75f, alpha), Color.White, 3);
-                DrawButton(spriteBatch, _btnBRect, "B", ButtonB ? Color.Red * 0.95f : Color.DarkRed * Math.Max(0.75f, alpha), Color.White, 3);
+                DrawButton(spriteBatch, _btnYRect, "Y", IsVisualButtonY ? Color.Yellow * 0.95f : Color.DarkGoldenrod * Math.Max(0.75f, alpha), Color.White, 3);
+                DrawButton(spriteBatch, _btnBRect, "B", IsVisualButtonB ? Color.Red * 0.95f : Color.DarkRed * Math.Max(0.75f, alpha), Color.White, 3);
             }
 
             // Visual feedback for trackpad clicks and point-and-click taps (Native Stardew Valley cursor draws the pointer)
