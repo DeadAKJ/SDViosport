@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using HarmonyLib;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
@@ -17,6 +18,10 @@ namespace SDViOSTouchControls
         private bool _initialized = false;
         private int _nativeWidth = 1792;
         private int _nativeHeight = 828;
+        private static int _staticNativeWidth = 1792;
+        private static int _staticNativeHeight = 828;
+
+        private static int _assetEventCount = 0;
 
         public override void Entry(IModHelper helper)
         {
@@ -33,6 +38,9 @@ namespace SDViOSTouchControls
 
             // 3. Apply Harmony patches to route Mouse, Keyboard, and Gamepad to TouchVirtualPad & force CaseInsensitivePaths
             ApplyHarmonyPatches();
+
+            // Force native full-screen resolution immediately at mod startup
+            EnsureNativeResolution(force: true);
 
             // 4. Disable raw MonoGame touch-to-mouse translation to stop cursor spazzing
             try
@@ -55,6 +63,7 @@ namespace SDViOSTouchControls
             helper.Events.Display.MenuChanged += OnMenuChanged;
             helper.Events.Display.RenderedStep += OnRenderedStep;
             helper.Events.Display.Rendered += OnRendered;
+            helper.Events.Content.AssetReady += OnAssetReady;
 
             Monitor.Log("[SDViOSTouchControls] Mod initialized successfully.", LogLevel.Info);
         }
@@ -78,12 +87,17 @@ namespace SDViOSTouchControls
                     _nativeHeight = 828;
                 }
 
+                _staticNativeWidth = _nativeWidth;
+                _staticNativeHeight = _nativeHeight;
+
                 Monitor.Log($"[SDViOSTouchControls] Detected hardware display resolution: {_nativeWidth}x{_nativeHeight}", LogLevel.Info);
             }
             catch (Exception ex)
             {
                 _nativeWidth = 1792;
                 _nativeHeight = 828;
+                _staticNativeWidth = 1792;
+                _staticNativeHeight = 828;
                 Monitor.Log($"[SDViOSTouchControls] Using default iPhone landscape resolution: 1792x828 ({ex.Message})", LogLevel.Info);
             }
         }
@@ -384,8 +398,299 @@ namespace SDViOSTouchControls
             }
             catch (Exception ex)
             {
-                Monitor.Log($"[SDViOSTouchControls] Note setting UseCaseInsensitivePaths: {ex.Message}", LogLevel.Warn);
+                Monitor.Log($"[SDViOSTouchControls] Note setting case insensitive paths: {ex.Message}", LogLevel.Warn);
             }
+
+            // 7. GraphicsDeviceManager and Window Resolution Patches
+            try
+            {
+                var gdmType = typeof(GraphicsDeviceManager);
+                var pWidthGet = gdmType.GetProperty("PreferredBackBufferWidth", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod();
+                if (pWidthGet != null)
+                {
+                    harmony.Patch(pWidthGet, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixPreferredBackBufferWidth), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched GraphicsDeviceManager.get_PreferredBackBufferWidth -> native.", LogLevel.Info);
+                }
+
+                var pWidthSet = gdmType.GetProperty("PreferredBackBufferWidth", BindingFlags.Public | BindingFlags.Instance)?.GetSetMethod();
+                if (pWidthSet != null)
+                {
+                    harmony.Patch(pWidthSet, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixSetPreferredWidth), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched GraphicsDeviceManager.set_PreferredBackBufferWidth -> native.", LogLevel.Info);
+                }
+
+                var pHeightGet = gdmType.GetProperty("PreferredBackBufferHeight", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod();
+                if (pHeightGet != null)
+                {
+                    harmony.Patch(pHeightGet, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixPreferredBackBufferHeight), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched GraphicsDeviceManager.get_PreferredBackBufferHeight -> native.", LogLevel.Info);
+                }
+
+                var pHeightSet = gdmType.GetProperty("PreferredBackBufferHeight", BindingFlags.Public | BindingFlags.Instance)?.GetSetMethod();
+                if (pHeightSet != null)
+                {
+                    harmony.Patch(pHeightSet, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixSetPreferredHeight), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched GraphicsDeviceManager.set_PreferredBackBufferHeight -> native.", LogLevel.Info);
+                }
+
+                var pFull = gdmType.GetProperty("IsFullScreen", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod();
+                if (pFull != null)
+                {
+                    harmony.Patch(pFull, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixFalseBool), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched GraphicsDeviceManager.IsFullScreen -> false.", LogLevel.Info);
+                }
+
+                var mSetWindowSize = typeof(Game1).GetMethod("SetWindowSize", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, new[] { typeof(int), typeof(int) }, null);
+                if (mSetWindowSize != null)
+                {
+                    harmony.Patch(mSetWindowSize, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixSetWindowSize), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.SetWindowSize -> locked to 1792x828.", LogLevel.Info);
+                }
+
+                var mClientChanged = typeof(Game1).GetMethod("Window_ClientSizeChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, new[] { typeof(object), typeof(EventArgs) }, null);
+                if (mClientChanged != null)
+                {
+                    harmony.Patch(mClientChanged, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixWindowClientSizeChanged), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.Window_ClientSizeChanged.", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[SDViOSTouchControls] Note patching GraphicsDeviceManager: {ex.Message}", LogLevel.Warn);
+            }
+
+            // 8. Content Patcher Animations Exception Silencer
+            try
+            {
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    var cpAnimType = asm.GetType("ContentPatcherAnimations.Mod");
+                    if (cpAnimType != null)
+                    {
+                        var mUpdateTicked = cpAnimType.GetMethod("OnUpdateTicked", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (mUpdateTicked != null)
+                        {
+                            harmony.Patch(mUpdateTicked, finalizer: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(FinalizerSilenceException), BindingFlags.Static | BindingFlags.NonPublic)));
+                            Monitor.Log("[SDViOSTouchControls] Harmony patched ContentPatcherAnimations.Mod.OnUpdateTicked with exception silencer.", LogLevel.Info);
+                        }
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[SDViOSTouchControls] Note patching ContentPatcherAnimations: {ex.Message}", LogLevel.Trace);
+            }
+
+            // 9. Memory Optimization: Defer Tilesheet Preloading & Skip Map Live-Reload during Save Load
+            try
+            {
+                var mMapLoadTileSheets = typeof(xTile.Map).GetMethod("LoadTileSheets", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(xTile.Display.IDisplayDevice) }, null);
+                if (mMapLoadTileSheets != null)
+                {
+                    harmony.Patch(mMapLoadTileSheets, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixMapLoadTileSheets), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched xTile.Map.LoadTileSheets -> deferred loading during save load.", LogLevel.Info);
+                }
+
+                var mDevLoadTileSheet = typeof(xTile.Display.XnaDisplayDevice).GetMethod("LoadTileSheet", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(xTile.Tiles.TileSheet) }, null);
+                if (mDevLoadTileSheet != null)
+                {
+                    harmony.Patch(mDevLoadTileSheet, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixDevLoadTileSheet), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched XnaDisplayDevice.LoadTileSheet -> deferred loading during save load.", LogLevel.Info);
+                }
+
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    var propType = asm.GetType("StardewModdingAPI.Metadata.CoreAssetPropagator");
+                    if (propType != null)
+                    {
+                        var mPropMap = propType.GetMethod("PropagateMap", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (mPropMap != null)
+                        {
+                            harmony.Patch(mPropMap, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixPropagateMap), BindingFlags.Static | BindingFlags.NonPublic)));
+                            Monitor.Log("[SDViOSTouchControls] Harmony patched CoreAssetPropagator.PropagateMap -> skip during save load.", LogLevel.Info);
+                        }
+
+                        var mPropTex = propType.GetMethod("PropagateTexture", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (mPropTex != null)
+                        {
+                            harmony.Patch(mPropTex, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixPropagateMap), BindingFlags.Static | BindingFlags.NonPublic)));
+                            Monitor.Log("[SDViOSTouchControls] Harmony patched CoreAssetPropagator.PropagateTexture -> skip during save load.", LogLevel.Info);
+                        }
+                    }
+
+                    var mcmType = asm.GetType("StardewModdingAPI.Framework.ContentManagers.ModContentManager");
+                    if (mcmType != null)
+                    {
+                        var mTryGetTilesheet = mcmType.GetMethod("TryGetTilesheetAssetName", BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (mTryGetTilesheet != null)
+                        {
+                            harmony.Patch(mTryGetTilesheet, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixTryGetTilesheetAssetName), BindingFlags.Static | BindingFlags.NonPublic)));
+                            Monitor.Log("[SDViOSTouchControls] Harmony patched ModContentManager.TryGetTilesheetAssetName -> skip eager texture load during save load.", LogLevel.Info);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[SDViOSTouchControls] Error patching map memory hooks: {ex.Message}", LogLevel.Error);
+            }
+        }
+
+        private static bool PrefixTryGetTilesheetAssetName(
+            object __instance,
+            string modRelativeMapFolder,
+            string relativePath,
+            ref IAssetName? assetName,
+            ref string? error,
+            ref bool __result)
+        {
+            if (Game1.gameMode == 6)
+            {
+                error = null;
+                if (string.IsNullOrWhiteSpace(relativePath))
+                {
+                    assetName = null;
+                    __result = true;
+                    return false;
+                }
+
+                try
+                {
+                    // Normalize leading ./
+                    string fileName = System.IO.Path.GetFileName(relativePath);
+                    if (fileName.StartsWith('.'))
+                    {
+                        string? dir = System.IO.Path.GetDirectoryName(relativePath);
+                        relativePath = System.IO.Path.Combine(dir ?? "", fileName.TrimStart('.'));
+                    }
+
+                    var mcmType = __instance.GetType();
+
+                    // 1. If it's a mod-relative file (does not start with or contain ..)
+                    if (!relativePath.StartsWith("..") && !relativePath.Contains(".."))
+                    {
+                        string modPath = System.IO.Path.Combine(modRelativeMapFolder ?? "", relativePath);
+                        var mGetModFile = mcmType.GetMethod("GetModFile", BindingFlags.Instance | BindingFlags.NonPublic);
+                        if (mGetModFile != null)
+                        {
+                            var mGeneric = mGetModFile.MakeGenericMethod(typeof(Texture2D));
+                            var fileInfo = mGeneric.Invoke(__instance, new object[] { modPath }) as System.IO.FileInfo;
+                            if (fileInfo != null && fileInfo.Exists)
+                            {
+                                var mGetInternal = mcmType.GetMethod("GetInternalAssetKey", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                                assetName = mGetInternal?.Invoke(__instance, new object[] { modPath }) as IAssetName;
+                                __result = true;
+                                return false;
+                            }
+                        }
+                    }
+
+                    // 2. Otherwise it's a content asset (e.g. Maps/ZCCC_Entrance_Tilesheet)
+                    // Resolve asset name WITHOUT loading the full Texture2D through GameContentManager!
+                    var mGetContentKey = mcmType.GetMethod("GetContentKeyForTilesheetImageSource", BindingFlags.Instance | BindingFlags.NonPublic);
+                    string? contentKey = mGetContentKey?.Invoke(__instance, new object[] { relativePath }) as string;
+                    if (contentKey != null)
+                    {
+                        var fCoord = mcmType.BaseType?.GetField("Coordinator", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        var coord = fCoord?.GetValue(__instance);
+                        if (coord != null)
+                        {
+                            var mParse = coord.GetType().GetMethod("ParseAssetName", new[] { typeof(string), typeof(bool) });
+                            if (mParse != null)
+                            {
+                                assetName = mParse.Invoke(coord, new object[] { contentKey, false }) as IAssetName;
+                                __result = true;
+                                return false; // Return success immediately without loading texture into RAM!
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    return true; // Fall back to original method if reflection fails
+                }
+            }
+            return true;
+        }
+
+        private static bool PrefixMapLoadTileSheets(xTile.Map __instance)
+        {
+            if (Game1.gameMode == 6)
+            {
+                if (Game1.currentLocation == null || __instance != Game1.currentLocation.Map)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool PrefixDevLoadTileSheet(xTile.Tiles.TileSheet tileSheet)
+        {
+            if (Game1.gameMode == 6)
+            {
+                if (Game1.currentLocation == null || tileSheet == null || tileSheet.Map != Game1.currentLocation.Map)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool PrefixPropagateMap(ref bool __result)
+        {
+            if (Game1.gameMode == 6)
+            {
+                __result = false;
+                return false;
+            }
+            return true;
+        }
+
+        private static Exception? FinalizerSilenceException(Exception? __exception)
+        {
+            return null; // Suppresses repeating exceptions from broken mods like ContentPatcherAnimations
+        }
+
+        private static void PrefixSetWindowSize(ref int w, ref int h)
+        {
+            w = _staticNativeWidth;
+            h = _staticNativeHeight;
+        }
+
+        private static bool PrefixWindowClientSizeChanged(Game1 __instance)
+        {
+            __instance.SetWindowSize(_staticNativeWidth, _staticNativeHeight);
+            return false;
+        }
+
+        private static void PrefixSetPreferredWidth(ref int value)
+        {
+            value = _staticNativeWidth;
+        }
+
+        private static void PrefixSetPreferredHeight(ref int value)
+        {
+            value = _staticNativeHeight;
+        }
+
+        private static bool PrefixPreferredBackBufferWidth(ref int __result)
+        {
+            __result = _staticNativeWidth;
+            return false;
+        }
+
+        private static bool PrefixPreferredBackBufferHeight(ref int __result)
+        {
+            __result = _staticNativeHeight;
+            return false;
+        }
+
+        private static bool PrefixFalseBool(ref bool __result)
+        {
+            __result = false;
+            return false;
         }
 
         private static bool PrefixTrue(ref bool __result)
@@ -486,7 +791,48 @@ namespace SDViOSTouchControls
 
         private void OnMenuChanged(object? sender, MenuChangedEventArgs e)
         {
-            // Menus automatically align to Game1.uiViewport and uiScale.
+            EnsureNativeResolution(force: true);
+            if (e.NewMenu != null)
+            {
+                try
+                {
+                    e.NewMenu.gameWindowSizeChanged(
+                        new Rectangle(0, 0, _nativeWidth, _nativeHeight),
+                        new Rectangle(0, 0, _nativeWidth, _nativeHeight)
+                    );
+                }
+                catch { }
+            }
+        }
+
+        private void OnAssetReady(object? sender, AssetReadyEventArgs e)
+        {
+            _assetEventCount++;
+
+            if (Game1.gameMode == 6)
+            {
+                if (_assetEventCount % 4 == 0)
+                {
+                    try
+                    {
+                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                        GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    }
+                    catch { }
+                }
+            }
+            else if (Game1.activeClickableMenu is StardewValley.Menus.TitleMenu)
+            {
+                if (_assetEventCount % 12 == 0)
+                {
+                    try
+                    {
+                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                        GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    }
+                    catch { }
+                }
+            }
         }
 
         private bool _legacyNeutralized = false;
@@ -497,6 +843,20 @@ namespace SDViOSTouchControls
             try
             {
                 _drawnThisFrame = false;
+
+                // Periodically compact LOH during loading to stay under iOS 2GB jetsam limit
+                if (Game1.gameMode == 6 && e.IsMultipleOf(15))
+                {
+                    try
+                    {
+                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                        GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    }
+                    catch { }
+                }
+
+                // Ensure native resolution remains locked
+                EnsureNativeResolution(false);
 
                 // Enforce GamepadModes.ForceOff so Stardew never checks GamePad.GetState(), never shows toast, and never opens pause menu
                 if (Game1.options != null)
@@ -597,18 +957,34 @@ namespace SDViOSTouchControls
                 bool sizeNeedsSync = (Game1.graphics.PreferredBackBufferWidth != targetW ||
                                      Game1.graphics.PreferredBackBufferHeight != targetH ||
                                      gd.PresentationParameters.BackBufferWidth != targetW ||
-                                     gd.PresentationParameters.BackBufferHeight != targetH);
+                                     gd.PresentationParameters.BackBufferHeight != targetH ||
+                                     Game1.graphics.IsFullScreen ||
+                                     Game1.viewport.Width < targetW / 2);
 
                 if (sizeNeedsSync || force)
                 {
                     Game1.graphics.PreferredBackBufferWidth = targetW;
                     Game1.graphics.PreferredBackBufferHeight = targetH;
+                    Game1.graphics.IsFullScreen = false;
                     gd.PresentationParameters.BackBufferWidth = targetW;
                     gd.PresentationParameters.BackBufferHeight = targetH;
 
                     // Let Stardew Valley natively allocate screen & uiScreen render targets
                     // and update viewport & uiViewport with zoom & uiScale calculations!
                     Game1.game1.SetWindowSize(targetW, targetH);
+
+                    if (Game1.activeClickableMenu != null)
+                    {
+                        try
+                        {
+                            Game1.activeClickableMenu.gameWindowSizeChanged(
+                                new Rectangle(0, 0, targetW, targetH),
+                                new Rectangle(0, 0, targetW, targetH)
+                            );
+                        }
+                        catch { }
+                    }
+
                     Monitor.Log($"[SDViOSTouchControls] Synchronized game native resolution to {targetW}x{targetH} via SetWindowSize.", LogLevel.Info);
                 }
 

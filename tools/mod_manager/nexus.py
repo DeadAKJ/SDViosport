@@ -295,10 +295,75 @@ class NexusAPI:
                         "mod_count": rev.get("modCount", 0),
                         "total_size": total_sz
                     })
-                return out
         except Exception as e:
             print(f"[Nexus] Error searching collections: {e}")
         return []
+
+    def get_mod_requirements(self, mod_id: int) -> list[dict]:
+        """Fetch prerequisites/requirements for a mod using GraphQL."""
+        if not self.api_key:
+            return []
+
+        query = """
+        query GetModReqs($modId: ID!) {
+          mod(modId: $modId, gameId: 1303) {
+            name
+            modRequirements {
+              nexusRequirements {
+                nodes {
+                  modId
+                  modName
+                  notes
+                }
+              }
+            }
+          }
+        }
+        """
+        headers = {
+            "apikey": self.api_key,
+            "User-Agent": self.USER_AGENT,
+            "Content-Type": "application/json",
+            "accept": "application/json"
+        }
+        try:
+            r = requests.post(self.GRAPHQL_URL, headers=headers, json={"query": query, "variables": {"modId": str(mod_id)}}, timeout=15)
+            if r.status_code == 200:
+                data = r.json().get("data", {}).get("mod", {}) or {}
+                req_nodes = data.get("modRequirements", {}).get("nexusRequirements", {}).get("nodes", []) or []
+                out = []
+                for n in req_nodes:
+                    m_id_str = str(n.get("modId", "")).strip()
+                    if not m_id_str.isdigit():
+                        continue
+                    m_id = int(m_id_str)
+                    if m_id == 2400:  # Skip SMAPI (built-in on SDViOS)
+                        continue
+                    out.append({
+                        "mod_id": m_id,
+                        "name": n.get("modName", f"Mod #{m_id}"),
+                        "notes": n.get("notes", "")
+                    })
+                return out
+        except Exception as e:
+            print(f"[Nexus] Error fetching requirements for mod {mod_id}: {e}")
+        return []
+
+    def get_primary_mod_file(self, game_name: str, mod_id: int) -> Optional[dict]:
+        """Fetch the primary/latest downloadable file for a mod."""
+        try:
+            files = self.get_mod_files(game_name, mod_id)
+            if not files:
+                return None
+            # Filter MAIN files first
+            main_files = [f for f in files if f.get("category_name") == "MAIN"]
+            target_list = main_files if main_files else files
+            # Sort newest first
+            target_list.sort(key=lambda x: x.get("uploaded_timestamp", 0), reverse=True)
+            return target_list[0]
+        except Exception as e:
+            print(f"[Nexus] Error fetching primary file for mod {mod_id}: {e}")
+            return None
 
 
     def get_download_links(self, game_name: str, mod_id: int, file_id: int, key: str = "", expires: str = "") -> list[str]:
@@ -455,10 +520,15 @@ def parse_any_url(raw: str) -> dict:
 def register_nxm_protocol() -> bool:
     """Register current application as the Windows nxm:// protocol handler."""
     try:
+        # Prefer pythonw.exe so no console / powershell window appears
         python_exe = sys.executable
+        pythonw_candidate = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if os.path.isfile(pythonw_candidate):
+            python_exe = pythonw_candidate
+
         script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "main.py"))
 
-        # Command string: python.exe "path\to\main.py" "%1"
+        # Command string: pythonw.exe "path\to\main.py" "%1"
         command_str = f'"{python_exe}" "{script_path}" "%1"'
 
         key_path = r"Software\Classes\nxm"

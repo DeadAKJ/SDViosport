@@ -5,6 +5,7 @@ Handles Apple USB AFC communication and mod/save/log operations.
 
 import os
 import sys
+import re
 import json
 import zipfile
 import shutil
@@ -38,6 +39,44 @@ class ModInfo:
     content_pack_for: Optional[str] = None
     is_content_pack: bool = False
     is_code_mod: bool = False
+    nexus_id: Optional[int] = None
+    update_keys: list[str] = field(default_factory=list)
+
+
+KNOWN_FRAMEWORK_NEXUS_IDS = {
+    "pathoschild.contentpatcher": 1915,
+    "platonymous.farmtypemanager": 3231,
+    "esca.farmtypemanager": 3231,
+    "spacechase0.spacecore": 1348,
+    "spacechase0.jsonassets": 1720,
+    "spacechase0.genericmodconfigmenu": 5098,
+    "cherry.expandedpreconditionsutility": 6529,
+    "flashshifter.stardewvalleyexpandedcp": 3753,
+    "spacechase0.dynamicgameassets": 9350,
+    "pathoschild.lookupanything": 541,
+    "pathoschild.automate": 1063,
+}
+
+
+def is_requirement_installed(req_mod_id: int, req_name: str, installed_mods: list[ModInfo]) -> bool:
+    """Check if a required mod is satisfied by any of the installed mods."""
+    if req_mod_id == 2400 or "smapi" in req_name.lower():
+        return True
+
+    # Normalize req name (strip notes/framework indicators)
+    clean_req = re.sub(r"\([^)]*\)", "", req_name).strip().lower()
+
+    for m in installed_mods:
+        if m.nexus_id and m.nexus_id == req_mod_id:
+            return True
+        if m.unique_id and m.unique_id.lower() in KNOWN_FRAMEWORK_NEXUS_IDS:
+            if KNOWN_FRAMEWORK_NEXUS_IDS[m.unique_id.lower()] == req_mod_id:
+                return True
+        m_name_lower = m.name.lower()
+        if clean_req and (clean_req == m_name_lower or clean_req in m_name_lower or m_name_lower in clean_req):
+            return True
+
+    return False
 
 
 class IOSModBackend:
@@ -222,6 +261,18 @@ class IOSModBackend:
                 deps = data.get("Dependencies", [])
                 if isinstance(deps, list):
                     mod.dependencies = [d.get("UniqueID", "") for d in deps if isinstance(d, dict) and "UniqueID" in d]
+
+                update_keys = data.get("UpdateKeys", [])
+                if isinstance(update_keys, list):
+                    mod.update_keys = [str(k) for k in update_keys if isinstance(k, str)]
+                    for k in mod.update_keys:
+                        m_match = re.search(r"nexus:(\d+)", k, re.IGNORECASE)
+                        if m_match:
+                            mod.nexus_id = int(m_match.group(1))
+                            break
+
+                if not mod.nexus_id and mod.unique_id and mod.unique_id.lower() in KNOWN_FRAMEWORK_NEXUS_IDS:
+                    mod.nexus_id = KNOWN_FRAMEWORK_NEXUS_IDS[mod.unique_id.lower()]
         except Exception as e:
             print(f"[Backend] Manifest parse error for {folder_name}: {e}")
 
@@ -259,6 +310,18 @@ class IOSModBackend:
                     deps = data.get("Dependencies", [])
                     if isinstance(deps, list):
                         mod.dependencies = [d.get("UniqueID", "") for d in deps if isinstance(d, dict) and "UniqueID" in d]
+
+                    update_keys = data.get("UpdateKeys", [])
+                    if isinstance(update_keys, list):
+                        mod.update_keys = [str(k) for k in update_keys if isinstance(k, str)]
+                        for k in mod.update_keys:
+                            m_match = re.search(r"nexus:(\d+)", k, re.IGNORECASE)
+                            if m_match:
+                                mod.nexus_id = int(m_match.group(1))
+                                break
+
+                    if not mod.nexus_id and mod.unique_id and mod.unique_id.lower() in KNOWN_FRAMEWORK_NEXUS_IDS:
+                        mod.nexus_id = KNOWN_FRAMEWORK_NEXUS_IDS[mod.unique_id.lower()]
             except Exception as e:
                 print(f"[Backend] Local manifest parse error: {e}")
 
@@ -321,6 +384,55 @@ class IOSModBackend:
             return True, f"Deleted {mod.name}"
         except Exception as e:
             return False, f"AFC delete failed: {e}"
+
+    async def delete_all_mods(self) -> tuple[bool, str]:
+        """Permanently delete all mods while keeping SMAPI config intact."""
+        if not self.is_connected:
+            return False, "Not connected"
+
+        deleted_count = 0
+        errors = []
+
+        if self.local_mode_dir:
+            mods_dir = self.local_mode_dir if os.path.basename(self.local_mode_dir).lower() == "mods" else os.path.join(self.local_mode_dir, "Mods")
+            if os.path.isdir(mods_dir):
+                for entry in os.listdir(mods_dir):
+                    if entry.lower() in ["smapi-config.json", ".ds_store", "desktop.ini"]:
+                        continue
+                    p = os.path.join(mods_dir, entry)
+                    try:
+                        if os.path.isdir(p):
+                            shutil.rmtree(p)
+                        else:
+                            os.remove(p)
+                        deleted_count += 1
+                    except Exception as e:
+                        errors.append(f"{entry}: {e}")
+            if errors:
+                return False, f"Deleted {deleted_count} mod(s), but {len(errors)} error(s) occurred."
+            return True, f"Successfully deleted all {deleted_count} mod(s)."
+
+        if not self.house_arrest:
+            return False, "AFC not available"
+
+        try:
+            entries = await self.house_arrest.listdir("/Documents/Mods")
+            for entry in entries:
+                if entry in [".", "..", "SMAPI-config.json", ".DS_Store"]:
+                    continue
+                p = f"/Documents/Mods/{entry}"
+                try:
+                    await self.house_arrest.rm(p)
+                    deleted_count += 1
+                except Exception as e:
+                    errors.append(f"{entry}: {e}")
+
+            if errors:
+                return False, f"Deleted {deleted_count} mod(s), but {len(errors)} error(s) occurred."
+            return True, f"Successfully deleted all {deleted_count} mod(s)."
+        except Exception as e:
+            return False, f"AFC delete all failed: {e}"
+
 
     async def install_mod_archive(self, archive_path: str, progress_callback: Optional[Callable[[str], None]] = None) -> tuple[bool, str]:
         """Extract a .zip or folder and push valid mod folders to the device."""

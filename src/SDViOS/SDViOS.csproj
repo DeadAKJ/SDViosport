@@ -49,4 +49,8 @@
     <EmbeddedResource Include="Resources\Mods\SDViOSTouchControls\manifest.json" />
     <EmbeddedResource Include="Resources\Mods\SDViOSTouchControls\SDViOSTouchControls.dll" />
   </ItemGroup>
+
+  <ItemGroup>
+    <BundleResource Include="Resources/AppIcons/*.png" Link="%(Filename)%(Extension)" />
+  </ItemGroup>
 </Project>

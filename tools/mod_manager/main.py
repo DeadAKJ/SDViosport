@@ -19,6 +19,16 @@ import urllib.parse
 from collections import deque
 from typing import Optional
 
+# Hide Windows console window if launched via cmd/powershell/python.exe
+if sys.platform == "win32":
+    try:
+        import ctypes
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+    except Exception:
+        pass
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
@@ -31,14 +41,14 @@ from PyQt6.QtGui import QColor, QFont, QIcon, QDragEnterEvent, QDropEvent, QText
 from PyQt6.QtNetwork import QTcpServer, QHostAddress
 
 try:
-    from tools.mod_manager.backend import IOSModBackend, ModInfo
+    from tools.mod_manager.backend import IOSModBackend, ModInfo, KNOWN_FRAMEWORK_NEXUS_IDS, is_requirement_installed
     from tools.mod_manager.nexus import (
         NexusAPI, load_config, save_config, register_nxm_protocol,
         is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR,
         parse_any_url, find_local_vortex_mod
     )
 except ImportError:
-    from backend import IOSModBackend, ModInfo
+    from backend import IOSModBackend, ModInfo, KNOWN_FRAMEWORK_NEXUS_IDS, is_requirement_installed
     from nexus import (
         NexusAPI, load_config, save_config, register_nxm_protocol,
         is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR,
@@ -891,6 +901,178 @@ class CollectionInstallerDialog(QDialog):
             self.parent()._refresh_mods()
 
 
+class PrerequisitesCheckDialog(QDialog):
+    def __init__(self, parent, missing_items: list[dict], nexus_api: NexusAPI, backend: IOSModBackend, dispatcher: AsyncDispatcher):
+        super().__init__(parent)
+        self.setWindowTitle("Check Prerequisites — Stardew Valley iOS")
+        self.resize(720, 500)
+        self.setStyleSheet(DARK_STYLE)
+        self.missing_items = missing_items
+        self.nexus_api = nexus_api
+        self.backend = backend
+        self.dispatcher = dispatcher
+
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        hdr = QVBoxLayout()
+        title = QLabel("🔍 Missing Prerequisites Detected")
+        title.setStyleSheet("font-weight: bold; font-size: 16px; color: #DA7C21;")
+        sub = QLabel(f"Found {len(self.missing_items)} required prerequisite mod(s) not installed on your iOS device.\nThese framework mods are required for your installed mods to function properly without crashing.")
+        sub.setStyleSheet("color: #8F94A6; font-size: 12px;")
+        sub.setWordWrap(True)
+        hdr.addWidget(title)
+        hdr.addWidget(sub)
+        layout.addLayout(hdr)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Required Prerequisite", "Required By", "Status"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setRowCount(len(self.missing_items))
+
+        for row, item in enumerate(self.missing_items):
+            name_item = QTableWidgetItem(f"📦 {item['name']}")
+            name_item.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            self.table.setItem(row, 0, name_item)
+
+            req_by_str = ", ".join(item.get("required_by", []))
+            req_item = QTableWidgetItem(req_by_str or "Installed Mod")
+            self.table.setItem(row, 1, req_item)
+
+            status_item = QTableWidgetItem("❌ Missing")
+            status_item.setForeground(QColor("#E74C3C"))
+            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 2, status_item)
+
+        layout.addWidget(self.table)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        layout.addWidget(self.progress_bar)
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setStyleSheet("color: #F1C40F; font-size: 12px;")
+        layout.addWidget(self.lbl_status)
+
+        btn_row = QHBoxLayout()
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setObjectName("SecondaryBtn")
+        self.btn_close.clicked.connect(self.reject)
+        btn_row.addWidget(self.btn_close)
+
+        btn_row.addStretch()
+
+        self.btn_download_all = QPushButton(f"📥 Download & Install Missing ({len(self.missing_items)})")
+        self.btn_download_all.clicked.connect(self._start_download_prereqs)
+        btn_row.addWidget(self.btn_download_all)
+
+        layout.addLayout(btn_row)
+
+    def _start_download_prereqs(self):
+        self.btn_download_all.setEnabled(False)
+        self.btn_close.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.lbl_status.setText("Processing missing prerequisites...")
+
+        def worker():
+            results = []
+            for item in self.missing_items:
+                name = item["name"]
+                mod_id = item.get("mod_id")
+
+                # 1. Local Vortex Cache
+                local_path, _ = find_local_vortex_mod(mod_id, mod_name=name) if mod_id else (None, False)
+                if local_path:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.backend.install_mod_archive(local_path),
+                        self.dispatcher.loop
+                    )
+                    ok, msg = future.result(timeout=180)
+                    results.append((name, ok, "Installed from local Vortex cache" if ok else msg, None))
+                    continue
+
+                # 2. Nexus API
+                if not mod_id or not self.nexus_api.api_key:
+                    results.append((name, False, "API key or Mod ID not available", mod_id))
+                    continue
+
+                p_file = self.nexus_api.get_primary_mod_file("stardewvalley", mod_id)
+                if not p_file:
+                    results.append((name, False, "No downloadable file found on Nexus", mod_id))
+                    continue
+
+                file_id = p_file["file_id"]
+                try:
+                    links = self.nexus_api.get_download_links("stardewvalley", mod_id, file_id)
+                    if not links:
+                        results.append((name, False, "No download link returned", mod_id))
+                        continue
+                    dl_file = self.nexus_api.download_file(links[0], DEFAULT_DOWNLOAD_DIR)
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.backend.install_mod_archive(dl_file),
+                        self.dispatcher.loop
+                    )
+                    ok, msg = future.result(timeout=180)
+                    results.append((name, ok, "Installed to iPhone" if ok else msg, None))
+                except Exception as e:
+                    results.append((name, False, str(e), mod_id))
+
+            return results
+
+        def on_done(results):
+            self.progress_bar.setVisible(False)
+            self.btn_close.setEnabled(True)
+
+            installed_count = sum(1 for _, ok, _, _ in results if ok)
+            manual_mods = [item for item in results if not item[1] and item[3]]
+
+            if installed_count > 0:
+                if self.parent() and hasattr(self.parent(), "_refresh_mods"):
+                    self.parent()._refresh_mods()
+
+            if manual_mods:
+                mod_names = ", ".join(m[0] for m in manual_mods)
+                reply = QMessageBox.information(
+                    self,
+                    "Nexus Web Download Required",
+                    f"{installed_count} prerequisite(s) installed.\n\n"
+                    f"The following mod(s) require manual download via browser because direct API download requires Nexus Premium:\n"
+                    f"• {mod_names}\n\n"
+                    f"Click 'Open in Browser' to open their download pages. On Nexus, click 'Mod Manager Download' to install automatically via this app!",
+                    QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel
+                )
+                if reply == QMessageBox.StandardButton.Open:
+                    for m in manual_mods:
+                        webbrowser.open(f"https://www.nexusmods.com/stardewvalley/mods/{m[3]}?tab=files")
+                self.accept()
+            else:
+                QMessageBox.information(
+                    self, "Complete",
+                    f"Successfully installed all {installed_count} missing prerequisite(s)!"
+                )
+                self.accept()
+
+        self.dispatcher.run_async(
+            asyncio.to_thread(worker),
+            on_success=on_done,
+            on_error=lambda err: (
+                self.progress_bar.setVisible(False),
+                self.btn_close.setEnabled(True),
+                QMessageBox.critical(self, "Error", f"Failed: {err}")
+            )
+        )
+
+
 class InstallFromLinkDialog(QDialog):
     def __init__(self, parent=None, nexus_api: Optional[NexusAPI] = None, dispatcher: Optional[AsyncDispatcher] = None, initial_url: str = ""):
         super().__init__(parent)
@@ -1087,7 +1269,8 @@ class InstallFromLinkDialog(QDialog):
             def fetch():
                 details = self.nexus_api.get_mod_details(game, mod_id)
                 files = self.nexus_api.get_mod_files(game, mod_id)
-                return details, files
+                reqs = self.nexus_api.get_mod_requirements(mod_id)
+                return details, files, reqs
 
             if self.dispatcher:
                 self.dispatcher.run_async(
@@ -1097,15 +1280,16 @@ class InstallFromLinkDialog(QDialog):
                 )
             else:
                 try:
-                    d, f = fetch()
-                    self._on_nexus_details_loaded((d, f))
+                    d, f, r = fetch()
+                    self._on_nexus_details_loaded((d, f, r))
                 except Exception as e:
                     self._on_nexus_details_error(str(e))
 
     def _on_nexus_details_loaded(self, res):
-        details, files = res
+        details, files, reqs = res
         self.mod_details = details
         self.mod_files = files
+        self.mod_reqs = reqs
         self.lbl_status.setText("")
 
         name = details.get("name", "Unknown Mod")
@@ -1116,6 +1300,17 @@ class InstallFromLinkDialog(QDialog):
         self.lbl_title.setText(f"🎮 {name}")
         self.lbl_author.setText(f"Author: {author}  •  Version: {ver}")
         self.lbl_desc.setText(summary or "No summary provided.")
+
+        # Check prerequisites against device
+        installed_mods = getattr(self.parent(), "mods_cache", [])
+        missing = [r for r in reqs if not is_requirement_installed(r["mod_id"], r["name"], installed_mods)]
+        if missing:
+            names = ", ".join(r["name"] for r in missing)
+            self.lbl_status.setText(f"⚠ Missing Prerequisites: {names}\n(Will be downloaded & installed automatically)")
+            self.lbl_status.setStyleSheet("color: #E67E22; font-size: 11px; font-weight: bold;")
+        elif reqs:
+            self.lbl_status.setText(f"✓ All prerequisites satisfied ({len(reqs)} detected)")
+            self.lbl_status.setStyleSheet("color: #2ECC71; font-size: 11px; font-weight: bold;")
 
         # Filter relevant files: MAIN, UPDATE, OPTIONAL
         relevant = [f for f in files if f.get("category_name") in ["MAIN", "UPDATE", "OPTIONAL"]]
@@ -1208,9 +1403,12 @@ class InstallFromLinkDialog(QDialog):
             self.lbl_status.setText("Checking Nexus CDN download link permissions...")
 
             def try_resolve():
-                return self.nexus_api.get_download_links(game, mod_id, file_id)
+                links = self.nexus_api.get_download_links(game, mod_id, file_id)
+                reqs = self.nexus_api.get_mod_requirements(mod_id)
+                return links, reqs
 
-            def on_success(links):
+            def on_success(res):
+                links, reqs = res
                 self.accept()
                 if self.parent():
                     parsed_equiv = {
@@ -1218,7 +1416,12 @@ class InstallFromLinkDialog(QDialog):
                         "mod_id": mod_id,
                         "file_id": file_id
                     }
-                    self.parent()._on_links_resolved(links, parsed_equiv)
+                    installed_mods = getattr(self.parent(), "mods_cache", [])
+                    missing = [r for r in reqs if not is_requirement_installed(r["mod_id"], r["name"], installed_mods)]
+                    if missing:
+                        self.parent()._handle_missing_prereqs_then_download(links, parsed_equiv, missing)
+                    else:
+                        self.parent()._on_links_resolved(links, parsed_equiv)
 
             def on_error(err):
                 self.btn_install.setEnabled(True)
@@ -1245,8 +1448,8 @@ class InstallFromLinkDialog(QDialog):
                 )
             else:
                 try:
-                    links = try_resolve()
-                    on_success(links)
+                    res = try_resolve()
+                    on_success(res)
                 except Exception as e:
                     on_error(str(e))
 
@@ -1261,6 +1464,10 @@ class ModManagerWindow(QMainWindow):
         self.resize(1120, 750)
         self.setStyleSheet(DARK_STYLE)
         self.setAcceptDrops(True)
+
+        icon_path = os.path.join(os.path.dirname(__file__), "..", "..", "src", "SDViOS", "Resources", "AppIcons", "AppIcon60x60@3x.png")
+        if os.path.isfile(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         self.dispatcher = AsyncDispatcher()
         self.backend = IOSModBackend()
@@ -1392,10 +1599,22 @@ class ModManagerWindow(QMainWindow):
         self.btn_install_url.clicked.connect(lambda: self._show_install_url_dialog())
         toolbar.addWidget(self.btn_install_url)
 
+        self.btn_check_prereqs = QPushButton("🔍 Check Prerequisites")
+        self.btn_check_prereqs.setObjectName("SecondaryBtn")
+        self.btn_check_prereqs.setToolTip("Inspect all installed mods for missing dependencies or framework mods")
+        self.btn_check_prereqs.clicked.connect(self._check_all_prerequisites)
+        toolbar.addWidget(self.btn_check_prereqs)
+
         self.btn_refresh_mods = QPushButton("⟳ Refresh")
         self.btn_refresh_mods.setObjectName("SecondaryBtn")
         self.btn_refresh_mods.clicked.connect(self._refresh_mods)
         toolbar.addWidget(self.btn_refresh_mods)
+
+        self.btn_delete_all = QPushButton("🗑 Delete All")
+        self.btn_delete_all.setObjectName("DangerBtn")
+        self.btn_delete_all.setToolTip("Permanently remove all mods from the iOS device with confirmation")
+        self.btn_delete_all.clicked.connect(self._delete_all_mods)
+        toolbar.addWidget(self.btn_delete_all)
 
         toolbar.addSpacing(16)
 
@@ -1906,21 +2125,104 @@ class ModManagerWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid URL", f"Could not parse NXM link: {nxm_url}")
             return
 
-        self.tabs.setCurrentIndex(2)
+        self.tabs.setCurrentIndex(0)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
-        self.status_bar.setText(f" Resolving download link for Mod #{parsed['mod_id']}...")
+        self.status_bar.setText(f" Resolving download for Mod #{parsed['mod_id']} & checking prerequisites...")
 
-        def fetch_links():
-            return self.nexus_api.get_download_links(
+        def fetch_links_and_reqs():
+            links = self.nexus_api.get_download_links(
                 parsed["game"], parsed["mod_id"], parsed["file_id"],
                 parsed["key"], parsed["expires"]
             )
+            reqs = self.nexus_api.get_mod_requirements(parsed["mod_id"])
+            return links, reqs
+
+        def on_fetched(res):
+            links, reqs = res
+            missing = [r for r in reqs if not is_requirement_installed(r["mod_id"], r["name"], self.mods_cache)]
+            if missing:
+                self._handle_missing_prereqs_then_download(links, parsed, missing)
+            else:
+                self._on_links_resolved(links, parsed)
 
         self.dispatcher.run_async(
-            asyncio.to_thread(fetch_links),
-            on_success=lambda links: self._on_links_resolved(links, parsed),
+            asyncio.to_thread(fetch_links_and_reqs),
+            on_success=on_fetched,
             on_error=self._on_nxm_failed
+        )
+
+    def _handle_missing_prereqs_then_download(self, main_links: list[str], main_parsed: dict, missing_reqs: list[dict]):
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        req_names = ", ".join(r["name"] for r in missing_reqs)
+        self.status_bar.setText(f" Found {len(missing_reqs)} missing prerequisite(s): {req_names}. Installing...")
+
+        def prereq_worker():
+            results = []
+            for r in missing_reqs:
+                r_name = r["name"]
+                r_id = r["mod_id"]
+
+                # 1. Local Vortex Cache
+                local_path, _ = find_local_vortex_mod(r_id, mod_name=r_name)
+                if local_path:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self.backend.install_mod_archive(local_path),
+                        self.dispatcher.loop
+                    )
+                    ok, msg = future.result(timeout=180)
+                    results.append((r_name, ok, "Installed from local Vortex cache" if ok else msg, None))
+                    continue
+
+                # 2. Nexus API
+                p_file = self.nexus_api.get_primary_mod_file("stardewvalley", r_id)
+                if not p_file:
+                    results.append((r_name, False, "No downloadable file found", r_id))
+                    continue
+                try:
+                    links = self.nexus_api.get_download_links("stardewvalley", r_id, p_file["file_id"])
+                    if links:
+                        dl_file = self.nexus_api.download_file(links[0], DEFAULT_DOWNLOAD_DIR)
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.backend.install_mod_archive(dl_file),
+                            self.dispatcher.loop
+                        )
+                        ok, msg = future.result(timeout=180)
+                        results.append((r_name, ok, "Installed to iPhone" if ok else msg, None))
+                    else:
+                        results.append((r_name, False, "No link returned", r_id))
+                except Exception as e:
+                    results.append((r_name, False, str(e), r_id))
+
+            return results
+
+        def on_prereqs_finished(results):
+            installed_cnt = sum(1 for _, ok, _, _ in results if ok)
+            manual_mods = [item for item in results if not item[1] and item[3]]
+
+            if manual_mods:
+                mod_names = ", ".join(m[0] for m in manual_mods)
+                reply = QMessageBox.information(
+                    self,
+                    "Prerequisite Authorization Required",
+                    f"{installed_cnt} prerequisite(s) installed.\n\n"
+                    f"The following required mod(s) require initiating download from Nexus:\n"
+                    f"• {mod_names}\n\n"
+                    "Click 'Open in Browser' to open their download pages. Click 'Mod Manager Download' on Nexus to install automatically!",
+                    QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel
+                )
+                if reply == QMessageBox.StandardButton.Open:
+                    for m in manual_mods:
+                        webbrowser.open(f"https://www.nexusmods.com/stardewvalley/mods/{m[3]}?tab=files")
+
+            if main_links:
+                self._on_links_resolved(main_links, main_parsed)
+
+        self.dispatcher.run_async(
+            asyncio.to_thread(prereq_worker),
+            on_success=on_prereqs_finished,
+            on_error=lambda err: self._on_links_resolved(main_links, main_parsed)
         )
 
     def _on_links_resolved(self, links: list[str], parsed: dict):
@@ -2334,6 +2636,143 @@ class ModManagerWindow(QMainWindow):
                 on_success=lambda res: self._refresh_mods(),
                 on_error=lambda err: QMessageBox.warning(self, "Error", f"Failed to delete mod: {err}")
             )
+
+    def _delete_all_mods(self):
+        if not self.backend.is_connected:
+            QMessageBox.warning(self, "Not Connected", "Please connect your iOS device via USB or select a local folder first.")
+            return
+
+        if not self.mods_cache:
+            QMessageBox.information(self, "No Mods", "There are no mods currently installed on your iOS device.")
+            return
+
+        count = len(self.mods_cache)
+        reply = QMessageBox.warning(
+            self, "Confirm Delete All Mods",
+            f"⚠️ Are you sure you want to permanently delete ALL {count} installed mods from your iOS device?\n\n"
+            "This will remove all mod folders from your device's /Documents/Mods folder.\n"
+            "This action cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 0)
+            self.status_bar.setText(f" Deleting all {count} mods from iOS device...")
+
+            def on_done(res):
+                self.progress_bar.setVisible(False)
+                ok, msg = res
+                if ok:
+                    QMessageBox.information(self, "Mods Deleted", f"Successfully deleted all {count} mods from your iOS device.")
+                else:
+                    QMessageBox.warning(self, "Delete Warning", msg)
+                self._refresh_mods()
+
+            self.dispatcher.run_async(
+                self.backend.delete_all_mods(),
+                on_success=on_done,
+                on_error=lambda err: (
+                    self.progress_bar.setVisible(False),
+                    QMessageBox.critical(self, "Error", f"Failed to delete all mods: {err}")
+                )
+            )
+
+    def _check_all_prerequisites(self):
+        if not self.backend.is_connected:
+            QMessageBox.warning(self, "Not Connected", "Please connect your iOS device via USB or select a local folder first.")
+            return
+
+        if not self.mods_cache:
+            QMessageBox.information(self, "No Mods", "There are no mods installed on your iOS device to check.")
+            return
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.status_bar.setText(f" Checking prerequisites for {len(self.mods_cache)} installed mods...")
+
+        def check_worker():
+            missing_map = {}
+
+            for mod in self.mods_cache:
+                # 1. ContentPackFor
+                if mod.is_content_pack and mod.content_pack_for:
+                    target_uid = mod.content_pack_for.lower()
+                    if not any(m.unique_id.lower() == target_uid for m in self.mods_cache):
+                        cp_name = mod.content_pack_for
+                        if cp_name not in missing_map:
+                            missing_map[cp_name] = {
+                                "name": cp_name,
+                                "mod_id": KNOWN_FRAMEWORK_NEXUS_IDS.get(target_uid, 1915),
+                                "required_by": []
+                            }
+                        if mod.name not in missing_map[cp_name]["required_by"]:
+                            missing_map[cp_name]["required_by"].append(mod.name)
+
+                # 2. Dependencies in manifest
+                for dep_uid in mod.dependencies:
+                    dep_lower = dep_uid.lower()
+                    if dep_lower in ["smapi", "pathoschild.smapi"]:
+                        continue
+                    if not any(m.unique_id.lower() == dep_lower for m in self.mods_cache):
+                        nexus_id = KNOWN_FRAMEWORK_NEXUS_IDS.get(dep_lower)
+                        dep_name = dep_uid.split(".")[-1]
+                        if dep_name not in missing_map:
+                            missing_map[dep_name] = {
+                                "name": dep_name,
+                                "mod_id": nexus_id,
+                                "required_by": []
+                            }
+                        if mod.name not in missing_map[dep_name]["required_by"]:
+                            missing_map[dep_name]["required_by"].append(mod.name)
+
+                # 3. Nexus requirements
+                if mod.nexus_id and self.nexus_api.api_key:
+                    try:
+                        reqs = self.nexus_api.get_mod_requirements(mod.nexus_id)
+                        for r in reqs:
+                            if not is_requirement_installed(r["mod_id"], r["name"], self.mods_cache):
+                                r_name = r["name"]
+                                if r_name not in missing_map:
+                                    missing_map[r_name] = {
+                                        "name": r_name,
+                                        "mod_id": r["mod_id"],
+                                        "required_by": []
+                                    }
+                                if mod.name not in missing_map[r_name]["required_by"]:
+                                    missing_map[r_name]["required_by"].append(mod.name)
+                    except Exception:
+                        pass
+
+            return list(missing_map.values())
+
+        def on_check_done(missing_items):
+            self.progress_bar.setVisible(False)
+            self.status_bar.setText(f" Prerequisites check complete: {len(missing_items)} missing.")
+
+            if not missing_items:
+                QMessageBox.information(
+                    self, "Prerequisites Check",
+                    f"✓ All Prerequisites Satisfied!\n\nAll {len(self.mods_cache)} installed mods have all their required framework mods and dependencies installed."
+                )
+            else:
+                dlg = PrerequisitesCheckDialog(
+                    parent=self,
+                    missing_items=missing_items,
+                    nexus_api=self.nexus_api,
+                    backend=self.backend,
+                    dispatcher=self.dispatcher
+                )
+                dlg.exec()
+
+        self.dispatcher.run_async(
+            asyncio.to_thread(check_worker),
+            on_success=on_check_done,
+            on_error=lambda err: (
+                self.progress_bar.setVisible(False),
+                QMessageBox.critical(self, "Error", f"Prerequisites check failed: {err}")
+            )
+        )
 
     def _browse_and_install_mod(self):
         if not self.backend.is_connected:
