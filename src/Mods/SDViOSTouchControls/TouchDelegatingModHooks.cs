@@ -53,5 +53,18 @@ namespace SDViOSTouchControls
 
             base.OnGame1_UpdateControlInput(ref keyboardState, ref mouseState, ref gamePadState, action);
         }
+
+        public override void OnGameLocation_ResetForPlayerEntry(GameLocation location, Action action)
+        {
+            if (location != null && location.map == null)
+            {
+                try
+                {
+                    location.reloadMap();
+                }
+                catch { }
+            }
+            base.OnGameLocation_ResetForPlayerEntry(location, action);
+        }
     }
 }

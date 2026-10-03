@@ -64,6 +64,7 @@ namespace SDViOSTouchControls
             helper.Events.Display.RenderedStep += OnRenderedStep;
             helper.Events.Display.Rendered += OnRendered;
             helper.Events.Content.AssetReady += OnAssetReady;
+            helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
 
             Monitor.Log("[SDViOSTouchControls] Mod initialized successfully.", LogLevel.Info);
         }
@@ -523,6 +524,27 @@ namespace SDViOSTouchControls
                         }
                     }
                 }
+
+                var mReloadMap = typeof(GameLocation).GetMethod("reloadMap", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+                if (mReloadMap != null)
+                {
+                    harmony.Patch(mReloadMap, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixLocationReloadMap), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.reloadMap -> defer non-essential maps during save load.", LogLevel.Info);
+                }
+
+                var mGetMap = typeof(GameLocation).GetProperty("Map", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod();
+                if (mGetMap != null)
+                {
+                    harmony.Patch(mGetMap, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixLocationGetMap), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.get_Map -> on-demand load if deferred.", LogLevel.Info);
+                }
+
+                var mLoadMap = typeof(GameLocation).GetMethod("loadMap", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(string), typeof(bool) }, null);
+                if (mLoadMap != null)
+                {
+                    harmony.Patch(mLoadMap, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixLocationLoadMap), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.loadMap -> periodic GC during save load.", LogLevel.Info);
+                }
             }
             catch (Exception ex)
             {
@@ -607,11 +629,70 @@ namespace SDViOSTouchControls
             return true;
         }
 
-        private static bool PrefixMapLoadTileSheets(xTile.Map __instance)
+        private static bool _forceMapLoad = false;
+        private static int _loadedMapsCount = 0;
+
+        private static bool PrefixLocationReloadMap(GameLocation __instance)
+        {
+            if (Game1.gameMode == 6 && !_forceMapLoad)
+            {
+                bool isEssential = __instance is StardewValley.Locations.FarmHouse ||
+                                   __instance is Farm ||
+                                   __instance.Name == "FarmHouse" ||
+                                   __instance.Name == "Farm" ||
+                                   (__instance.Name != null && __instance.Name.StartsWith("Cabin"));
+
+                if (!isEssential)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static void PrefixLocationGetMap(GameLocation __instance)
+        {
+            if (__instance != null && __instance.map == null)
+            {
+                try
+                {
+                    _forceMapLoad = true;
+                    __instance.reloadMap();
+                }
+                catch { }
+                finally
+                {
+                    _forceMapLoad = false;
+                }
+            }
+        }
+
+        private static void PostfixLocationLoadMap(GameLocation __instance)
         {
             if (Game1.gameMode == 6)
             {
-                if (Game1.currentLocation == null || __instance != Game1.currentLocation.Map)
+                _loadedMapsCount++;
+                if (_loadedMapsCount % 3 == 0)
+                {
+                    try
+                    {
+                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                        GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        private static bool PrefixMapLoadTileSheets(xTile.Map __instance)
+        {
+            if (Game1.gameMode == 6 && !_forceMapLoad)
+            {
+                if (Game1.currentLocation == null)
+                {
+                    return true;
+                }
+                if (__instance != Game1.currentLocation.Map)
                 {
                     return false;
                 }
@@ -621,9 +702,13 @@ namespace SDViOSTouchControls
 
         private static bool PrefixDevLoadTileSheet(xTile.Tiles.TileSheet tileSheet)
         {
-            if (Game1.gameMode == 6)
+            if (Game1.gameMode == 6 && !_forceMapLoad)
             {
-                if (Game1.currentLocation == null || tileSheet == null || tileSheet.Map != Game1.currentLocation.Map)
+                if (Game1.currentLocation == null)
+                {
+                    return true;
+                }
+                if (tileSheet == null || tileSheet.Map != Game1.currentLocation.Map)
                 {
                     return false;
                 }
@@ -814,6 +899,18 @@ namespace SDViOSTouchControls
                     catch { }
                 }
             }
+        }
+
+        private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
+        {
+            _loadedMapsCount = 0;
+            try
+            {
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                Monitor.Log("[SDViOSTouchControls] Save loaded successfully. Memory compacted.", LogLevel.Info);
+            }
+            catch { }
         }
 
         private bool _legacyNeutralized = false;
