@@ -108,6 +108,7 @@ class IOSModBackend:
         self.bundle_id: str = ""
         self.is_connected: bool = False
         self.local_mode_dir: Optional[str] = None  # If user selects a mounted PC folder
+        self._save_locations: dict[str, str] = {}
 
     async def list_usb_devices(self) -> list[dict]:
         """List all connected iOS devices over USB."""
@@ -613,50 +614,119 @@ class IOSModBackend:
 
         if self.local_mode_dir:
             base = self.local_mode_dir if os.path.basename(self.local_mode_dir).lower() != "mods" else os.path.dirname(self.local_mode_dir)
-            log_p = os.path.join(base, "ErrorLogs", "SMAPI-latest.txt")
-            if os.path.isfile(log_p):
-                with open(log_p, "r", encoding="utf-8", errors="ignore") as f:
-                    return f.read()
-            return f"No log found at {log_p}."
+            for cand in [
+                os.path.join(base, ".config", "StardewValley", "ErrorLogs", "SMAPI-latest.txt"),
+                os.path.join(base, "ErrorLogs", "SMAPI-latest.txt"),
+                os.path.join(base, "ErrorLogs", "engine-latest.log"),
+            ]:
+                if os.path.isfile(cand):
+                    with open(cand, "r", encoding="utf-8", errors="ignore") as f:
+                        return f.read()
+            return f"No log found on device."
 
         if not self.house_arrest:
             return "AFC not available."
 
         try:
-            for candidate in ["/Documents/ErrorLogs/SMAPI-latest.txt", "/Documents/ErrorLogs/engine-latest.log"]:
+            for candidate in [
+                "/Documents/.config/StardewValley/ErrorLogs/SMAPI-latest.txt",
+                "/Documents/ErrorLogs/SMAPI-latest.txt",
+                "/Documents/ErrorLogs/engine-latest.log",
+            ]:
                 if await self.house_arrest.exists(candidate):
                     raw = await self.house_arrest.get_file_contents(candidate)
                     return raw.decode("utf-8", errors="ignore")
-            return "No SMAPI log found on device in /Documents/ErrorLogs/."
+            return "No SMAPI log found on device in /Documents/ErrorLogs/ or /Documents/.config/StardewValley/ErrorLogs/."
         except Exception as e:
             return f"Error retrieving SMAPI log: {e}"
 
     async def list_saves(self) -> list[str]:
-        """List all save game folder names."""
+        """List all save game folder names across all known iOS Stardew locations."""
         if not self.is_connected:
             return []
 
+        self._save_locations = {}
+
         if self.local_mode_dir:
             base = self.local_mode_dir if os.path.basename(self.local_mode_dir).lower() != "mods" else os.path.dirname(self.local_mode_dir)
-            saves_p = os.path.join(base, "Saves")
-            if os.path.isdir(saves_p):
-                return [d for d in os.listdir(saves_p) if os.path.isdir(os.path.join(saves_p, d))]
-            return []
+            search_paths = [
+                os.path.join(base, ".config", "StardewValley", "Saves"),
+                os.path.join(base, "Saves"),
+                os.path.join(base, "StardewValley", "Saves"),
+                os.path.join(base, "StardewValley"),
+            ]
+            for folder in search_paths:
+                if os.path.isdir(folder):
+                    try:
+                        for entry in os.listdir(folder):
+                            p = os.path.join(folder, entry)
+                            if os.path.isdir(p) and entry not in [".", "..", ".DS_Store", "ErrorLogs", "Content", "Mods", ".smapi", ".Trash"]:
+                                if os.path.exists(os.path.join(p, "SaveGameInfo")) or os.path.exists(os.path.join(p, entry)) or "_" in entry:
+                                    if entry not in self._save_locations:
+                                        self._save_locations[entry] = p
+                    except Exception:
+                        pass
+
+            try:
+                for entry in os.listdir(base):
+                    p = os.path.join(base, entry)
+                    if os.path.isdir(p) and entry not in [".", "..", ".DS_Store", "ErrorLogs", "Content", "Mods", "Saves", "StardewValley", ".config", ".Trash"]:
+                        if os.path.exists(os.path.join(p, "SaveGameInfo")):
+                            if entry not in self._save_locations:
+                                self._save_locations[entry] = p
+            except Exception:
+                pass
+
+            return sorted(list(self._save_locations.keys()))
 
         if not self.house_arrest:
             return []
 
         try:
-            if not await self.house_arrest.exists("/Documents/Saves"):
-                return []
-            entries = await self.house_arrest.listdir("/Documents/Saves")
-            saves = []
-            for e in entries:
-                if e in [".", "..", ".DS_Store"]:
-                    continue
-                if await self.house_arrest.isdir(f"/Documents/Saves/{e}"):
-                    saves.append(e)
-            return sorted(saves)
+            search_paths = [
+                "/Documents/.config/StardewValley/Saves",
+                "/Documents/Saves",
+                "/Documents/StardewValley/Saves",
+                "/Documents/StardewValley",
+            ]
+            for folder in search_paths:
+                try:
+                    if await self.house_arrest.exists(folder):
+                        entries = await self.house_arrest.listdir(folder)
+                        for entry in entries:
+                            if entry in [".", "..", ".DS_Store", "ErrorLogs", "Content", "Mods", ".smapi", ".Trash"]:
+                                continue
+                            full_p = f"{folder}/{entry}"
+                            try:
+                                if await self.house_arrest.isdir(full_p):
+                                    sub_entries = await self.house_arrest.listdir(full_p)
+                                    if "SaveGameInfo" in sub_entries or entry in sub_entries or "_" in entry:
+                                        if entry not in self._save_locations:
+                                            self._save_locations[entry] = full_p
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+            # Also check top-level /Documents for any folder containing SaveGameInfo
+            try:
+                doc_entries = await self.house_arrest.listdir("/Documents")
+                for entry in doc_entries:
+                    if entry in [".", "..", ".DS_Store", "ErrorLogs", "Content", "Mods", "Saves", "StardewValley", ".config", ".Trash", "smapi-internal"]:
+                        continue
+                    full_p = f"/Documents/{entry}"
+                    try:
+                        if await self.house_arrest.isdir(full_p):
+                            sub_entries = await self.house_arrest.listdir(full_p)
+                            if "SaveGameInfo" in sub_entries:
+                                if entry not in self._save_locations:
+                                    self._save_locations[entry] = full_p
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            return sorted(list(self._save_locations.keys()))
         except Exception as e:
             print(f"[Backend] Error listing saves: {e}")
             return []
@@ -671,11 +741,37 @@ class IOSModBackend:
 
         try:
             if self.local_mode_dir:
-                base = self.local_mode_dir if os.path.basename(self.local_mode_dir).lower() != "mods" else os.path.dirname(self.local_mode_dir)
-                src = os.path.join(base, "Saves", save_name)
+                src = self._save_locations.get(save_name)
+                if not src or not os.path.exists(src):
+                    base = self.local_mode_dir if os.path.basename(self.local_mode_dir).lower() != "mods" else os.path.dirname(self.local_mode_dir)
+                    for cand in [
+                        os.path.join(base, ".config", "StardewValley", "Saves", save_name),
+                        os.path.join(base, "Saves", save_name),
+                        os.path.join(base, "StardewValley", "Saves", save_name),
+                        os.path.join(base, save_name),
+                    ]:
+                        if os.path.exists(cand):
+                            src = cand
+                            break
+                if not src or not os.path.exists(src):
+                    return False, f"Save directory '{save_name}' not found."
+
                 shutil.copytree(src, os.path.join(temp_dir, save_name))
             else:
-                remote_src = f"/Documents/Saves/{save_name}"
+                remote_src = self._save_locations.get(save_name)
+                if not remote_src:
+                    for cand in [
+                        f"/Documents/.config/StardewValley/Saves/{save_name}",
+                        f"/Documents/Saves/{save_name}",
+                        f"/Documents/StardewValley/Saves/{save_name}",
+                        f"/Documents/{save_name}",
+                    ]:
+                        if await self.house_arrest.exists(cand):
+                            remote_src = cand
+                            break
+                if not remote_src:
+                    return False, f"Save directory '{save_name}' not found on device."
+
                 await self.house_arrest.pull(remote_src, temp_dir, progress_bar=False)
 
             # Zip contents
@@ -689,5 +785,75 @@ class IOSModBackend:
             return True, f"Saved backup to: {out_zip}"
         except Exception as e:
             return False, f"Backup failed: {e}"
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    async def import_save(self, source_path: str) -> tuple[bool, str]:
+        """Import a save folder or .zip file into the game saves directory."""
+        if not self.is_connected:
+            return False, "Not connected"
+
+        temp_dir = tempfile.mkdtemp(prefix="sdv_import_save_")
+        try:
+            extracted_folder = None
+            if os.path.isfile(source_path) and (source_path.lower().endswith(".zip") or zipfile.is_zipfile(source_path)):
+                with zipfile.ZipFile(source_path, "r") as z:
+                    z.extractall(temp_dir)
+                for root, dirs, files in os.walk(temp_dir):
+                    if "SaveGameInfo" in files:
+                        extracted_folder = root
+                        break
+            elif os.path.isdir(source_path):
+                if os.path.exists(os.path.join(source_path, "SaveGameInfo")):
+                    extracted_folder = source_path
+                else:
+                    for entry in os.listdir(source_path):
+                        sub = os.path.join(source_path, entry)
+                        if os.path.isdir(sub) and os.path.exists(os.path.join(sub, "SaveGameInfo")):
+                            extracted_folder = sub
+                            break
+
+            if not extracted_folder or not os.path.exists(extracted_folder):
+                return False, "Could not find a valid Stardew Valley save (must contain 'SaveGameInfo')."
+
+            save_name = os.path.basename(extracted_folder)
+
+            if self.local_mode_dir:
+                base = self.local_mode_dir if os.path.basename(self.local_mode_dir).lower() != "mods" else os.path.dirname(self.local_mode_dir)
+                dest_dir = os.path.join(base, ".config", "StardewValley", "Saves", save_name)
+                os.makedirs(os.path.dirname(dest_dir), exist_ok=True)
+                if os.path.exists(dest_dir):
+                    shutil.rmtree(dest_dir)
+                shutil.copytree(extracted_folder, dest_dir)
+
+                # Also sync to /Saves/ if it exists
+                alt_dir = os.path.join(base, "Saves", save_name)
+                if os.path.exists(os.path.dirname(alt_dir)):
+                    if os.path.exists(alt_dir):
+                        shutil.rmtree(alt_dir)
+                    shutil.copytree(extracted_folder, alt_dir)
+            else:
+                # iOS device over AFC
+                dest_config = f"/Documents/.config/StardewValley/Saves"
+                if not await self.house_arrest.exists(dest_config):
+                    await self.house_arrest.makedirs(dest_config)
+                remote_save_cfg = f"{dest_config}/{save_name}"
+                if await self.house_arrest.exists(remote_save_cfg):
+                    await self.house_arrest.rm(remote_save_cfg)
+                await self.house_arrest.push(extracted_folder, dest_config, progress_bar=False)
+
+                # Also sync to /Documents/Saves
+                try:
+                    if await self.house_arrest.exists("/Documents/Saves"):
+                        remote_alt = f"/Documents/Saves/{save_name}"
+                        if await self.house_arrest.exists(remote_alt):
+                            await self.house_arrest.rm(remote_alt)
+                        await self.house_arrest.push(extracted_folder, "/Documents/Saves", progress_bar=False)
+                except Exception:
+                    pass
+
+            return True, f"Successfully imported save '{save_name}'."
+        except Exception as e:
+            return False, f"Import failed: {e}"
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

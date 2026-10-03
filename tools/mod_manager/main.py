@@ -1576,6 +1576,7 @@ class ModManagerWindow(QMainWindow):
         self._setup_saves_tab()
         self._setup_info_tab()
 
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         main_layout.addWidget(self.tabs)
 
@@ -1583,6 +1584,17 @@ class ModManagerWindow(QMainWindow):
         self.status_bar = QLabel(" Ready")
         self.status_bar.setStyleSheet("background-color: #191B21; color: #8F94A6; padding: 6px 16px; font-size: 11px;")
         main_layout.addWidget(self.status_bar)
+
+    def _on_tab_changed(self, index: int):
+        current_widget = self.tabs.widget(index)
+        if current_widget == self.tab_saves:
+            self._refresh_saves()
+        elif current_widget == self.tab_info:
+            self._update_diagnostics()
+        elif current_widget == self.tab_logs:
+            self._fetch_log()
+        elif current_widget == self.tab_mods:
+            self._refresh_mods()
 
     # ----------------- 1. INSTALLED MODS TAB -----------------
     def _setup_mods_tab(self):
@@ -2392,14 +2404,21 @@ class ModManagerWindow(QMainWindow):
         self.btn_backup_save.clicked.connect(self._backup_selected_save)
         toolbar.addWidget(self.btn_backup_save)
 
+        self.btn_import_save = QPushButton("📥 Import Save (.zip / folder)")
+        self.btn_import_save.setObjectName("SecondaryBtn")
+        self.btn_import_save.clicked.connect(self._import_save)
+        toolbar.addWidget(self.btn_import_save)
+
         toolbar.addStretch()
         layout.addLayout(toolbar)
 
         self.saves_table = QTableWidget()
-        self.saves_table.setColumnCount(2)
-        self.saves_table.setHorizontalHeaderLabels(["Save Folder Name", "Status"])
-        self.saves_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.saves_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.saves_table.setColumnCount(3)
+        self.saves_table.setHorizontalHeaderLabels(["Save Folder Name", "Location", "Status"])
+        self.saves_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.saves_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.saves_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.saves_table.setColumnWidth(0, 240)
         self.saves_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.saves_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.saves_table.verticalHeader().setVisible(False)
@@ -2422,10 +2441,15 @@ class ModManagerWindow(QMainWindow):
             name_item.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
             self.saves_table.setItem(row, 0, name_item)
 
+            loc_p = getattr(self.backend, "_save_locations", {}).get(s, "Detected")
+            loc_item = QTableWidgetItem(loc_p)
+            loc_item.setForeground(QColor("#8F94A6"))
+            self.saves_table.setItem(row, 1, loc_item)
+
             stat_item = QTableWidgetItem("Ready")
             stat_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             stat_item.setForeground(QColor("#2ECC71"))
-            self.saves_table.setItem(row, 1, stat_item)
+            self.saves_table.setItem(row, 2, stat_item)
         self.status_bar.setText(f" Found {len(saves)} save games on device.")
 
     def _backup_selected_save(self):
@@ -2445,6 +2469,45 @@ class ModManagerWindow(QMainWindow):
             on_success=lambda res: QMessageBox.information(self, "Backup Complete", res[1]),
             on_error=lambda err: QMessageBox.warning(self, "Backup Error", f"Backup failed: {err}")
         )
+
+    def _import_save(self):
+        if not self.backend.is_connected:
+            QMessageBox.information(self, "Not Connected", "Please connect to your iOS device first.")
+            return
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Import Save")
+        msg_box.setText("Would you like to import a Save Archive (.zip) or a Save Folder?")
+        btn_zip = msg_box.addButton("Import .ZIP File", QMessageBox.ButtonRole.ActionRole)
+        btn_folder = msg_box.addButton("Import Folder", QMessageBox.ButtonRole.ActionRole)
+        btn_cancel = msg_box.addButton(QMessageBox.StandardButton.Cancel)
+        msg_box.exec()
+
+        selected_path = None
+        if msg_box.clickedButton() == btn_zip:
+            selected_path, _ = QFileDialog.getOpenFileName(self, "Select Save Zip Archive", "", "Zip Files (*.zip)")
+        elif msg_box.clickedButton() == btn_folder:
+            selected_path = QFileDialog.getExistingDirectory(self, "Select Save Folder")
+        else:
+            return
+
+        if not selected_path:
+            return
+
+        self.status_bar.setText(" Importing save to device...")
+        self.dispatcher.run_async(
+            self.backend.import_save(selected_path),
+            on_success=self._on_save_imported,
+            on_error=lambda err: QMessageBox.warning(self, "Import Error", f"Failed to import save: {err}")
+        )
+
+    def _on_save_imported(self, res: tuple[bool, str]):
+        ok, msg = res
+        if ok:
+            QMessageBox.information(self, "Import Success", msg)
+            self._refresh_saves()
+        else:
+            QMessageBox.warning(self, "Import Failed", msg)
 
     # ----------------- 6. DIAGNOSTICS TAB -----------------
     def _setup_info_tab(self):
@@ -2502,6 +2565,7 @@ class ModManagerWindow(QMainWindow):
             self.status_bar.setText(f" Connected: {msg}")
             self._update_diagnostics()
             self._refresh_mods()
+            self._refresh_saves()
         else:
             self.device_badge.setText("🔴 No Device Connected")
             self.device_badge.setStyleSheet("background-color: #3A1E1E; color: #E74C3C; padding: 6px 14px; border-radius: 14px; font-weight: bold; font-size: 12px;")
@@ -2522,6 +2586,7 @@ class ModManagerWindow(QMainWindow):
                 self.status_bar.setText(f" Connected to local folder: {folder}")
                 self._update_diagnostics()
                 self._refresh_mods()
+                self._refresh_saves()
             else:
                 QMessageBox.warning(self, "Error", msg)
 
