@@ -545,6 +545,13 @@ namespace SDViOSTouchControls
                     harmony.Patch(mLoadMap, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixLocationLoadMap), BindingFlags.Static | BindingFlags.NonPublic)));
                     Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.loadMap -> periodic GC during save load.", LogLevel.Info);
                 }
+
+                var mReloadSprite = typeof(NPC).GetMethod("reloadSprite", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+                if (mReloadSprite != null)
+                {
+                    harmony.Patch(mReloadSprite, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixNpcReloadSprite), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched NPC.reloadSprite -> periodic GC during save load.", LogLevel.Info);
+                }
             }
             catch (Exception ex)
             {
@@ -631,18 +638,53 @@ namespace SDViOSTouchControls
 
         private static bool _forceMapLoad = false;
         private static int _loadedMapsCount = 0;
+        private static int _loadedNpcCount = 0;
+
+        private static bool IsEssentialLocation(GameLocation? loc)
+        {
+            if (loc == null) return false;
+            if (loc is StardewValley.Locations.FarmHouse || loc is Farm) return true;
+            string? name = loc.Name;
+            if (name != null)
+            {
+                if (name == "FarmHouse" || name == "Farm" || name.StartsWith("Cabin")) return true;
+            }
+            if (Game1.player != null)
+            {
+                string? sleepLoc = Game1.player.lastSleepLocation?.Value;
+                if (!string.IsNullOrEmpty(sleepLoc) && string.Equals(name, sleepLoc, StringComparison.OrdinalIgnoreCase)) return true;
+                string? currLoc = Game1.player.currentLocation?.Name;
+                if (!string.IsNullOrEmpty(currLoc) && string.Equals(name, currLoc, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
+        private static bool IsEssentialMap(xTile.Map? map)
+        {
+            if (map == null) return false;
+            string? id = map.Id ?? map.assetPath;
+            if (!string.IsNullOrEmpty(id))
+            {
+                if (id.IndexOf("FarmHouse", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    id.IndexOf("Cabin", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    id.EndsWith("Farm", StringComparison.OrdinalIgnoreCase) ||
+                    id.EndsWith("Farm_Shadow", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            if (Game1.currentLocation != null && map == Game1.currentLocation.Map)
+            {
+                return true;
+            }
+            return false;
+        }
 
         private static bool PrefixLocationReloadMap(GameLocation __instance)
         {
             if (Game1.gameMode == 6 && !_forceMapLoad)
             {
-                bool isEssential = __instance is StardewValley.Locations.FarmHouse ||
-                                   __instance is Farm ||
-                                   __instance.Name == "FarmHouse" ||
-                                   __instance.Name == "Farm" ||
-                                   (__instance.Name != null && __instance.Name.StartsWith("Cabin"));
-
-                if (!isEssential)
+                if (!IsEssentialLocation(__instance))
                 {
                     return false;
                 }
@@ -654,6 +696,11 @@ namespace SDViOSTouchControls
         {
             if (__instance != null && __instance.map == null)
             {
+                if (Game1.gameMode == 6 && !IsEssentialLocation(__instance))
+                {
+                    return;
+                }
+
                 try
                 {
                     _forceMapLoad = true;
@@ -684,15 +731,28 @@ namespace SDViOSTouchControls
             }
         }
 
+        private static void PostfixNpcReloadSprite(NPC __instance)
+        {
+            if (Game1.gameMode == 6)
+            {
+                _loadedNpcCount++;
+                if (_loadedNpcCount % 4 == 0)
+                {
+                    try
+                    {
+                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                        GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    }
+                    catch { }
+                }
+            }
+        }
+
         private static bool PrefixMapLoadTileSheets(xTile.Map __instance)
         {
             if (Game1.gameMode == 6 && !_forceMapLoad)
             {
-                if (Game1.currentLocation == null)
-                {
-                    return true;
-                }
-                if (__instance != Game1.currentLocation.Map)
+                if (!IsEssentialMap(__instance))
                 {
                     return false;
                 }
@@ -704,11 +764,7 @@ namespace SDViOSTouchControls
         {
             if (Game1.gameMode == 6 && !_forceMapLoad)
             {
-                if (Game1.currentLocation == null)
-                {
-                    return true;
-                }
-                if (tileSheet == null || tileSheet.Map != Game1.currentLocation.Map)
+                if (tileSheet == null || !IsEssentialMap(tileSheet.Map))
                 {
                     return false;
                 }
@@ -904,6 +960,7 @@ namespace SDViOSTouchControls
         private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
         {
             _loadedMapsCount = 0;
+            _loadedNpcCount = 0;
             try
             {
                 System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
