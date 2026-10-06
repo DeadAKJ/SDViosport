@@ -4,6 +4,6 @@
   "Version": "1.0.0",
   "Description": "Native on-screen virtual gamepad, mobile UI scaling, and touch input controls for Stardew Valley iOS.",
   "UniqueID": "com.deadakj.sdviostouchcontrols",
-  "EntryDll": "SDViOSTouchControls.dll",
+  "EntryDll": "SDViOSTouchControlsMod.dll",
   "MinimumApiVersion": "4.0.0"
 }
