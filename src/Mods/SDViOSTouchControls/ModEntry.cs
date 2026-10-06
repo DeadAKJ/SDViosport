@@ -94,6 +94,7 @@ namespace SDViOSTouchControls
             helper.Events.Display.Rendered += OnRendered;
             helper.Events.Content.AssetReady += OnAssetReady;
             helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
+            helper.Events.GameLoop.DayStarted += OnDayStarted;
 
             Monitor.Log("[SDViOSTouchControls] Mod initialized successfully.", LogLevel.Info);
         }
@@ -1114,6 +1115,17 @@ namespace SDViOSTouchControls
                 System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
                 GC.Collect(2, GCCollectionMode.Forced, true, true);
                 Monitor.Log("[SDViOSTouchControls] Save loaded successfully. Memory compacted.", LogLevel.Info);
+            }
+            catch { }
+        }
+
+        private void OnDayStarted(object? sender, DayStartedEventArgs e)
+        {
+            try
+            {
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                Monitor.Log("[SDViOSTouchControls] Day started: Large Object Heap compacted.", LogLevel.Info);
             }
             catch { }
         }
