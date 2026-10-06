@@ -96,6 +96,10 @@ namespace SDViOSTouchControls
             helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
             helper.Events.GameLoop.DayStarted += OnDayStarted;
 
+            // 7. Background memory watchdog (real iOS headroom + emergency GC during synchronous loads)
+            try { MemoryWatchdog.Start(Monitor); }
+            catch (Exception ex) { Monitor.Log($"[MEM_DEBUG] Watchdog failed to start: {ex.Message}", LogLevel.Warn); }
+
             Monitor.Log("[SDViOSTouchControls] Mod initialized successfully.", LogLevel.Info);
         }
 
