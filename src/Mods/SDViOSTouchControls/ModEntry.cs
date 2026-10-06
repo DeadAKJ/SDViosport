@@ -523,69 +523,155 @@ namespace SDViOSTouchControls
                     Monitor.Log("[SDViOSTouchControls] Harmony patched XnaDisplayDevice.LoadTileSheet -> deferred loading during save load.", LogLevel.Info);
                 }
 
-                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                // CoreAssetPropagator and ModContentManager
+                try
                 {
-                    var propType = asm.GetType("StardewModdingAPI.Metadata.CoreAssetPropagator");
-                    if (propType != null)
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                     {
-                        var mPropMap = propType.GetMethod("PropagateMap", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                        if (mPropMap != null)
+                        var propType = asm.GetType("StardewModdingAPI.Metadata.CoreAssetPropagator");
+                        if (propType != null)
                         {
-                            harmony.Patch(mPropMap, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixPropagateMap), BindingFlags.Static | BindingFlags.NonPublic)));
-                            Monitor.Log("[SDViOSTouchControls] Harmony patched CoreAssetPropagator.PropagateMap -> skip during save load.", LogLevel.Info);
-                        }
+                            var mPropMap = propType.GetMethod("PropagateMap", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            if (mPropMap != null)
+                            {
+                                harmony.Patch(mPropMap, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixPropagateMap), BindingFlags.Static | BindingFlags.NonPublic)));
+                                Monitor.Log("[SDViOSTouchControls] Harmony patched CoreAssetPropagator.PropagateMap -> skip during save load.", LogLevel.Info);
+                            }
 
-                        var mPropTex = propType.GetMethod("PropagateTexture", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                        if (mPropTex != null)
-                        {
-                            harmony.Patch(mPropTex, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixPropagateMap), BindingFlags.Static | BindingFlags.NonPublic)));
-                            Monitor.Log("[SDViOSTouchControls] Harmony patched CoreAssetPropagator.PropagateTexture -> skip during save load.", LogLevel.Info);
-                        }
-                    }
-
-                    var mcmType = asm.GetType("StardewModdingAPI.Framework.ContentManagers.ModContentManager");
-                    if (mcmType != null)
-                    {
-                        var mTryGetTilesheet = mcmType.GetMethod("TryGetTilesheetAssetName", BindingFlags.NonPublic | BindingFlags.Instance);
-                        if (mTryGetTilesheet != null)
-                        {
-                            harmony.Patch(mTryGetTilesheet, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixTryGetTilesheetAssetName), BindingFlags.Static | BindingFlags.NonPublic)));
-                            Monitor.Log("[SDViOSTouchControls] Harmony patched ModContentManager.TryGetTilesheetAssetName -> skip eager texture load during save load.", LogLevel.Info);
+                            var mPropTex = propType.GetMethod("PropagateTexture", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            if (mPropTex != null)
+                            {
+                                harmony.Patch(mPropTex, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixPropagateMap), BindingFlags.Static | BindingFlags.NonPublic)));
+                                Monitor.Log("[SDViOSTouchControls] Harmony patched CoreAssetPropagator.PropagateTexture -> skip during save load.", LogLevel.Info);
+                            }
+                            break;
                         }
                     }
                 }
-
-                var mReloadMap = typeof(GameLocation).GetMethod("reloadMap", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
-                if (mReloadMap != null)
+                catch (Exception ex)
                 {
-                    harmony.Patch(mReloadMap, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixLocationReloadMap), BindingFlags.Static | BindingFlags.NonPublic)));
-                    Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.reloadMap -> defer non-essential maps during save load.", LogLevel.Info);
+                    Monitor.Log($"[SDViOSTouchControls] Note patching CoreAssetPropagator: {ex.Message}", LogLevel.Trace);
                 }
 
-                var mGetMap = typeof(GameLocation).GetProperty("Map", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod();
-                if (mGetMap != null)
+                try
                 {
-                    harmony.Patch(mGetMap, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixLocationGetMap), BindingFlags.Static | BindingFlags.NonPublic)));
-                    Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.get_Map -> on-demand load if deferred.", LogLevel.Info);
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        var mcmType = asm.GetType("StardewModdingAPI.Framework.ContentManagers.ModContentManager");
+                        if (mcmType != null)
+                        {
+                            var mTryGetTilesheet = mcmType.GetMethod("TryGetTilesheetAssetName", BindingFlags.NonPublic | BindingFlags.Instance);
+                            if (mTryGetTilesheet != null)
+                            {
+                                harmony.Patch(mTryGetTilesheet, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixTryGetTilesheetAssetName), BindingFlags.Static | BindingFlags.NonPublic)));
+                                Monitor.Log("[SDViOSTouchControls] Harmony patched ModContentManager.TryGetTilesheetAssetName -> skip eager texture load during save load.", LogLevel.Info);
+                            }
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Monitor.Log($"[SDViOSTouchControls] Note patching ModContentManager: {ex.Message}", LogLevel.Trace);
                 }
 
-                var mLoadMap = typeof(GameLocation).GetMethod("loadMap", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(string), typeof(bool) }, null);
-                if (mLoadMap != null)
+                try
                 {
-                    harmony.Patch(mLoadMap, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixLocationLoadMap), BindingFlags.Static | BindingFlags.NonPublic)));
-                    Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.loadMap -> periodic GC during save load.", LogLevel.Info);
+                    foreach (var method in typeof(GameLocation).GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                    {
+                        if (method.Name == "reloadMap")
+                        {
+                            try
+                            {
+                                harmony.Patch(method, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixLocationReloadMap), BindingFlags.Static | BindingFlags.NonPublic)));
+                                Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.reloadMap -> defer non-essential maps during save load.", LogLevel.Info);
+                            }
+                            catch (Exception ex)
+                            {
+                                Monitor.Log($"[SDViOSTouchControls] Could not patch GameLocation.reloadMap: {ex.Message}", LogLevel.Trace);
+                            }
+                        }
+                    }
+
+                    var mGetMap = typeof(GameLocation).GetProperty("Map", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod();
+                    if (mGetMap != null)
+                    {
+                        harmony.Patch(mGetMap, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixLocationGetMap), BindingFlags.Static | BindingFlags.NonPublic)));
+                        Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.get_Map -> on-demand load if deferred.", LogLevel.Info);
+                    }
+
+                    foreach (var method in typeof(GameLocation).GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                    {
+                        if (method.Name == "loadMap")
+                        {
+                            try
+                            {
+                                harmony.Patch(method, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixLocationLoadMap), BindingFlags.Static | BindingFlags.NonPublic)));
+                                Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.loadMap -> periodic GC during save load.", LogLevel.Info);
+                            }
+                            catch (Exception ex)
+                            {
+                                Monitor.Log($"[SDViOSTouchControls] Could not patch GameLocation.loadMap: {ex.Message}", LogLevel.Trace);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Monitor.Log($"[SDViOSTouchControls] Error patching GameLocation map hooks: {ex.Message}", LogLevel.Warn);
                 }
 
-                var mReloadSprite = typeof(NPC).GetMethod("reloadSprite", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
-                if (mReloadSprite != null)
+                try
                 {
-                    harmony.Patch(mReloadSprite, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixNpcReloadSprite), BindingFlags.Static | BindingFlags.NonPublic)));
-                    Monitor.Log("[SDViOSTouchControls] Harmony patched NPC.reloadSprite -> periodic GC during save load.", LogLevel.Info);
+                    foreach (var method in typeof(NPC).GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                    {
+                        if (method.Name == "reloadSprite" || method.Name == "reloadData")
+                        {
+                            try
+                            {
+                                harmony.Patch(method, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixNpcReloadSprite), BindingFlags.Static | BindingFlags.NonPublic)));
+                                Monitor.Log($"[SDViOSTouchControls] Harmony patched NPC.{method.Name} -> periodic GC during save load.", LogLevel.Info);
+                            }
+                            catch (Exception ex)
+                            {
+                                Monitor.Log($"[SDViOSTouchControls] Could not patch NPC.{method.Name}: {ex.Message}", LogLevel.Trace);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Monitor.Log($"[SDViOSTouchControls] Error patching NPC load hooks: {ex.Message}", LogLevel.Warn);
+                }
+
+                try
+                {
+                    foreach (var method in typeof(Game1).GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance))
+                    {
+                        if (method.Name == "newDayAfterFade" || method.Name == "_newDayAfterFade")
+                        {
+                            try
+                            {
+                                harmony.Patch(method,
+                                    prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixNewDayAfterFade), BindingFlags.Static | BindingFlags.NonPublic)),
+                                    postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixNewDayAfterFade), BindingFlags.Static | BindingFlags.NonPublic)));
+                                Monitor.Log($"[SDViOSTouchControls] Harmony patched Game1.{method.Name} -> LOH compaction around new day transition.", LogLevel.Info);
+                            }
+                            catch (Exception ex)
+                            {
+                                Monitor.Log($"[SDViOSTouchControls] Could not patch Game1.{method.Name}: {ex.Message}", LogLevel.Trace);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Monitor.Log($"[SDViOSTouchControls] Error patching Game1.newDayAfterFade: {ex.Message}", LogLevel.Warn);
                 }
             }
             catch (Exception ex)
             {
-                Monitor.Log($"[SDViOSTouchControls] Error patching map memory hooks: {ex.Message}", LogLevel.Error);
+                Monitor.Log($"[SDViOSTouchControls] Error patching memory hooks: {ex.Message}", LogLevel.Error);
             }
 
             // 10. Diagnostics for Menu Lifecycle and Input Interception
@@ -783,6 +869,8 @@ namespace SDViOSTouchControls
 
         private static void PrefixLocationGetMap(GameLocation __instance)
         {
+            if (_forceMapLoad) return;
+
             if (__instance != null && __instance.map == null)
             {
                 if (Game1.gameMode == 6 && !IsEssentialLocation(__instance))
@@ -808,7 +896,7 @@ namespace SDViOSTouchControls
             if (Game1.gameMode == 6)
             {
                 _loadedMapsCount++;
-                if (_loadedMapsCount % 3 == 0)
+                if (_loadedMapsCount % 2 == 0)
                 {
                     try
                     {
@@ -825,7 +913,7 @@ namespace SDViOSTouchControls
             if (Game1.gameMode == 6)
             {
                 _loadedNpcCount++;
-                if (_loadedNpcCount % 4 == 0)
+                if (_loadedNpcCount % 2 == 0)
                 {
                     try
                     {
@@ -835,6 +923,28 @@ namespace SDViOSTouchControls
                     catch { }
                 }
             }
+        }
+
+        private static void PrefixNewDayAfterFade()
+        {
+            try
+            {
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                ModMonitor?.Log("[SDViOSTouchControls] PrefixNewDayAfterFade: Compacted LOH before day transition.", LogLevel.Info);
+            }
+            catch { }
+        }
+
+        private static void PostfixNewDayAfterFade()
+        {
+            try
+            {
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                ModMonitor?.Log("[SDViOSTouchControls] PostfixNewDayAfterFade: Compacted LOH after day transition.", LogLevel.Info);
+            }
+            catch { }
         }
 
         private static bool PrefixMapLoadTileSheets(xTile.Map __instance)
@@ -1140,7 +1250,7 @@ namespace SDViOSTouchControls
                 _drawnThisFrame = false;
 
                 // Periodically compact LOH during loading to stay under iOS 2GB jetsam limit
-                if (Game1.gameMode == 6 && e.IsMultipleOf(15))
+                if (Game1.gameMode == 6 && e.IsMultipleOf(10))
                 {
                     try
                     {
