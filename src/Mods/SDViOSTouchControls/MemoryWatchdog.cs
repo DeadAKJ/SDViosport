@@ -62,12 +62,16 @@ namespace SDViOSTouchControls
                     double gcInterval = loading ? 750 : 5000;
                     if (avail >= 0 && avail < LowWaterBytes && (now - lastGc).TotalMilliseconds > gcInterval)
                     {
-                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                        GC.Collect(2, GCCollectionMode.Forced, true, true);
                         lastGc = DateTime.UtcNow;
+                        _monitor?.Log($"[MEM_DEBUG] LOW MEMORY: avail={avail / MB} MB, managed={managed / MB} MB -> starting GC", LogLevel.Warn);
+                        try { System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce; }
+                        catch (Exception sex) { LogErr("GCSettings.LOHCompactionMode", sex); }
+                        var sw = System.Diagnostics.Stopwatch.StartNew();
+                        try { GC.Collect(2, GCCollectionMode.Forced, true, true); }
+                        catch (Exception gex) { LogErr("GC.Collect(compacting)", gex); try { GC.Collect(); } catch (Exception g2) { LogErr("GC.Collect()", g2); } }
                         long after = Available();
-                        _monitor?.Log($"[MEM_DEBUG] LOW MEMORY GC: avail {avail / MB} MB -> {after / MB} MB, managed {managed / MB} MB -> {GC.GetTotalMemory(false) / MB} MB, gameMode={Game1.gameMode}", LogLevel.Warn);
-                        lastLog = lastGc;
+                        _monitor?.Log($"[MEM_DEBUG] LOW MEMORY GC done in {sw.ElapsedMilliseconds} ms: avail {avail / MB} -> {after / MB} MB, managed {managed / MB} -> {GC.GetTotalMemory(false) / MB} MB", LogLevel.Warn);
+                        lastLog = DateTime.UtcNow;
                     }
                     else
                     {
@@ -81,11 +85,19 @@ namespace SDViOSTouchControls
 
                     Thread.Sleep(loading ? 200 : 1000);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    LogErr("loop", ex);
                     Thread.Sleep(1000);
                 }
             }
+        }
+
+        private static int _errCount;
+        private static void LogErr(string where, Exception ex)
+        {
+            if (_errCount++ < 10)
+                _monitor?.Log($"[MEM_DEBUG] Watchdog error in {where}: {ex.GetType().Name}: {ex.Message}", LogLevel.Warn);
         }
     }
 }
