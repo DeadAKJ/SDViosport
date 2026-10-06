@@ -10,6 +10,7 @@ using Microsoft.Xna.Framework.Input.Touch;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
+using StardewValley.Menus;
 
 namespace SDViOSTouchControls
 {
@@ -23,8 +24,36 @@ namespace SDViOSTouchControls
 
         private static int _assetEventCount = 0;
 
+        public static IMonitor? ModMonitor { get; private set; }
+        private static IClickableMenu? _lastTickMenu = null;
+
+        public static string GetCompactStackTrace(int skipFrames = 2, int maxFrames = 6)
+        {
+            try
+            {
+                var st = new System.Diagnostics.StackTrace(skipFrames, false);
+                var frames = st.GetFrames();
+                if (frames == null || frames.Length == 0) return "unknown";
+                var list = new System.Collections.Generic.List<string>();
+                for (int i = 0; i < Math.Min(frames.Length, maxFrames); i++)
+                {
+                    var m = frames[i].GetMethod();
+                    if (m != null)
+                    {
+                        list.Add($"{m.DeclaringType?.Name}.{m.Name}");
+                    }
+                }
+                return string.Join(" -> ", list);
+            }
+            catch
+            {
+                return "stack_err";
+            }
+        }
+
         public override void Entry(IModHelper helper)
         {
+            ModMonitor = Monitor;
             TouchOverlaySettings.LogAction = msg => Monitor.Log(msg, LogLevel.Info);
             TouchVirtualPad.LogAction = msg => Monitor.Log(msg, LogLevel.Info);
 
@@ -557,6 +586,65 @@ namespace SDViOSTouchControls
             {
                 Monitor.Log($"[SDViOSTouchControls] Error patching map memory hooks: {ex.Message}", LogLevel.Error);
             }
+
+            // 10. Diagnostics for Menu Lifecycle and Input Interception
+            try
+            {
+                var mExitActiveMenu = typeof(Game1).GetMethod("exitActiveMenu", BindingFlags.Public | BindingFlags.Static, null, Type.EmptyTypes, null);
+                if (mExitActiveMenu != null)
+                {
+                    harmony.Patch(mExitActiveMenu, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixExitActiveMenu), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.exitActiveMenu for diagnostics.", LogLevel.Info);
+                }
+
+                var mExitThisMenu = typeof(IClickableMenu).GetMethod("exitThisMenu", BindingFlags.Public | BindingFlags.Instance);
+                if (mExitThisMenu != null)
+                {
+                    harmony.Patch(mExitThisMenu, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixExitThisMenu), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched IClickableMenu.exitThisMenu for diagnostics.", LogLevel.Info);
+                }
+
+                var mExitNoSound = typeof(IClickableMenu).GetMethod("exitThisMenuNoSound", BindingFlags.Public | BindingFlags.Instance);
+                if (mExitNoSound != null)
+                {
+                    harmony.Patch(mExitNoSound, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixExitThisMenuNoSound), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched IClickableMenu.exitThisMenuNoSound for diagnostics.", LogLevel.Info);
+                }
+
+                var mRecvLeftClick = typeof(IClickableMenu).GetMethod("receiveLeftClick", BindingFlags.Public | BindingFlags.Instance);
+                if (mRecvLeftClick != null)
+                {
+                    harmony.Patch(mRecvLeftClick, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixReceiveLeftClick), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched IClickableMenu.receiveLeftClick for diagnostics.", LogLevel.Info);
+                }
+
+                var mRecvKey = typeof(IClickableMenu).GetMethod("receiveKeyPress", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(Keys) }, null);
+                if (mRecvKey != null)
+                {
+                    harmony.Patch(mRecvKey, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixReceiveKeyPress), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched IClickableMenu.receiveKeyPress for diagnostics.", LogLevel.Info);
+                }
+
+                var mRecvPad = typeof(IClickableMenu).GetMethod("receiveGamePadButton", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(Buttons) }, null);
+                if (mRecvPad != null)
+                {
+                    harmony.Patch(mRecvPad, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixReceiveGamePadButton), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched IClickableMenu.receiveGamePadButton for diagnostics.", LogLevel.Info);
+                }
+
+                var mUpdateActiveMenu = typeof(Game1).GetMethod("updateActiveMenu", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(GameTime) }, null);
+                if (mUpdateActiveMenu != null)
+                {
+                    harmony.Patch(mUpdateActiveMenu,
+                        prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixUpdateActiveMenu), BindingFlags.Static | BindingFlags.NonPublic)),
+                        postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixUpdateActiveMenu), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.updateActiveMenu for diagnostics.", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[SDViOSTouchControls] Note patching menu diagnostics: {ex.Message}", LogLevel.Warn);
+            }
         }
 
         private static bool PrefixTryGetTilesheetAssetName(
@@ -843,6 +931,10 @@ namespace SDViOSTouchControls
             if (pad != null && pad.HasActiveInput)
             {
                 __result = pad.CurrentSimulatedKeyboardState;
+                if (pad.ButtonY || pad.ButtonB || pad.ButtonMenu)
+                {
+                    ModMonitor?.Log($"[PAD_DEBUG] PrefixGetKeyboardState: keys=[{string.Join(",", __result.GetPressedKeys())}], menu={Game1.activeClickableMenu?.GetType().Name ?? "none"}", LogLevel.Info);
+                }
                 return false;
             }
             return true;
@@ -854,9 +946,64 @@ namespace SDViOSTouchControls
             if (pad != null && pad.HasActiveInput)
             {
                 __result = pad.CurrentSimulatedGamePadState;
+                if (pad.ButtonY || pad.ButtonB || pad.ButtonMenu)
+                {
+                    ModMonitor?.Log($"[PAD_DEBUG] PrefixGetGamePadState: buttons={__result.Buttons}, menu={Game1.activeClickableMenu?.GetType().Name ?? "none"}", LogLevel.Info);
+                }
                 return false;
             }
             return true;
+        }
+
+        private static void PrefixExitActiveMenu()
+        {
+            var menu = Game1.activeClickableMenu;
+            string menuName = menu != null ? menu.GetType().Name : "null";
+            ModMonitor?.Log($"[MENU_DEBUG] Game1.exitActiveMenu() called! activeClickableMenu={menuName}, CallStack: {GetCompactStackTrace(2, 8)}", LogLevel.Info);
+        }
+
+        private static void PrefixExitThisMenu(IClickableMenu __instance)
+        {
+            string menuName = __instance != null ? __instance.GetType().Name : "unknown";
+            ModMonitor?.Log($"[MENU_DEBUG] IClickableMenu.exitThisMenu() on {menuName}! CallStack: {GetCompactStackTrace(2, 8)}", LogLevel.Info);
+        }
+
+        private static void PrefixExitThisMenuNoSound(IClickableMenu __instance)
+        {
+            string menuName = __instance != null ? __instance.GetType().Name : "unknown";
+            ModMonitor?.Log($"[MENU_DEBUG] IClickableMenu.exitThisMenuNoSound() on {menuName}! CallStack: {GetCompactStackTrace(2, 8)}", LogLevel.Info);
+        }
+
+        private static void PrefixReceiveLeftClick(IClickableMenu __instance, int x, int y)
+        {
+            string menuName = __instance != null ? __instance.GetType().Name : "unknown";
+            bool inside = __instance != null && __instance.isWithinBounds(x, y);
+            ModMonitor?.Log($"[MENU_DEBUG] {menuName}.receiveLeftClick({x}, {y}, inside={inside})", LogLevel.Info);
+        }
+
+        private static void PrefixReceiveKeyPress(IClickableMenu __instance, Keys key)
+        {
+            string menuName = __instance != null ? __instance.GetType().Name : "unknown";
+            ModMonitor?.Log($"[MENU_DEBUG] {menuName}.receiveKeyPress({key})! CallStack: {GetCompactStackTrace(2, 6)}", LogLevel.Info);
+        }
+
+        private static void PrefixReceiveGamePadButton(IClickableMenu __instance, Buttons b)
+        {
+            string menuName = __instance != null ? __instance.GetType().Name : "unknown";
+            ModMonitor?.Log($"[MENU_DEBUG] {menuName}.receiveGamePadButton({b})! CallStack: {GetCompactStackTrace(2, 6)}", LogLevel.Info);
+        }
+
+        private static void PrefixUpdateActiveMenu(out IClickableMenu? __state)
+        {
+            __state = Game1.activeClickableMenu;
+        }
+
+        private static void PostfixUpdateActiveMenu(IClickableMenu? __state)
+        {
+            if (__state != null && Game1.activeClickableMenu == null)
+            {
+                ModMonitor?.Log($"[MENU_DEBUG] Game1.updateActiveMenu CLOSED menu! Was: {__state.GetType().Name}, Now: null!", LogLevel.Info);
+            }
         }
 
         private static FieldInfo? _hooksField = null;
@@ -923,8 +1070,9 @@ namespace SDViOSTouchControls
 
         private void OnMenuChanged(object? sender, MenuChangedEventArgs e)
         {
-            // Do NOT call SetWindowSize or EnsureNativeResolution(force: true) here!
-            // SetWindowSize destroys and re-creates GameMenu in an infinite recursion loop!
+            string oldMenu = e.OldMenu != null ? e.OldMenu.GetType().Name : "null";
+            string newMenu = e.NewMenu != null ? e.NewMenu.GetType().Name : "null";
+            Monitor.Log($"[MENU_DEBUG] OnMenuChanged: {oldMenu} -> {newMenu}", LogLevel.Info);
         }
 
         private void OnAssetReady(object? sender, AssetReadyEventArgs e)
@@ -1002,6 +1150,12 @@ namespace SDViOSTouchControls
                 EnsurePadInitialized();
                 EnsureModHooksWrapped();
 
+                if (_lastTickMenu != null && Game1.activeClickableMenu == null)
+                {
+                    Monitor.Log($"[MENU_DEBUG] Menu became null before UpdateTicking! Was: {_lastTickMenu.GetType().Name}", LogLevel.Info);
+                }
+                _lastTickMenu = Game1.activeClickableMenu;
+
                 // Process virtual pad touches, point & click, and trackpad BEFORE Game1.Update runs!
                 TouchVirtualPad.Instance.Update(Game1.currentGameTime);
             }
@@ -1016,6 +1170,11 @@ namespace SDViOSTouchControls
 
         private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
         {
+            if (_lastTickMenu != null && Game1.activeClickableMenu == null)
+            {
+                Monitor.Log($"[MENU_DEBUG] Menu became null during Game1.Update! Was: {_lastTickMenu.GetType().Name}", LogLevel.Info);
+            }
+            _lastTickMenu = Game1.activeClickableMenu;
         }
 
         private void OnRenderedStep(object? sender, RenderedStepEventArgs e)

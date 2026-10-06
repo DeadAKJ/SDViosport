@@ -542,6 +542,7 @@ namespace SDViOSTouchControls
                         {
                             _menuPulseFrames = 1;
                             _lastMenuPressTime = curTime;
+                            Log($"[TVP_DEBUG] Touch on Button Menu! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
                         }
                         continue;
                     }
@@ -567,6 +568,7 @@ namespace SDViOSTouchControls
                     {
                         _yPulseFrames = 1;
                         _lastYPressTime = curTime;
+                        Log($"[TVP_DEBUG] Touch on Button Y! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
                     }
                 }
 
@@ -578,6 +580,7 @@ namespace SDViOSTouchControls
                     {
                         _bPulseFrames = 1;
                         _lastBPressTime = curTime;
+                        Log($"[TVP_DEBUG] Touch on Button B! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
                     }
                 }
 
@@ -675,6 +678,11 @@ namespace SDViOSTouchControls
                     (!_btnKeyboardRect.IsEmpty && _btnKeyboardRect.Contains(pt)) ||
                     (!_btnMenuRect.IsEmpty && _btnMenuRect.Contains(pt)))
                     return;
+            }
+
+            if (Game1.activeClickableMenu != null)
+            {
+                Log($"[TVP_DEBUG] HandleBackgroundTouch while menu={Game1.activeClickableMenu.GetType().Name}! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), mouseMode={Settings.MouseControlMode}");
             }
 
             if (Settings.MouseControlMode == MouseMode.PointAndClick)
@@ -1031,6 +1039,11 @@ namespace SDViOSTouchControls
                 if (ButtonX) activeKeys.Add(Keys.C);
                 if (ButtonY && !isGamepad) activeKeys.Add(Keys.E);
                 if ((ButtonB || ButtonMenu) && !isGamepad) activeKeys.Add(Keys.Escape);
+
+                if (ButtonY || ButtonB || ButtonMenu)
+                {
+                    Log($"[TVP_DEBUG] ForwardInputToGame: ButtonY={ButtonY}, ButtonB={ButtonB}, ButtonMenu={ButtonMenu}, isGamepad={isGamepad}, activeKeys=[{string.Join(",", activeKeys)}], curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}");
+                }
 
                 try
                 {
