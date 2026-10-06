@@ -668,6 +668,31 @@ namespace SDViOSTouchControls
                 {
                     Monitor.Log($"[SDViOSTouchControls] Error patching Game1.newDayAfterFade: {ex.Message}", LogLevel.Warn);
                 }
+
+                try
+                {
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        var genType = asm.GetType("FarmTypeManager.Generation");
+                        if (genType != null)
+                        {
+                            foreach (var mName in new[] { "ForageGeneration", "OreGeneration", "MonsterGeneration", "LargeObjectGeneration", "ProcessObjectExpiration" })
+                            {
+                                var method = genType.GetMethod(mName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                                if (method != null)
+                                {
+                                    harmony.Patch(method, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixForceGC), BindingFlags.Static | BindingFlags.NonPublic)));
+                                    Monitor.Log($"[SDViOSTouchControls] Harmony patched FarmTypeManager.Generation.{mName} -> LOH compaction.", LogLevel.Info);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Monitor.Log($"[SDViOSTouchControls] Note hooking FarmTypeManager: {ex.Message}", LogLevel.Trace);
+                }
             }
             catch (Exception ex)
             {
@@ -943,6 +968,17 @@ namespace SDViOSTouchControls
                 System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
                 GC.Collect(2, GCCollectionMode.Forced, true, true);
                 ModMonitor?.Log("[SDViOSTouchControls] PostfixNewDayAfterFade: Compacted LOH after day transition.", LogLevel.Info);
+            }
+            catch { }
+        }
+
+        private static void PostfixForceGC()
+        {
+            try
+            {
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                ModMonitor?.Log("[SDViOSTouchControls] Compacted LOH and collected GC gen 2 after heavy operation.", LogLevel.Info);
             }
             catch { }
         }
