@@ -147,6 +147,22 @@ namespace SDViOSTouchControls
             }
         }
 
+        /// <summary>
+        /// Gamepad state with a stable IsConnected flag so the game never sees the pad "plug/unplug".
+        /// Keyboard/mouse mode: always a disconnected empty state (touch input is routed via simulated keys).
+        /// Gamepad mode: always connected, idle when nothing is touched.
+        /// </summary>
+        public GamePadState EffectiveGamePadState
+        {
+            get
+            {
+                bool isGamepad = Game1.options != null && Game1.options.gamepadControls;
+                if (!isGamepad)
+                    return new GamePadState(); // IsConnected = false, consistently
+                return CurrentSimulatedGamePadState;
+            }
+        }
+
 
         // Mouse simulation
         public Point SimulatedMousePosition { get; private set; } = new Point(896, 414);
@@ -1064,7 +1080,7 @@ namespace SDViOSTouchControls
                     }
                     if (_currentGamepadStateField != null)
                     {
-                        _currentGamepadStateField.SetValue(_inputInstance, CurrentSimulatedGamePadState);
+                        _currentGamepadStateField.SetValue(_inputInstance, EffectiveGamePadState);
                     }
                 }
 

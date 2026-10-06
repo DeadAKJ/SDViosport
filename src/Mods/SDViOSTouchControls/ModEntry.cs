@@ -757,6 +757,20 @@ namespace SDViOSTouchControls
                         postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixUpdateActiveMenu), BindingFlags.Static | BindingFlags.NonPublic)));
                     Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.updateActiveMenu for diagnostics.", LogLevel.Info);
                 }
+
+                // Memory: compact heap right before GameMenu allocates all its pages (prevents Jetsam kill on Y press)
+                foreach (var ctor in typeof(GameMenu).GetConstructors(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    try
+                    {
+                        harmony.Patch(ctor, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixGameMenuCtor), BindingFlags.Static | BindingFlags.NonPublic)));
+                        Monitor.Log($"[SDViOSTouchControls] Harmony patched GameMenu ctor ({ctor.GetParameters().Length} params) -> pre-allocation GC.", LogLevel.Info);
+                    }
+                    catch (Exception cex)
+                    {
+                        Monitor.Log($"[SDViOSTouchControls] Could not patch GameMenu ctor: {cex.Message}", LogLevel.Warn);
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -1085,16 +1099,31 @@ namespace SDViOSTouchControls
         private static bool PrefixGetGamePadState(ref GamePadState __result)
         {
             var pad = TouchVirtualPad.Instance;
-            if (pad != null && pad.HasActiveInput)
+            if (pad == null)
+                return true;
+
+            // Always return a state with a STABLE IsConnected value. Previously we returned a
+            // connected state only while touching and fell back to native (disconnected) on release,
+            // which made the game spam "gamepad connected/disconnected" notifications.
+            __result = pad.EffectiveGamePadState;
+            if (pad.ButtonY || pad.ButtonB || pad.ButtonMenu)
             {
-                __result = pad.CurrentSimulatedGamePadState;
-                if (pad.ButtonY || pad.ButtonB || pad.ButtonMenu)
-                {
-                    ModMonitor?.Log($"[PAD_DEBUG] PrefixGetGamePadState: buttons={__result.Buttons}, menu={Game1.activeClickableMenu?.GetType().Name ?? "none"}", LogLevel.Info);
-                }
-                return false;
+                ModMonitor?.Log($"[PAD_DEBUG] PrefixGetGamePadState: connected={__result.IsConnected}, buttons={__result.Buttons}, menu={Game1.activeClickableMenu?.GetType().Name ?? "none"}", LogLevel.Info);
             }
-            return true;
+            return false;
+        }
+
+        private static void PrefixGameMenuCtor()
+        {
+            try
+            {
+                long before = GC.GetTotalMemory(false);
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                long after = GC.GetTotalMemory(false);
+                ModMonitor?.Log($"[MEM_DEBUG] Pre-GameMenu GC: {before / 1048576} MB -> {after / 1048576} MB", LogLevel.Info);
+            }
+            catch { }
         }
 
         private static void PrefixExitActiveMenu()
@@ -1215,6 +1244,18 @@ namespace SDViOSTouchControls
             string oldMenu = e.OldMenu != null ? e.OldMenu.GetType().Name : "null";
             string newMenu = e.NewMenu != null ? e.NewMenu.GetType().Name : "null";
             Monitor.Log($"[MENU_DEBUG] OnMenuChanged: {oldMenu} -> {newMenu}", LogLevel.Info);
+
+            // Free the closed GameMenu (MapPage/SocialPage textures etc.) immediately
+            if (e.OldMenu is GameMenu && e.NewMenu == null)
+            {
+                try
+                {
+                    System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                    GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    Monitor.Log($"[MEM_DEBUG] Post-GameMenu-close GC: {GC.GetTotalMemory(false) / 1048576} MB", LogLevel.Info);
+                }
+                catch { }
+            }
         }
 
         private void OnAssetReady(object? sender, AssetReadyEventArgs e)
