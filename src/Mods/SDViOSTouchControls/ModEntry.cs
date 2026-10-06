@@ -673,16 +673,21 @@ namespace SDViOSTouchControls
                 {
                     foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                     {
-                        var genType = asm.GetType("FarmTypeManager.Generation");
-                        if (genType != null)
+                        if (asm.GetName().Name?.IndexOf("FarmTypeManager", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
-                            foreach (var mName in new[] { "ForageGeneration", "OreGeneration", "MonsterGeneration", "LargeObjectGeneration", "ProcessObjectExpiration" })
+                            foreach (var type in asm.GetTypes())
                             {
-                                var method = genType.GetMethod(mName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-                                if (method != null)
+                                foreach (var m in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance))
                                 {
-                                    harmony.Patch(method, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixForceGC), BindingFlags.Static | BindingFlags.NonPublic)));
-                                    Monitor.Log($"[SDViOSTouchControls] Harmony patched FarmTypeManager.Generation.{mName} -> LOH compaction.", LogLevel.Info);
+                                    if (m.Name == "ForageGeneration" || m.Name == "MonsterGeneration" || m.Name == "OreGeneration" || m.Name == "LargeObjectGeneration" || m.Name == "ProcessObjectExpiration")
+                                    {
+                                        try
+                                        {
+                                            harmony.Patch(m, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixForceGC), BindingFlags.Static | BindingFlags.NonPublic)));
+                                            Monitor.Log($"[SDViOSTouchControls] Harmony patched FarmTypeManager.{type.Name}.{m.Name} -> LOH compaction.", LogLevel.Info);
+                                        }
+                                        catch { }
+                                    }
                                 }
                             }
                             break;
@@ -918,35 +923,29 @@ namespace SDViOSTouchControls
 
         private static void PostfixLocationLoadMap(GameLocation __instance)
         {
-            if (Game1.gameMode == 6)
+            _loadedMapsCount++;
+            if (_loadedMapsCount % 2 == 0)
             {
-                _loadedMapsCount++;
-                if (_loadedMapsCount % 2 == 0)
+                try
                 {
-                    try
-                    {
-                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                        GC.Collect(2, GCCollectionMode.Forced, true, true);
-                    }
-                    catch { }
+                    System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                    GC.Collect(2, GCCollectionMode.Forced, true, true);
                 }
+                catch { }
             }
         }
 
         private static void PostfixNpcReloadSprite(NPC __instance)
         {
-            if (Game1.gameMode == 6)
+            _loadedNpcCount++;
+            if (_loadedNpcCount % 2 == 0)
             {
-                _loadedNpcCount++;
-                if (_loadedNpcCount % 2 == 0)
+                try
                 {
-                    try
-                    {
-                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                        GC.Collect(2, GCCollectionMode.Forced, true, true);
-                    }
-                    catch { }
+                    System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                    GC.Collect(2, GCCollectionMode.Forced, true, true);
                 }
+                catch { }
             }
         }
 
@@ -985,7 +984,7 @@ namespace SDViOSTouchControls
 
         private static bool PrefixMapLoadTileSheets(xTile.Map __instance)
         {
-            if (Game1.gameMode == 6 && !_forceMapLoad)
+            if (!_forceMapLoad)
             {
                 if (!IsEssentialMap(__instance))
                 {
@@ -997,7 +996,7 @@ namespace SDViOSTouchControls
 
         private static bool PrefixDevLoadTileSheet(xTile.Tiles.TileSheet tileSheet)
         {
-            if (Game1.gameMode == 6 && !_forceMapLoad)
+            if (!_forceMapLoad)
             {
                 if (tileSheet == null || !IsEssentialMap(tileSheet.Map))
                 {
@@ -1009,12 +1008,8 @@ namespace SDViOSTouchControls
 
         private static bool PrefixPropagateMap(ref bool __result)
         {
-            if (Game1.gameMode == 6)
-            {
-                __result = false;
-                return false;
-            }
-            return true;
+            __result = false;
+            return false;
         }
 
         private static Exception? FinalizerSilenceException(Exception? __exception)
