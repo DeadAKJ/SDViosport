@@ -148,20 +148,27 @@ namespace SDViOSTouchControls
         }
 
         /// <summary>
-        /// Gamepad state with a stable IsConnected flag so the game never sees the pad "plug/unplug".
-        /// Keyboard/mouse mode: always a disconnected empty state (touch input is routed via simulated keys).
-        /// Gamepad mode: always connected, idle when nothing is touched.
+        /// Gamepad state that is ALWAYS connected (IsConnected never changes).
+        /// Vanilla Game1.CheckGamepadMode shows "gamepad connected/disconnected" and opens a GameMenu (pause on
+        /// unplug) whenever IsConnected changes, and it also flips options.gamepadControls itself — so IsConnected
+        /// must never depend on gamepadControls or touch state, or it becomes a menu-opening feedback loop.
+        /// Keyboard/mouse mode: connected but idle (no buttons), so touching the pad never auto-switches to gamepad mode.
+        /// Gamepad mode: connected with the simulated buttons/sticks.
         /// </summary>
         public GamePadState EffectiveGamePadState
         {
             get
             {
                 bool isGamepad = Game1.options != null && Game1.options.gamepadControls;
-                if (!isGamepad)
-                    return new GamePadState(); // IsConnected = false, consistently
-                return CurrentSimulatedGamePadState;
+                if (isGamepad)
+                    return CurrentSimulatedGamePadState; // public ctor => IsConnected = true
+                return IdleConnectedState;
             }
         }
+
+        private static readonly GamePadState IdleConnectedState =
+            new GamePadState(new GamePadThumbSticks(Vector2.Zero, Vector2.Zero), new GamePadTriggers(0f, 0f), new GamePadButtons((Buttons)0),
+                new GamePadDPad(ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released));
 
 
         // Mouse simulation

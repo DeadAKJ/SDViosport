@@ -762,6 +762,19 @@ namespace SDViOSTouchControls
                     Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.updateActiveMenu for diagnostics.", LogLevel.Info);
                 }
 
+                // Input: neutralize vanilla connect/disconnect transition (notification + pause GameMenu on "unplug")
+                var mCheckPadMode = typeof(Game1).GetMethod("CheckGamepadMode", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                _oldPadConnectedField = typeof(Game1).GetField("_oldGamepadConnectedState", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (mCheckPadMode != null && _oldPadConnectedField != null)
+                {
+                    harmony.Patch(mCheckPadMode, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixCheckGamepadMode), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.CheckGamepadMode -> connection state pinned (no connect/disconnect popups or pause menu).", LogLevel.Info);
+                }
+                else
+                {
+                    Monitor.Log($"[SDViOSTouchControls] Could not patch CheckGamepadMode (method={mCheckPadMode != null}, field={_oldPadConnectedField != null}).", LogLevel.Warn);
+                }
+
                 // Memory: compact heap right before GameMenu allocates all its pages (prevents Jetsam kill on Y press)
                 foreach (var ctor in typeof(GameMenu).GetConstructors(BindingFlags.Public | BindingFlags.Instance))
                 {
@@ -1115,6 +1128,20 @@ namespace SDViOSTouchControls
                 ModMonitor?.Log($"[PAD_DEBUG] PrefixGetGamePadState: connected={__result.IsConnected}, buttons={__result.Buttons}, menu={Game1.activeClickableMenu?.GetType().Name ?? "none"}", LogLevel.Info);
             }
             return false;
+        }
+
+        private static FieldInfo? _oldPadConnectedField;
+
+        private static void PrefixCheckGamepadMode(Game1 __instance)
+        {
+            // Pin the "previous" connection state to the CURRENT one so the connect/disconnect branch
+            // (popup + pause GameMenu) can never run, whatever the pad reports.
+            try
+            {
+                bool connected = Game1.input != null && Game1.input.GetGamePadState().IsConnected;
+                _oldPadConnectedField?.SetValue(__instance, connected);
+            }
+            catch { }
         }
 
         private static void PrefixGameMenuCtor()
