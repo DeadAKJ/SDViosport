@@ -764,15 +764,10 @@ namespace SDViOSTouchControls
 
                 // Input: neutralize vanilla connect/disconnect transition (notification + pause GameMenu on "unplug")
                 var mCheckPadMode = typeof(Game1).GetMethod("CheckGamepadMode", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                _oldPadConnectedField = typeof(Game1).GetField("_oldGamepadConnectedState", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (mCheckPadMode != null && _oldPadConnectedField != null)
+                if (mCheckPadMode != null)
                 {
                     harmony.Patch(mCheckPadMode, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixCheckGamepadMode), BindingFlags.Static | BindingFlags.NonPublic)));
-                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.CheckGamepadMode -> connection state pinned (no connect/disconnect popups or pause menu).", LogLevel.Info);
-                }
-                else
-                {
-                    Monitor.Log($"[SDViOSTouchControls] Could not patch CheckGamepadMode (method={mCheckPadMode != null}, field={_oldPadConnectedField != null}).", LogLevel.Warn);
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.CheckGamepadMode -> skipped completely.", LogLevel.Info);
                 }
 
                 // Memory: compact heap right before GameMenu allocates all its pages (prevents Jetsam kill on Y press)
@@ -1048,13 +1043,18 @@ namespace SDViOSTouchControls
             return null; // Suppresses repeating exceptions from broken mods like ContentPatcherAnimations
         }
 
-        private static void PrefixSetWindowSize(ref int w, ref int h)
+        private static bool PrefixSetWindowSize(ref int w, ref int h)
         {
             w = _staticNativeWidth;
             h = _staticNativeHeight;
+            if (Game1.game1 != null && Game1.game1.screen != null && Game1.graphics?.GraphicsDevice != null)
+            {
+                return false; // Lock window size; prevent recreating GameMenu or RenderTargets during gameplay
+            }
+            return true;
         }
 
-        private static bool PrefixWindowClientSizeChanged(Game1 __instance)
+        private static bool PrefixWindowClientSizeChanged(object sender, EventArgs e)
         {
             return false;
         }
@@ -1130,18 +1130,12 @@ namespace SDViOSTouchControls
             return false;
         }
 
-        private static FieldInfo? _oldPadConnectedField;
-
-        private static void PrefixCheckGamepadMode(Game1 __instance)
+        private static bool PrefixCheckGamepadMode()
         {
-            // Pin the "previous" connection state to the CURRENT one so the connect/disconnect branch
-            // (popup + pause GameMenu) can never run, whatever the pad reports.
-            try
-            {
-                bool connected = Game1.input != null && Game1.input.GetGamePadState().IsConnected;
-                _oldPadConnectedField?.SetValue(__instance, connected);
-            }
-            catch { }
+            // Skip CheckGamepadMode completely on iOS:
+            // Prevents "Gamepad mode activated." HUD spam, controller auto-toggle flapping,
+            // and automatic GameMenu reopening (pause-on-disconnect).
+            return false;
         }
 
         private static void PrefixGameMenuCtor()
