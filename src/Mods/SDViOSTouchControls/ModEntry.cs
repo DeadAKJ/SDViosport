@@ -1361,15 +1361,27 @@ namespace SDViOSTouchControls
             }
         }
 
+        private int _menuClosedTick = -100;
+
         private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
         {
             _loadedMapsCount = 0;
             _loadedNpcCount = 0;
             try
             {
+                if (Game1.options != null)
+                {
+                    Game1.options.gamepadMode = Options.GamepadModes.ForceOff;
+                    Game1.options.gamepadControls = false;
+                }
+                if (Game1.activeClickableMenu is GameMenu)
+                {
+                    Game1.exitActiveMenu();
+                }
+
                 System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
                 GC.Collect(2, GCCollectionMode.Forced, true, true);
-                Monitor.Log("[SDViOSTouchControls] Save loaded successfully. Memory compacted.", LogLevel.Info);
+                Monitor.Log("[SDViOSTouchControls] Save loaded successfully. Gamepad locked ForceOff & memory compacted.", LogLevel.Info);
             }
             catch { }
         }
@@ -1378,6 +1390,16 @@ namespace SDViOSTouchControls
         {
             try
             {
+                if (Game1.options != null)
+                {
+                    Game1.options.gamepadMode = Options.GamepadModes.ForceOff;
+                    Game1.options.gamepadControls = false;
+                }
+                if (Game1.activeClickableMenu is GameMenu)
+                {
+                    Game1.exitActiveMenu();
+                }
+
                 System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
                 GC.Collect(2, GCCollectionMode.Forced, true, true);
                 Monitor.Log("[SDViOSTouchControls] Day started: Large Object Heap compacted.", LogLevel.Info);
@@ -1393,6 +1415,27 @@ namespace SDViOSTouchControls
             try
             {
                 _drawnThisFrame = false;
+
+                // 1. Lock GamepadMode to ForceOff on iOS:
+                // Prevents Game1.CheckGamepadMode from flapping between mouse and controller,
+                // which causes infinite "Gamepad mode activated" HUD spam and pause-on-disconnect menu loops.
+                if (Game1.options != null)
+                {
+                    if (Game1.options.gamepadMode != Options.GamepadModes.ForceOff)
+                    {
+                        Game1.options.gamepadMode = Options.GamepadModes.ForceOff;
+                    }
+                    if (Game1.options.gamepadControls)
+                    {
+                        Game1.options.gamepadControls = false;
+                    }
+                }
+
+                // 2. Purge any lingering gamepad notification cards from HUD
+                if (Game1.hudMessages != null && Game1.hudMessages.Count > 0)
+                {
+                    Game1.hudMessages.RemoveAll(msg => msg.message != null && (msg.message.Contains("Gamepad") || msg.message.Contains("gamepad")));
+                }
 
                 // Periodically compact LOH during loading to stay under iOS 2GB jetsam limit
                 if (Game1.gameMode == 6 && e.IsMultipleOf(10))
@@ -1419,6 +1462,7 @@ namespace SDViOSTouchControls
 
                 if (_lastTickMenu != null && Game1.activeClickableMenu == null)
                 {
+                    _menuClosedTick = Game1.ticks;
                     Monitor.Log($"[MENU_DEBUG] Menu became null before UpdateTicking! Was: {_lastTickMenu.GetType().Name}", LogLevel.Info);
                 }
                 _lastTickMenu = Game1.activeClickableMenu;
@@ -1439,8 +1483,15 @@ namespace SDViOSTouchControls
         {
             if (_lastTickMenu != null && Game1.activeClickableMenu == null)
             {
+                _menuClosedTick = Game1.ticks;
                 Monitor.Log($"[MENU_DEBUG] Menu became null during Game1.Update! Was: {_lastTickMenu.GetType().Name}", LogLevel.Info);
             }
+            else if (Game1.activeClickableMenu is GameMenu && Game1.ticks - _menuClosedTick <= 10 && !TouchVirtualPad.Instance.PlayerRequestedMenuOpen)
+            {
+                Monitor.Log("[MENU_DEBUG] Suppressed instant auto-reopen of GameMenu!", LogLevel.Warn);
+                Game1.exitActiveMenu();
+            }
+
             _lastTickMenu = Game1.activeClickableMenu;
         }
 

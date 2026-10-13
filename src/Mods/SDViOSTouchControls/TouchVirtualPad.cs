@@ -18,6 +18,7 @@ namespace SDViOSTouchControls
         public bool IsVisible { get; set; } = true;
         public bool IsSettingsOpen { get; set; } = false;
         public bool IsEditLayoutMode { get; set; } = false;
+        public bool PlayerRequestedMenuOpen { get; set; } = false;
 
         // Current virtual control states
         public Vector2 LeftStick { get; private set; } = Vector2.Zero;
@@ -161,14 +162,10 @@ namespace SDViOSTouchControls
             {
                 bool isGamepad = Game1.options != null && Game1.options.gamepadControls;
                 if (isGamepad)
-                    return CurrentSimulatedGamePadState; // public ctor => IsConnected = true
-                return IdleConnectedState;
+                    return CurrentSimulatedGamePadState;
+                return default;
             }
         }
-
-        private static readonly GamePadState IdleConnectedState =
-            new GamePadState(new GamePadThumbSticks(Vector2.Zero, Vector2.Zero), new GamePadTriggers(0f, 0f), new GamePadButtons((Buttons)0),
-                new GamePadDPad(ButtonState.Released, ButtonState.Released, ButtonState.Released, ButtonState.Released));
 
 
         // Mouse simulation
@@ -568,6 +565,7 @@ namespace SDViOSTouchControls
                             Log($"[TVP_DEBUG] Touch on Button Menu! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
                             if (Game1.activeClickableMenu != null)
                             {
+                                PlayerRequestedMenuOpen = false;
                                 try
                                 {
                                     if (Game1.activeClickableMenu.readyToClose())
@@ -577,6 +575,10 @@ namespace SDViOSTouchControls
                                 {
                                     Log($"[TVP_DEBUG] Exception closing menu on MenuBtn: {ex.Message}");
                                 }
+                            }
+                            else
+                            {
+                                PlayerRequestedMenuOpen = true;
                             }
                         }
                         continue;
@@ -603,6 +605,7 @@ namespace SDViOSTouchControls
                     {
                         _yPulseFrames = 1;
                         _lastYPressTime = curTime;
+                        PlayerRequestedMenuOpen = true;
                         Log($"[TVP_DEBUG] Touch on Button Y! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
                     }
                 }
@@ -615,6 +618,7 @@ namespace SDViOSTouchControls
                     {
                         _bPulseFrames = 1;
                         _lastBPressTime = curTime;
+                        PlayerRequestedMenuOpen = false;
                         Log($"[TVP_DEBUG] Touch on Button B! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
                         if (Game1.activeClickableMenu != null)
                         {
@@ -1200,9 +1204,11 @@ namespace SDViOSTouchControls
                                 if (_currentMouseStateField == null)
                                     _currentMouseStateField = cur.GetField("_currentMouseState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                                 if (_currentGamepadStateField == null)
-                                    _currentGamepadStateField = cur.GetField("_currentGamepadState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                                    _currentGamepadStateField = cur.GetField("_currentGamepadState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                                        ?? cur.GetField("<ControllerState>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                                 if (_currentKeyboardStateField == null)
-                                    _currentKeyboardStateField = cur.GetField("_currentKeyboardState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                                    _currentKeyboardStateField = cur.GetField("_currentKeyboardState", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                                        ?? cur.GetField("<KeyboardState>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                                 if (_simulatedMousePositionField == null)
                                     _simulatedMousePositionField = cur.GetField("_simulatedMousePosition", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                                 if (_sMouseStateBackingField == null)
