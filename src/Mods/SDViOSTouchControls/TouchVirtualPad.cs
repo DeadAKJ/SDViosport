@@ -566,6 +566,18 @@ namespace SDViOSTouchControls
                             _menuPulseFrames = 1;
                             _lastMenuPressTime = curTime;
                             Log($"[TVP_DEBUG] Touch on Button Menu! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
+                            if (Game1.activeClickableMenu != null)
+                            {
+                                try
+                                {
+                                    if (Game1.activeClickableMenu.readyToClose())
+                                        Game1.activeClickableMenu.exitThisMenu();
+                                }
+                                catch (Exception ex)
+                                {
+                                    Log($"[TVP_DEBUG] Exception closing menu on MenuBtn: {ex.Message}");
+                                }
+                            }
                         }
                         continue;
                     }
@@ -604,6 +616,18 @@ namespace SDViOSTouchControls
                         _bPulseFrames = 1;
                         _lastBPressTime = curTime;
                         Log($"[TVP_DEBUG] Touch on Button B! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
+                        if (Game1.activeClickableMenu != null)
+                        {
+                            try
+                            {
+                                if (Game1.activeClickableMenu.readyToClose())
+                                    Game1.activeClickableMenu.exitThisMenu();
+                            }
+                            catch (Exception ex)
+                            {
+                                Log($"[TVP_DEBUG] Exception closing menu on ButtonB: {ex.Message}");
+                            }
+                        }
                     }
                 }
 
@@ -708,7 +732,8 @@ namespace SDViOSTouchControls
                 Log($"[TVP_DEBUG] HandleBackgroundTouch while menu={Game1.activeClickableMenu.GetType().Name}! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), mouseMode={Settings.MouseControlMode}");
             }
 
-            if (Settings.MouseControlMode == MouseMode.PointAndClick)
+            bool inMenu = Game1.activeClickableMenu != null;
+            if (inMenu || Settings.MouseControlMode == MouseMode.PointAndClick)
             {
                 SimulatedMousePosition = pt;
 
@@ -1060,8 +1085,8 @@ namespace SDViOSTouchControls
                     activeKeys.Add(Keys.Space);
                 }
                 if (ButtonX) activeKeys.Add(Keys.C);
-                if (ButtonY && !isGamepad) activeKeys.Add(Keys.E);
-                if ((ButtonB || ButtonMenu) && !isGamepad) activeKeys.Add(Keys.Escape);
+                if (ButtonY) activeKeys.Add(Keys.E);
+                if (ButtonB || ButtonMenu) activeKeys.Add(Keys.Escape);
 
                 if (ButtonY || ButtonB || ButtonMenu)
                 {

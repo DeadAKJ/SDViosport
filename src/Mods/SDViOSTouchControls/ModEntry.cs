@@ -770,6 +770,23 @@ namespace SDViOSTouchControls
                     Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.CheckGamepadMode -> skipped completely.", LogLevel.Info);
                 }
 
+                // Notifications: suppress "Gamepad mode activated" / "Gamepad disconnected" HUD spam
+                var mShowMsg = typeof(Game1).GetMethod("showGlobalMessage", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null);
+                if (mShowMsg != null)
+                {
+                    harmony.Patch(mShowMsg, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixShowGlobalMessage), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.showGlobalMessage -> suppressing gamepad spam.", LogLevel.Info);
+                }
+
+                // Active Menu: intercept and prevent auto-opening GameMenu on disconnect
+                var propActiveMenu = typeof(Game1).GetProperty("activeClickableMenu", BindingFlags.Public | BindingFlags.Static);
+                var mSetActiveMenu = propActiveMenu?.GetSetMethod();
+                if (mSetActiveMenu != null)
+                {
+                    harmony.Patch(mSetActiveMenu, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixSetActiveClickableMenu), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.set_activeClickableMenu for stack tracing & pause suppression.", LogLevel.Info);
+                }
+
                 // Memory: compact heap right before GameMenu allocates all its pages (prevents Jetsam kill on Y press)
                 foreach (var ctor in typeof(GameMenu).GetConstructors(BindingFlags.Public | BindingFlags.Instance))
                 {
@@ -1130,12 +1147,43 @@ namespace SDViOSTouchControls
             return false;
         }
 
-        private static bool PrefixCheckGamepadMode()
+        private static bool PrefixCheckGamepadMode(Game1 __instance)
         {
             // Skip CheckGamepadMode completely on iOS:
             // Prevents "Gamepad mode activated." HUD spam, controller auto-toggle flapping,
             // and automatic GameMenu reopening (pause-on-disconnect).
+            ModMonitor?.Log("[PAD_DEBUG] PrefixCheckGamepadMode called! Skipping completely.", LogLevel.Trace);
             return false;
+        }
+
+        private static bool PrefixShowGlobalMessage(string message)
+        {
+            if (string.IsNullOrEmpty(message)) return true;
+
+            // Suppress gamepad connect/disconnect notifications that spam the screen on iOS
+            if (message.Contains("Gamepad") || message.Contains("gamepad") || message.Contains("manette"))
+            {
+                ModMonitor?.Log($"[MSG_DEBUG] Suppressed gamepad notification: '{message}' | CallStack: {GetCompactStackTrace(2, 6)}", LogLevel.Info);
+                return false;
+            }
+            return true;
+        }
+
+        private static bool PrefixSetActiveClickableMenu(ref IClickableMenu? value)
+        {
+            if (value is GameMenu)
+            {
+                string stack = Environment.StackTrace;
+                ModMonitor?.Log($"[MENU_DEBUG] set_activeClickableMenu(GameMenu)! CallStack:\n{stack}", LogLevel.Error);
+
+                // If GameMenu was triggered by CheckGamepadMode (pause-on-disconnect glitch), block it!
+                if (stack.Contains("CheckGamepadMode"))
+                {
+                    ModMonitor?.Log("[MENU_DEBUG] BLOCKED automatic GameMenu from CheckGamepadMode pause-on-disconnect!", LogLevel.Warn);
+                    return false;
+                }
+            }
+            return true;
         }
 
         private static void PrefixGameMenuCtor()
