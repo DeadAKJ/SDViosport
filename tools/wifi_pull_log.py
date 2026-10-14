@@ -13,16 +13,30 @@ def get_base_url(ip, port):
 
 def fetch_log(base_url, output_path='SMAPI-latest.txt'):
     url = f'{base_url}/log'
-    print(f'Fetching SMAPI log from {url}...')
+    print(f'Fetching current SMAPI log from {url}...')
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             data = resp.read()
             with open(output_path, 'wb') as f:
                 f.write(data)
-            print(f'Successfully pulled SMAPI log ({len(data):,} bytes) -> saved to {output_path}')
+            print(f'Successfully pulled current SMAPI log ({len(data):,} bytes) -> saved to {output_path}')
             return True
     except Exception as e:
-        print(f'Failed to fetch SMAPI log: {e}')
+        print(f'Failed to fetch current SMAPI log: {e}')
+        return False
+
+def fetch_previous_log(base_url, output_path='SMAPI-previous.txt'):
+    url = f'{base_url}/log-previous'
+    print(f'Fetching previous/crash SMAPI log from {url}...')
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            data = resp.read()
+            with open(output_path, 'wb') as f:
+                f.write(data)
+            print(f'Successfully pulled previous/crash SMAPI log ({len(data):,} bytes) -> saved to {output_path}')
+            return True
+    except Exception as e:
+        print(f'Failed to fetch previous SMAPI log: {e}')
         return False
 
 def fetch_engine_log(base_url, output_path='engine-latest.log'):
@@ -39,12 +53,14 @@ def fetch_engine_log(base_url, output_path='engine-latest.log'):
         print(f'Failed to fetch Engine log: {e}')
         return False
 
-def tail_log(base_url, lines=100):
-    url = f'{base_url}/tail?lines={lines}'
+def tail_log(base_url, lines=100, previous=False):
+    endpoint = 'tail-previous' if previous else 'tail'
+    url = f'{base_url}/{endpoint}?lines={lines}'
     try:
         with urllib.request.urlopen(url, timeout=10) as resp:
             text = resp.read().decode('utf-8', errors='replace')
-            print(f'--- Last {lines} lines of SMAPI log ---')
+            label = "Previous/Crash" if previous else "Current"
+            print(f'--- Last {lines} lines of {label} SMAPI log ---')
             print(text)
             return True
     except Exception as e:
@@ -89,6 +105,7 @@ def main():
     parser.add_argument('--ip', default=DEFAULT_IP, help=f'iPhone Wi-Fi IP (default: {DEFAULT_IP})')
     parser.add_argument('--port', type=int, default=DEFAULT_PORT, help=f'Server port (default: {DEFAULT_PORT})')
     parser.add_argument('--tail', type=int, nargs='?', const=100, help='Tail last N lines of log')
+    parser.add_argument('--previous', action='store_true', help='Download previous/crash log')
     parser.add_argument('--engine', action='store_true', help='Download engine-latest.log')
     parser.add_argument('--gc', action='store_true', help='Force GC & print memory stats')
     parser.add_argument('--upload', nargs=2, metavar=('LOCAL', 'REMOTE'), help='Upload local file to remote Documents path')
@@ -101,12 +118,15 @@ def main():
     elif args.upload:
         upload_file(base_url, args.upload[0], args.upload[1])
     elif args.tail:
-        tail_log(base_url, args.tail)
+        tail_log(base_url, args.tail, previous=args.previous)
+    elif args.previous:
+        fetch_previous_log(base_url)
     elif args.engine:
         fetch_engine_log(base_url)
     else:
-        # Default action: pull both logs and print tail
+        # Default action: pull current log, previous log, and engine log
         fetch_log(base_url)
+        fetch_previous_log(base_url)
         fetch_engine_log(base_url)
 
 if __name__ == '__main__':

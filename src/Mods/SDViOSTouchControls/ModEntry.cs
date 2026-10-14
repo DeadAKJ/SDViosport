@@ -1375,7 +1375,8 @@ namespace SDViOSTouchControls
         {
             try
             {
-                Monitor.Log("[SDViOSTouchControls] DayEnding: triggering pre-save memory compaction...", LogLevel.Info);
+                Monitor.Log("[SDViOSTouchControls] DayEnding: triggering pre-save memory compaction and log backup...", LogLevel.Info);
+                RemoteDebugServer.BackupLogs("DayEnding");
                 MemoryWatchdog.ForceCollect("DayEnding");
             }
             catch { }
@@ -1386,6 +1387,7 @@ namespace SDViOSTouchControls
             try
             {
                 Monitor.Log("[SDViOSTouchControls] Saving: compacting memory before XML serialization...", LogLevel.Info);
+                RemoteDebugServer.BackupLogs("Saving");
                 MemoryWatchdog.ForceCollect("Saving");
             }
             catch { }
@@ -1395,7 +1397,8 @@ namespace SDViOSTouchControls
         {
             try
             {
-                Monitor.Log("[SDViOSTouchControls] Saved: save complete, purging serialization buffers before new day load...", LogLevel.Info);
+                Monitor.Log("[SDViOSTouchControls] Saved: save complete, backing up log and purging serialization buffers...", LogLevel.Info);
+                RemoteDebugServer.BackupLogs("Saved");
                 MemoryWatchdog.ForceCollect("Saved");
             }
             catch { }

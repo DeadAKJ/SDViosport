@@ -106,6 +106,10 @@ namespace SDViOSTouchControls
                     if (avail >= 0 && avail < LowWaterBytes && (now - lastGc).TotalMilliseconds > gcInterval)
                     {
                         lastGc = DateTime.UtcNow;
+                        if (avail < EmergencyBytes)
+                        {
+                            RemoteDebugServer.BackupLogs("LowMemoryEmergency");
+                        }
                         _monitor?.Log($"[MEM_DEBUG] LOW MEMORY: avail={avail / MB} MB, managed={managed / MB} MB -> starting GC", LogLevel.Warn);
                         try { System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce; }
                         catch (Exception sex) { LogErr("GCSettings.LOHCompactionMode", sex); }

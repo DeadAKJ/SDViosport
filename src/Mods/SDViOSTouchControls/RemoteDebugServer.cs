@@ -246,6 +246,41 @@ namespace SDViOSTouchControls
             return dict;
         }
 
+        public static void BackupLogs(string reason)
+        {
+            try
+            {
+                string latest = FindLogFile("SMAPI-latest.txt");
+                if (File.Exists(latest) && new FileInfo(latest).Length > 0)
+                {
+                    string dir = Path.GetDirectoryName(latest)!;
+                    string dest = Path.Combine(dir, "SMAPI-previous.txt");
+                    using (var src = new FileStream(latest, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    using (var dst = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+                    {
+                        src.CopyTo(dst);
+                    }
+                    _monitor?.Log($"[RemoteServer] Preserved log snapshot ({reason}) to SMAPI-previous.txt", LogLevel.Trace);
+                }
+
+                string engine = FindLogFile("engine-latest.log");
+                if (File.Exists(engine) && new FileInfo(engine).Length > 0)
+                {
+                    string dir = Path.GetDirectoryName(engine)!;
+                    string dest = Path.Combine(dir, "engine-previous.log");
+                    using (var src = new FileStream(engine, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    using (var dst = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+                    {
+                        src.CopyTo(dst);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _monitor?.Log($"[RemoteServer] Note backing up log: {ex.Message}", LogLevel.Trace);
+            }
+        }
+
         private static void HandleGet(Stream stream, string path, Dictionary<string, string> q)
         {
             if (path == "/" || path == "/index.html")
@@ -258,16 +293,34 @@ namespace SDViOSTouchControls
                 string logPath = FindLogFile("SMAPI-latest.txt");
                 SendFileStream(stream, logPath, "text/plain; charset=utf-8", "SMAPI-latest.txt");
             }
+            else if (path == "/log-previous" || path == "/previous-log")
+            {
+                string logPath = FindLogFile("SMAPI-previous.txt");
+                SendFileStream(stream, logPath, "text/plain; charset=utf-8", "SMAPI-previous.txt");
+            }
             else if (path == "/engine-log")
             {
                 string logPath = FindLogFile("engine-latest.log");
                 SendFileStream(stream, logPath, "text/plain; charset=utf-8", "engine-latest.log");
+            }
+            else if (path == "/engine-previous-log")
+            {
+                string logPath = FindLogFile("engine-previous.log");
+                SendFileStream(stream, logPath, "text/plain; charset=utf-8", "engine-previous.log");
             }
             else if (path == "/tail")
             {
                 int linesCount = 100;
                 if (q.TryGetValue("lines", out var lStr) && int.TryParse(lStr, out var n)) linesCount = Math.Max(1, Math.Min(n, 2000));
                 string logPath = FindLogFile("SMAPI-latest.txt");
+                string tailText = ReadLastLines(logPath, linesCount);
+                SendResponse(stream, 200, "OK", "text/plain; charset=utf-8", Encoding.UTF8.GetBytes(tailText));
+            }
+            else if (path == "/tail-previous")
+            {
+                int linesCount = 100;
+                if (q.TryGetValue("lines", out var lStr) && int.TryParse(lStr, out var n)) linesCount = Math.Max(1, Math.Min(n, 2000));
+                string logPath = FindLogFile("SMAPI-previous.txt");
                 string tailText = ReadLastLines(logPath, linesCount);
                 SendResponse(stream, 200, "OK", "text/plain; charset=utf-8", Encoding.UTF8.GetBytes(tailText));
             }
@@ -478,10 +531,13 @@ namespace SDViOSTouchControls
 
     <div class='card'>
         <h3>Actions</h3>
-        <a class='btn btn-green' href='/log' target='_blank'>Download SMAPI-latest.txt</a>
-        <a class='btn' href='/tail?lines=200' target='_blank'>Tail Log (Last 200 lines)</a>
-        <a class='btn' href='/engine-log' target='_blank'>Download engine-latest.log</a>
-        <a class='btn btn-orange' href='/gc' target='_blank'>Force Compact GC</a>
+        <a class='btn btn-green' href='/log' target='_blank'>Download Current SMAPI Log</a>
+        <a class='btn btn-orange' href='/log-previous' target='_blank'>Download Previous/Crash SMAPI Log</a>
+        <a class='btn' href='/tail?lines=200' target='_blank'>Tail Current Log</a>
+        <a class='btn' href='/tail-previous?lines=200' target='_blank'>Tail Previous Log</a>
+        <a class='btn btn-green' href='/engine-log' target='_blank'>Download engine-latest.log</a>
+        <a class='btn btn-orange' href='/engine-previous-log' target='_blank'>Download engine-previous.log</a>
+        <a class='btn' href='/gc' target='_blank'>Force Compact GC</a>
         <a class='btn' href='/files'>Browse Documents Folder</a>
     </div>
 
