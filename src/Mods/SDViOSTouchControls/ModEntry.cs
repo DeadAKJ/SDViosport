@@ -1397,11 +1397,56 @@ namespace SDViOSTouchControls
         {
             try
             {
-                Monitor.Log("[SDViOSTouchControls] Saved: save complete, backing up log and purging serialization buffers...", LogLevel.Info);
+                Monitor.Log("[SDViOSTouchControls] Saved: save complete, purging assets before day transition...", LogLevel.Info);
                 RemoteDebugServer.BackupLogs("Saved");
+
+                try
+                {
+                    Helper.GameContent.InvalidateCache(asset => asset.Name.Name.StartsWith("Maps/") && !asset.Name.Name.Contains("FarmHouse") && !asset.Name.Name.Contains("Farm"));
+                }
+                catch (Exception ex)
+                {
+                    Monitor.Log($"[MEM_PURGE] InvalidateCache error: {ex.Message}", LogLevel.Trace);
+                }
+
+                PurgeContentAssets();
                 MemoryWatchdog.ForceCollect("Saved");
             }
             catch { }
+        }
+
+        private void PurgeContentAssets()
+        {
+            try
+            {
+                var content = Game1.content;
+                if (content == null) return;
+                var field = typeof(Microsoft.Xna.Framework.Content.ContentManager).GetField("loadedAssets", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (field?.GetValue(content) is System.Collections.IDictionary dict)
+                {
+                    var keysToRemove = new System.Collections.Generic.List<object>();
+                    foreach (var key in dict.Keys)
+                    {
+                        if (key is string s)
+                        {
+                            if (s.StartsWith("Characters/schedules", StringComparison.OrdinalIgnoreCase) ||
+                                s.StartsWith("Characters/Dialogue", StringComparison.OrdinalIgnoreCase) ||
+                                s.StartsWith("Strings/", StringComparison.OrdinalIgnoreCase) ||
+                                s.StartsWith("Data/Events", StringComparison.OrdinalIgnoreCase) ||
+                                (s.StartsWith("Maps/", StringComparison.OrdinalIgnoreCase) && !s.Contains("FarmHouse") && !s.Contains("Farm")))
+                            {
+                                keysToRemove.Add(key);
+                            }
+                        }
+                    }
+                    foreach (var k in keysToRemove) dict.Remove(k);
+                    Monitor.Log($"[MEM_PURGE] Evicted {keysToRemove.Count} transient assets from Game1.content.", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[MEM_PURGE] Error in PurgeContentAssets: {ex.Message}", LogLevel.Trace);
+            }
         }
 
         private void OnAssetsInvalidated(object? sender, AssetsInvalidatedEventArgs e)
