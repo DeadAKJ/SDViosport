@@ -93,12 +93,20 @@ namespace SDViOSTouchControls
             helper.Events.Display.RenderedStep += OnRenderedStep;
             helper.Events.Display.Rendered += OnRendered;
             helper.Events.Content.AssetReady += OnAssetReady;
+            helper.Events.GameLoop.DayEnding += OnDayEnding;
+            helper.Events.GameLoop.Saving += OnSaving;
+            helper.Events.GameLoop.Saved += OnSaved;
             helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
             helper.Events.GameLoop.DayStarted += OnDayStarted;
+            helper.Events.Content.AssetsInvalidated += OnAssetsInvalidated;
 
             // 7. Background memory watchdog (real iOS headroom + emergency GC during synchronous loads)
             try { MemoryWatchdog.Start(Monitor); }
             catch (Exception ex) { Monitor.Log($"[MEM_DEBUG] Watchdog failed to start: {ex.Message}", LogLevel.Warn); }
+
+            // 8. Embedded Wi-Fi Remote Debug & Log Server (port 8080)
+            try { RemoteDebugServer.Start(Monitor); }
+            catch (Exception ex) { Monitor.Log($"[RemoteServer] Server failed to start: {ex.Message}", LogLevel.Warn); }
 
             Monitor.Log("[SDViOSTouchControls] Mod initialized successfully.", LogLevel.Info);
         }
@@ -1362,6 +1370,50 @@ namespace SDViOSTouchControls
         }
 
         private int _menuClosedTick = -100;
+
+        private void OnDayEnding(object? sender, DayEndingEventArgs e)
+        {
+            try
+            {
+                Monitor.Log("[SDViOSTouchControls] DayEnding: triggering pre-save memory compaction...", LogLevel.Info);
+                MemoryWatchdog.ForceCollect("DayEnding");
+            }
+            catch { }
+        }
+
+        private void OnSaving(object? sender, SavingEventArgs e)
+        {
+            try
+            {
+                Monitor.Log("[SDViOSTouchControls] Saving: compacting memory before XML serialization...", LogLevel.Info);
+                MemoryWatchdog.ForceCollect("Saving");
+            }
+            catch { }
+        }
+
+        private void OnSaved(object? sender, SavedEventArgs e)
+        {
+            try
+            {
+                Monitor.Log("[SDViOSTouchControls] Saved: save complete, purging serialization buffers before new day load...", LogLevel.Info);
+                MemoryWatchdog.ForceCollect("Saved");
+            }
+            catch { }
+        }
+
+        private void OnAssetsInvalidated(object? sender, AssetsInvalidatedEventArgs e)
+        {
+            try
+            {
+                // When Content Patcher or game invalidates map/texture assets, collect old textures if headroom is tight
+                long avail = MemoryWatchdog.Available();
+                if (avail >= 0 && avail < 200 * 1024 * 1024)
+                {
+                    MemoryWatchdog.ForceCollect("AssetsInvalidated");
+                }
+            }
+            catch { }
+        }
 
         private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
         {

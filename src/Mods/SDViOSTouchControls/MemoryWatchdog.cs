@@ -9,8 +9,8 @@ namespace SDViOSTouchControls
     /// <summary>
     /// Background watchdog that samples the real iOS memory headroom (os_proc_available_memory = bytes left
     /// before Jetsam kills us) and forces a compacting GC when headroom gets low. Runs on its own thread so
-    /// it keeps working during long synchronous loads (e.g. SMAPI's Load_Locations task) where no
-    /// UpdateTicking events fire.
+    /// it keeps working during long synchronous loads (e.g. SMAPI's Load_Locations task or save transitions)
+    /// where no UpdateTicking events fire.
     /// </summary>
     internal static class MemoryWatchdog
     {
@@ -20,6 +20,7 @@ namespace SDViOSTouchControls
         private const long MB = 1024 * 1024;
         private const long LowWaterBytes = 350 * MB;   // force GC below this
         private const long CriticalBytes = 200 * MB;   // log every sample below this
+        private const long EmergencyBytes = 50 * MB;   // high-frequency GC below this
 
         private static Thread? _thread;
         private static IMonitor? _monitor;
@@ -43,6 +44,38 @@ namespace SDViOSTouchControls
             catch { _nativeAvailable = false; return -1; }
         }
 
+        /// <summary>Forces an immediate Gen2 GC and Large Object Heap compaction.</summary>
+        public static void ForceCollect(string reason)
+        {
+            try
+            {
+                long availBefore = Available();
+                long managedBefore = GC.GetTotalMemory(false);
+                try { System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce; }
+                catch (Exception sex) { LogErr("GCSettings.LOHCompactionMode", sex); }
+
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                try
+                {
+                    GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    GC.WaitForPendingFinalizers();
+                }
+                catch (Exception gex)
+                {
+                    LogErr("GC.Collect(compacting)", gex);
+                    try { GC.Collect(); } catch (Exception g2) { LogErr("GC.Collect()", g2); }
+                }
+
+                long availAfter = Available();
+                long managedAfter = GC.GetTotalMemory(false);
+                _monitor?.Log($"[MEM_DEBUG] ForceCollect ({reason}) in {sw.ElapsedMilliseconds} ms: avail {availBefore / MB} -> {availAfter / MB} MB, managed {managedBefore / MB} -> {managedAfter / MB} MB", LogLevel.Info);
+            }
+            catch (Exception ex)
+            {
+                _monitor?.Log($"[MEM_DEBUG] ForceCollect error: {ex.Message}", LogLevel.Warn);
+            }
+        }
+
         private static void Loop()
         {
             DateTime lastLog = DateTime.MinValue;
@@ -59,7 +92,17 @@ namespace SDViOSTouchControls
 
                     if (avail >= 0 && avail < _minSeen) _minSeen = avail;
 
-                    double gcInterval = loading ? 750 : 5000;
+                    // Dynamically scale GC interval based on remaining headroom
+                    double gcInterval;
+                    if (avail >= 0 && avail < 25 * MB)
+                        gcInterval = 250;      // Immediate emergency
+                    else if (avail >= 0 && avail < EmergencyBytes)
+                        gcInterval = 500;      // Critical headroom
+                    else if (avail >= 0 && avail < 150 * MB)
+                        gcInterval = 1200;
+                    else
+                        gcInterval = loading ? 750 : 3500;
+
                     if (avail >= 0 && avail < LowWaterBytes && (now - lastGc).TotalMilliseconds > gcInterval)
                     {
                         lastGc = DateTime.UtcNow;
@@ -67,8 +110,16 @@ namespace SDViOSTouchControls
                         try { System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce; }
                         catch (Exception sex) { LogErr("GCSettings.LOHCompactionMode", sex); }
                         var sw = System.Diagnostics.Stopwatch.StartNew();
-                        try { GC.Collect(2, GCCollectionMode.Forced, true, true); }
-                        catch (Exception gex) { LogErr("GC.Collect(compacting)", gex); try { GC.Collect(); } catch (Exception g2) { LogErr("GC.Collect()", g2); } }
+                        try
+                        {
+                            GC.Collect(2, GCCollectionMode.Forced, true, true);
+                            GC.WaitForPendingFinalizers();
+                        }
+                        catch (Exception gex)
+                        {
+                            LogErr("GC.Collect(compacting)", gex);
+                            try { GC.Collect(); } catch (Exception g2) { LogErr("GC.Collect()", g2); }
+                        }
                         long after = Available();
                         _monitor?.Log($"[MEM_DEBUG] LOW MEMORY GC done in {sw.ElapsedMilliseconds} ms: avail {avail / MB} -> {after / MB} MB, managed {managed / MB} -> {GC.GetTotalMemory(false) / MB} MB", LogLevel.Warn);
                         lastLog = DateTime.UtcNow;
@@ -83,7 +134,8 @@ namespace SDViOSTouchControls
                         }
                     }
 
-                    Thread.Sleep(loading ? 200 : 1000);
+                    int sleepMs = (avail >= 0 && avail < EmergencyBytes) ? 100 : loading ? 200 : 800;
+                    Thread.Sleep(sleepMs);
                 }
                 catch (Exception ex)
                 {
