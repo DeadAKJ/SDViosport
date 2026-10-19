@@ -194,15 +194,17 @@ namespace SDViOS
 
         public override void DidEnterBackground(UIApplication application)
         {
-            EngineLogger.Log("[AppDelegate] DidEnterBackground");
+            EngineLogger.Log("[AppDelegate] DidEnterBackground: pausing display link and flushing logs.");
+            GameHost.OnDidEnterBackground();
         }
 
         public override void WillEnterForeground(UIApplication application)
         {
             try
             {
-                EngineLogger.Log("[AppDelegate] WillEnterForeground");
-                GameHost.LinkGameWindowToScene();
+                EngineLogger.Log("[AppDelegate] WillEnterForeground: resuming display link.");
+                ConfigureAudioSession();
+                GameHost.OnWillEnterForeground();
             }
             catch (Exception ex)
             {
@@ -210,9 +212,26 @@ namespace SDViOS
             }
         }
 
+        public override void ReceiveMemoryWarning(UIApplication application)
+        {
+            try
+            {
+                long beforeMb = GC.GetTotalMemory(false) / (1024 * 1024);
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+                long afterMb = GC.GetTotalMemory(false) / (1024 * 1024);
+                EngineLogger.LogWarning($"[AppDelegate] iOS ReceiveMemoryWarning! Forced LOH compacting GC: managed {beforeMb} MB -> {afterMb} MB");
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogWarning($"[AppDelegate] ReceiveMemoryWarning GC error: {ex.Message}");
+            }
+        }
+
         public override void WillTerminate(UIApplication application)
         {
             EngineLogger.Log("[AppDelegate] WillTerminate");
+            GameHost.OnDidEnterBackground();
         }
 
         public static void ConfigureAudioSession()

@@ -139,7 +139,7 @@ def is_version_newer(remote_v: str, local_v: str) -> bool:
 
 
 class IOSModBackend:
-    """Manages iOS device connection and mod operations over AFC."""
+    """Manages iOS device connection and mod operations over AFC or Wi-Fi Debug Server."""
 
     def __init__(self):
         self.lockdown = None
@@ -148,6 +148,7 @@ class IOSModBackend:
         self.bundle_id: str = ""
         self.is_connected: bool = False
         self.local_mode_dir: Optional[str] = None  # If user selects a mounted PC folder
+        self.wifi_url: Optional[str] = None        # e.g. "http://192.168.1.123:8080"
         self._save_locations: dict[str, str] = {}
 
     async def list_usb_devices(self) -> list[dict]:
@@ -214,11 +215,42 @@ class IOSModBackend:
 
             self.is_connected = True
             self.local_mode_dir = None
+            self.wifi_url = None
             return True, f"Connected to {dev_name} ({model}, iOS {os_ver})"
 
         except Exception as e:
             self.is_connected = False
             return False, f"Connection failed: {e}"
+
+    def connect_wifi(self, ip_or_url: str = "192.168.1.123", port: int = 8080) -> tuple[bool, str]:
+        """Connect wirelessly to the SDViOS RemoteDebugServer running on port 8080."""
+        raw = ip_or_url.strip().rstrip("/")
+        if not raw.startswith("http://") and not raw.startswith("https://"):
+            if ":" in raw:
+                base_url = f"http://{raw}"
+            else:
+                base_url = f"http://{raw}:{port}"
+        else:
+            base_url = raw
+
+        try:
+            req = urllib.request.Request(f"{base_url}/status", headers={"User-Agent": "SDViOS-ModManager"})
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                self.wifi_url = base_url
+                self.local_mode_dir = None
+                self.house_arrest = None
+                self.is_connected = True
+                avail_mb = data.get("avail_mb", "?")
+                loc = data.get("location", "Title")
+                self.device_info = {
+                    "DeviceName": f"Wi-Fi ({base_url})",
+                    "ProductType": f"Headroom: {avail_mb} MB",
+                    "ProductVersion": f"Loc: {loc}"
+                }
+                return True, f"Connected over Wi-Fi to {base_url} (Available RAM: {avail_mb} MB)"
+        except Exception as e:
+            return False, f"Could not reach SDViOS Wi-Fi server at {base_url}: {e}"
 
     def connect_local_folder(self, folder_path: str) -> tuple[bool, str]:
         """Fallback: connect to a local directory (e.g. if mounted by iTunes/3uTools/iMazing)."""
@@ -229,6 +261,7 @@ class IOSModBackend:
         mods_path = folder_path if os.path.basename(folder_path).lower() == "mods" else os.path.join(folder_path, "Mods")
         os.makedirs(mods_path, exist_ok=True)
         self.local_mode_dir = folder_path
+        self.wifi_url = None
         self.is_connected = True
         return True, f"Connected to local folder: {folder_path}"
 
@@ -240,7 +273,32 @@ class IOSModBackend:
             except Exception:
                 pass
             self.house_arrest = None
+        self.wifi_url = None
         self.is_connected = False
+
+    def _wifi_get_json(self, path_and_query: str, timeout: float = 8.0) -> dict:
+        req = urllib.request.Request(f"{self.wifi_url}{path_and_query}", headers={"User-Agent": "SDViOS-ModManager"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="ignore"))
+
+    def _wifi_get_bytes(self, path_and_query: str, timeout: float = 15.0) -> bytes:
+        req = urllib.request.Request(f"{self.wifi_url}{path_and_query}", headers={"User-Agent": "SDViOS-ModManager"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+
+    def _wifi_post(self, path_and_query: str, body: bytes = b"", content_type: str = "application/octet-stream", timeout: float = 30.0) -> dict:
+        req = urllib.request.Request(
+            f"{self.wifi_url}{path_and_query}",
+            data=body,
+            method="POST",
+            headers={
+                "User-Agent": "SDViOS-ModManager",
+                "Content-Type": content_type,
+                "Content-Length": str(len(body)),
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="ignore"))
 
     async def list_mods(self) -> list[ModInfo]:
         """List all installed mods and parse their manifest.json."""
@@ -262,6 +320,30 @@ class IOSModBackend:
                 mod = self._parse_manifest_local(entry, manifest_p)
                 mods.append(mod)
             return sorted(mods, key=lambda m: m.name.lower())
+
+        if self.wifi_url:
+            def _fetch_wifi_mods():
+                res = []
+                try:
+                    listing = self._wifi_get_json("/api/list?dir=Mods")
+                    for item in listing.get("entries", []):
+                        if not item.get("is_dir"):
+                            continue
+                        entry = item.get("name", "")
+                        if entry in [".", "..", "SMAPI-config.json", ".DS_Store"]:
+                            continue
+                        rel_manifest = urllib.parse.quote(f"Mods/{entry}/manifest.json")
+                        raw_bytes = None
+                        try:
+                            raw_bytes = self._wifi_get_bytes(f"/download?path={rel_manifest}", timeout=6.0)
+                        except Exception:
+                            pass
+                        res.append(self._parse_manifest_bytes(entry, raw_bytes))
+                except Exception as e:
+                    print(f"[Backend] Error listing mods over Wi-Fi: {e}")
+                return sorted(res, key=lambda m: m.name.lower())
+
+            return await asyncio.to_thread(_fetch_wifi_mods)
 
         # AFC Remote
         if not self.house_arrest:
@@ -342,8 +424,8 @@ class IOSModBackend:
 
         return mod
 
-    def _parse_manifest_local(self, folder_name: str, manifest_path: str) -> ModInfo:
-        """Parse manifest.json on local filesystem."""
+    def _parse_manifest_bytes(self, folder_name: str, raw_bytes: Optional[bytes]) -> ModInfo:
+        """Parse manifest.json from raw bytes."""
         is_enabled = not folder_name.startswith(".disabled_") and not folder_name.startswith(".disabled-") and not folder_name.startswith(".")
         clean_name = folder_name.replace(".disabled_", "").replace(".disabled-", "")
 
@@ -353,47 +435,57 @@ class IOSModBackend:
             is_enabled=is_enabled
         )
 
-        if os.path.isfile(manifest_path):
+        if raw_bytes:
             try:
-                with open(manifest_path, "r", encoding="utf-8-sig", errors="ignore") as f:
-                    raw_str = clean_json(f.read())
-                    data = json.loads(raw_str)
-                    mod.name = data.get("Name", clean_name)
-                    mod.author = data.get("Author", "Unknown")
-                    mod.version = str(data.get("Version", "1.0.0"))
-                    mod.description = data.get("Description", "")
-                    mod.unique_id = data.get("UniqueID", "")
-                    mod.minimum_api_version = str(data.get("MinimumApiVersion", ""))
+                raw_str = clean_json(raw_bytes.decode("utf-8-sig", errors="ignore"))
+                data = json.loads(raw_str)
+                mod.name = data.get("Name", clean_name)
+                mod.author = data.get("Author", "Unknown")
+                mod.version = str(data.get("Version", "1.0.0"))
+                mod.description = data.get("Description", "")
+                mod.unique_id = data.get("UniqueID", "")
+                mod.minimum_api_version = str(data.get("MinimumApiVersion", ""))
 
-                    if "ContentPackFor" in data and data["ContentPackFor"]:
-                        mod.is_content_pack = True
-                        mod.content_pack_for = data["ContentPackFor"].get("UniqueID", "Content Patcher")
+                if "ContentPackFor" in data and data["ContentPackFor"]:
+                    mod.is_content_pack = True
+                    mod.content_pack_for = data["ContentPackFor"].get("UniqueID", "Content Patcher")
 
-                    if "EntryDll" in data and data["EntryDll"]:
-                        mod.is_code_mod = True
+                if "EntryDll" in data and data["EntryDll"]:
+                    mod.is_code_mod = True
 
-                    deps = data.get("Dependencies", [])
-                    if isinstance(deps, list):
-                        mod.dependencies = [
-                            d.get("UniqueID", "") for d in deps 
-                            if isinstance(d, dict) and "UniqueID" in d and d.get("IsRequired", True)
-                        ]
+                deps = data.get("Dependencies", [])
+                if isinstance(deps, list):
+                    mod.dependencies = [
+                        d.get("UniqueID", "") for d in deps
+                        if isinstance(d, dict) and "UniqueID" in d and d.get("IsRequired", True)
+                    ]
 
-                    update_keys = data.get("UpdateKeys", [])
-                    if isinstance(update_keys, list):
-                        mod.update_keys = [str(k) for k in update_keys if isinstance(k, str)]
-                        for k in mod.update_keys:
-                            m_match = re.search(r"nexus:(\d+)", k, re.IGNORECASE)
-                            if m_match:
-                                mod.nexus_id = int(m_match.group(1))
-                                break
+                update_keys = data.get("UpdateKeys", [])
+                if isinstance(update_keys, list):
+                    mod.update_keys = [str(k) for k in update_keys if isinstance(k, str)]
+                    for k in mod.update_keys:
+                        m_match = re.search(r"nexus:(\d+)", k, re.IGNORECASE)
+                        if m_match:
+                            mod.nexus_id = int(m_match.group(1))
+                            break
 
-                    if not mod.nexus_id and mod.unique_id and mod.unique_id.lower() in KNOWN_FRAMEWORK_NEXUS_IDS:
-                        mod.nexus_id = KNOWN_FRAMEWORK_NEXUS_IDS[mod.unique_id.lower()]
+                if not mod.nexus_id and mod.unique_id and mod.unique_id.lower() in KNOWN_FRAMEWORK_NEXUS_IDS:
+                    mod.nexus_id = KNOWN_FRAMEWORK_NEXUS_IDS[mod.unique_id.lower()]
             except Exception as e:
-                print(f"[Backend] Local manifest parse error: {e}")
+                print(f"[Backend] Manifest bytes parse error for {folder_name}: {e}")
 
         return mod
+
+    def _parse_manifest_local(self, folder_name: str, manifest_path: str) -> ModInfo:
+        """Parse manifest.json on local filesystem."""
+        raw_bytes = None
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path, "rb") as f:
+                    raw_bytes = f.read()
+            except Exception:
+                pass
+        return self._parse_manifest_bytes(folder_name, raw_bytes)
 
     async def toggle_mod(self, mod: ModInfo) -> tuple[bool, str]:
         """Toggle a mod between Enabled and Disabled."""
@@ -415,6 +507,20 @@ class IOSModBackend:
                 return True, f"Mod {'enabled' if target_enabled else 'disabled'}"
             except Exception as e:
                 return False, f"Rename failed: {e}"
+
+        if self.wifi_url:
+            def _wifi_toggle():
+                q_from = urllib.parse.quote(f"Mods/{mod.folder_name}")
+                q_to = urllib.parse.quote(f"Mods/{new_folder}")
+                self._wifi_post(f"/api/rename?from={q_from}&to={q_to}")
+                mod.folder_name = new_folder
+                mod.is_enabled = target_enabled
+                return True, f"Mod {'enabled' if target_enabled else 'disabled'}"
+
+            try:
+                return await asyncio.to_thread(_wifi_toggle)
+            except Exception as e:
+                return False, f"Wi-Fi rename failed: {e}"
 
         if not self.house_arrest:
             return False, "AFC not available"
@@ -442,6 +548,17 @@ class IOSModBackend:
                 return True, f"Deleted {mod.name}"
             except Exception as e:
                 return False, f"Delete failed: {e}"
+
+        if self.wifi_url:
+            def _wifi_del():
+                q_path = urllib.parse.quote(f"Mods/{mod.folder_name}")
+                self._wifi_post(f"/api/delete?path={q_path}")
+                return True, f"Deleted {mod.name}"
+
+            try:
+                return await asyncio.to_thread(_wifi_del)
+            except Exception as e:
+                return False, f"Wi-Fi delete failed: {e}"
 
         if not self.house_arrest:
             return False, "AFC not available"
@@ -479,6 +596,29 @@ class IOSModBackend:
             if errors:
                 return False, f"Deleted {deleted_count} mod(s), but {len(errors)} error(s) occurred."
             return True, f"Successfully deleted all {deleted_count} mod(s)."
+
+        if self.wifi_url:
+            def _wifi_del_all():
+                nonlocal deleted_count
+                listing = self._wifi_get_json("/api/list?dir=Mods")
+                for item in listing.get("entries", []):
+                    entry = item.get("name", "")
+                    if entry in [".", "..", "SMAPI-config.json", ".DS_Store"]:
+                        continue
+                    try:
+                        q_path = urllib.parse.quote(f"Mods/{entry}")
+                        self._wifi_post(f"/api/delete?path={q_path}")
+                        deleted_count += 1
+                    except Exception as ex:
+                        errors.append(f"{entry}: {ex}")
+                if errors:
+                    return False, f"Deleted {deleted_count} mod(s), but {len(errors)} error(s) occurred."
+                return True, f"Successfully deleted all {deleted_count} mod(s)."
+
+            try:
+                return await asyncio.to_thread(_wifi_del_all)
+            except Exception as e:
+                return False, f"Wi-Fi delete all failed: {e}"
 
         if not self.house_arrest:
             return False, "AFC not available"
@@ -565,6 +705,12 @@ class IOSModBackend:
                         mods_dir = self.local_mode_dir if os.path.basename(self.local_mode_dir).lower() == "mods" else os.path.join(self.local_mode_dir, "Mods")
                         if os.path.exists(mods_dir):
                             existing_mods = set(os.listdir(mods_dir))
+                    elif self.wifi_url:
+                        try:
+                            listing = await asyncio.to_thread(self._wifi_get_json, "/api/list?dir=Mods")
+                            existing_mods = {item.get("name", "") for item in listing.get("entries", []) if item.get("is_dir")}
+                        except Exception:
+                            pass
                     elif self.house_arrest:
                         try:
                             existing_mods = set(await self.house_arrest.listdir("/Documents/Mods"))
@@ -583,6 +729,10 @@ class IOSModBackend:
                             if self.local_mode_dir:
                                 dest_cfg = os.path.join(mods_dir, matched, "config.json")
                                 shutil.copy2(cfg_path, dest_cfg)
+                            elif self.wifi_url:
+                                q_dest = urllib.parse.quote(f"Mods/{matched}/config.json")
+                                with open(cfg_path, "rb") as f_cfg:
+                                    await asyncio.to_thread(self._wifi_post, f"/upload?path={q_dest}", f_cfg.read())
                             elif self.house_arrest:
                                 dest_cfg = f"/Documents/Mods/{matched}/config.json"
                                 with open(cfg_path, "rb") as f_cfg:
@@ -628,6 +778,24 @@ class IOSModBackend:
                     if os.path.exists(dst):
                         shutil.rmtree(dst)
                     shutil.copytree(mod_dir, dst)
+                elif self.wifi_url:
+                    def _push_mod_wifi(m_dir=mod_dir, f_name=folder_name):
+                        q_del = urllib.parse.quote(f"Mods/{f_name}")
+                        try:
+                            self._wifi_post(f"/api/delete?path={q_del}")
+                        except Exception:
+                            pass
+                        zip_tmp = os.path.join(temp_dir, f"_wifi_{f_name}.zip")
+                        with zipfile.ZipFile(zip_tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+                            for r, _, fls in os.walk(m_dir):
+                                for fl in fls:
+                                    full_f = os.path.join(r, fl)
+                                    rel_f = os.path.join(f_name, os.path.relpath(full_f, m_dir))
+                                    zf.write(full_f, rel_f)
+                        with open(zip_tmp, "rb") as z_in:
+                            self._wifi_post("/api/upload-zip?dest=Mods", z_in.read(), timeout=120.0)
+
+                    await asyncio.to_thread(_push_mod_wifi)
                 else:
                     remote_target = f"/Documents/Mods/{folder_name}"
                     try:
@@ -647,36 +815,50 @@ class IOSModBackend:
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    async def get_smapi_log(self) -> str:
-        """Fetch latest SMAPI log."""
+    async def get_smapi_log(self, previous: bool = False) -> str:
+        """Fetch latest (or previous crash) SMAPI log."""
         if not self.is_connected:
             return "Not connected."
+
+        log_filename = "SMAPI-previous.txt" if previous else "SMAPI-latest.txt"
+        engine_filename = "engine-previous.log" if previous else "engine-latest.log"
 
         if self.local_mode_dir:
             base = self.local_mode_dir if os.path.basename(self.local_mode_dir).lower() != "mods" else os.path.dirname(self.local_mode_dir)
             for cand in [
-                os.path.join(base, ".config", "StardewValley", "ErrorLogs", "SMAPI-latest.txt"),
-                os.path.join(base, "ErrorLogs", "SMAPI-latest.txt"),
-                os.path.join(base, "ErrorLogs", "engine-latest.log"),
+                os.path.join(base, ".config", "StardewValley", "ErrorLogs", log_filename),
+                os.path.join(base, "ErrorLogs", log_filename),
+                os.path.join(base, "ErrorLogs", engine_filename),
             ]:
                 if os.path.isfile(cand):
                     with open(cand, "r", encoding="utf-8", errors="ignore") as f:
                         return f.read()
-            return f"No log found on device."
+            return f"No {log_filename} found on device."
+
+        if self.wifi_url:
+            def _fetch_wifi_log():
+                endpoint = "/log-previous" if previous else "/log"
+                raw = self._wifi_get_bytes(endpoint, timeout=15.0)
+                return raw.decode("utf-8", errors="ignore")
+
+            try:
+                return await asyncio.to_thread(_fetch_wifi_log)
+            except Exception as e:
+                return f"Error retrieving {log_filename} over Wi-Fi: {e}"
 
         if not self.house_arrest:
             return "AFC not available."
 
         try:
             for candidate in [
-                "/Documents/.config/StardewValley/ErrorLogs/SMAPI-latest.txt",
-                "/Documents/ErrorLogs/SMAPI-latest.txt",
-                "/Documents/ErrorLogs/engine-latest.log",
+                f"/Documents/.config/StardewValley/ErrorLogs/{log_filename}",
+                f"/Documents/ErrorLogs/{log_filename}",
+                f"/Documents/ErrorLogs/{engine_filename}",
             ]:
                 if await self.house_arrest.exists(candidate):
                     raw = await self.house_arrest.get_file_contents(candidate)
                     return raw.decode("utf-8", errors="ignore")
-            return "No SMAPI log found on device in /Documents/ErrorLogs/ or /Documents/.config/StardewValley/ErrorLogs/."
+            return f"No {log_filename} found on device in /Documents/ErrorLogs/ or /Documents/.config/StardewValley/ErrorLogs/."
         except Exception as e:
             return f"Error retrieving SMAPI log: {e}"
 
@@ -718,6 +900,29 @@ class IOSModBackend:
                 pass
 
             return sorted(list(self._save_locations.keys()))
+
+        if self.wifi_url:
+            def _wifi_list_saves():
+                for rel_folder in [".config/StardewValley/Saves", "Saves", "StardewValley/Saves"]:
+                    try:
+                        listing = self._wifi_get_json(f"/api/list?dir={urllib.parse.quote(rel_folder)}")
+                        for item in listing.get("entries", []):
+                            if not item.get("is_dir"):
+                                continue
+                            entry = item.get("name", "")
+                            if entry in [".", "..", ".DS_Store", "ErrorLogs", "Content", "Mods", ".smapi", ".Trash"]:
+                                continue
+                            if entry not in self._save_locations:
+                                self._save_locations[entry] = f"{rel_folder}/{entry}"
+                    except Exception:
+                        pass
+                return sorted(list(self._save_locations.keys()))
+
+            try:
+                return await asyncio.to_thread(_wifi_list_saves)
+            except Exception as e:
+                print(f"[Backend] Error listing saves over Wi-Fi: {e}")
+                return []
 
         if not self.house_arrest:
             return []
@@ -797,6 +1002,23 @@ class IOSModBackend:
                     return False, f"Save directory '{save_name}' not found."
 
                 shutil.copytree(src, os.path.join(temp_dir, save_name))
+            elif self.wifi_url:
+                def _wifi_backup():
+                    rel_src = self._save_locations.get(save_name, f".config/StardewValley/Saves/{save_name}").lstrip("/")
+                    if rel_src.startswith("Documents/"):
+                        rel_src = rel_src[len("Documents/"):]
+                    listing = self._wifi_get_json(f"/api/list?dir={urllib.parse.quote(rel_src)}")
+                    save_dst = os.path.join(temp_dir, save_name)
+                    os.makedirs(save_dst, exist_ok=True)
+                    for item in listing.get("entries", []):
+                        if item.get("is_dir"):
+                            continue
+                        fname = item.get("name", "")
+                        raw = self._wifi_get_bytes(f"/download?path={urllib.parse.quote(f'{rel_src}/{fname}')}", timeout=30.0)
+                        with open(os.path.join(save_dst, fname), "wb") as f_out:
+                            f_out.write(raw)
+
+                await asyncio.to_thread(_wifi_backup)
             else:
                 remote_src = self._save_locations.get(save_name)
                 if not remote_src:
@@ -872,6 +1094,24 @@ class IOSModBackend:
                     if os.path.exists(alt_dir):
                         shutil.rmtree(alt_dir)
                     shutil.copytree(extracted_folder, alt_dir)
+            elif self.wifi_url:
+                def _wifi_import():
+                    zip_tmp = os.path.join(temp_dir, f"_wifi_save_{save_name}.zip")
+                    with zipfile.ZipFile(zip_tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for r, _, fls in os.walk(extracted_folder):
+                            for fl in fls:
+                                full_f = os.path.join(r, fl)
+                                rel_f = os.path.join(save_name, os.path.relpath(full_f, extracted_folder))
+                                zf.write(full_f, rel_f)
+                    with open(zip_tmp, "rb") as z_in:
+                        payload = z_in.read()
+                    for dest_rel in [".config/StardewValley/Saves", "Saves"]:
+                        try:
+                            self._wifi_post(f"/api/upload-zip?dest={urllib.parse.quote(dest_rel)}", payload, timeout=60.0)
+                        except Exception:
+                            pass
+
+                await asyncio.to_thread(_wifi_import)
             else:
                 # iOS device over AFC
                 dest_config = f"/Documents/.config/StardewValley/Saves"

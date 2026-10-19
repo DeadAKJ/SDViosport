@@ -246,7 +246,7 @@ namespace SDViOS.Input
                 _selectedProp?.SetValue(subscriber, false);
 
                 // 3. Reset SimulatedMouse position so TextBox.Update doesn't re-select it immediately
-                TouchVirtualPad.Instance.ResetSimulatedMouse();
+                ResetAllSimulatedMice();
 
                 // 4. Detach subscriber from keyboardDispatcher
                 if (_keyboardDispatcherInstance != null && _subscriberProp != null)
@@ -284,7 +284,7 @@ namespace SDViOS.Input
                 {
                     _selectedProp.SetValue(subscriber, false);
                 }
-                TouchVirtualPad.Instance.ResetSimulatedMouse();
+                ResetAllSimulatedMice();
                 if (_keyboardDispatcherInstance != null && _subscriberProp != null)
                 {
                     _subscriberProp.SetValue(_keyboardDispatcherInstance, null);
@@ -296,6 +296,25 @@ namespace SDViOS.Input
                 _isKeyboardActive = false;
                 _activeSubscriber = null;
             }
+        }
+
+        private static void ResetAllSimulatedMice()
+        {
+            try { TouchVirtualPad.Instance.ResetSimulatedMouse(); } catch { }
+            try
+            {
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (asm.GetName().Name == "SDViOSTouchControls")
+                    {
+                        var modTvp = asm.GetType("SDViOSTouchControls.TouchVirtualPad");
+                        var inst = modTvp?.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                        modTvp?.GetMethod("ResetSimulatedMouse", BindingFlags.Public | BindingFlags.Instance)?.Invoke(inst, null);
+                        break;
+                    }
+                }
+            }
+            catch { }
         }
 
         private static DateTime _lastReflectionAttempt = DateTime.MinValue;

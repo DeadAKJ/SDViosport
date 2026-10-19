@@ -119,6 +119,7 @@ namespace SDViOS.Loader
         public static string LogsDir { get; private set; } = string.Empty;
         public static string BundleDir { get; private set; } = string.Empty;
         public static object? SMAPICoreInstance { get; set; }
+        public static bool DisableBuiltInTouchInput { get; set; }
         private static CoreAnimation.CADisplayLink? _engineDisplayLink;
         private static int _tickLogCount = 0;
         private static UIView? _activeGameView;
@@ -126,11 +127,16 @@ namespace SDViOS.Loader
         private static MethodInfo? _makeCurrentMethod;
         private static MethodInfo? _presentMethod;
         private static MethodInfo? _threadingRunMethod;
+        private static MethodInfo? _platformTickMethod;
+        private static FieldInfo? _runnerIsActiveField;
+        private static FieldInfo? _gameRunnerInstanceField;
+        private static FieldInfo? _gameRunnerInstancesListField;
         private static int _directTickCount = 0;
         private static FieldInfo? _game1TicksField;
         private static bool _windowSizeSynchronized = false;
         private static bool _menuLayoutSynchronized = false;
         private static bool _touchOverlayAttached = false;
+        private static bool _viewHierarchyAudited = false;
 
         public static void InitializeFileSystem()
         {
@@ -232,33 +238,41 @@ namespace SDViOS.Loader
                 Directory.CreateDirectory(targetDir);
 
                 string targetDll = Path.Combine(targetDir, "SDViOSTouchControls.dll");
+                string targetModDll = Path.Combine(targetDir, "SDViOSTouchControlsMod.dll");
                 string targetManifest = Path.Combine(targetDir, "manifest.json");
+                string hashMarkerFile = Path.Combine(targetDir, ".embedded_sha256");
 
+                bool needDeploy = !File.Exists(targetDll) || !File.Exists(targetModDll);
                 var currentAsm = Assembly.GetExecutingAssembly();
                 using (var dllStream = currentAsm.GetManifestResourceStream("SDViOS.Resources.Mods.SDViOSTouchControls.SDViOSTouchControls.dll"))
                 {
                     if (dllStream != null)
                     {
-                        bool needDeploy = !File.Exists(targetDll) || new FileInfo(targetDll).Length != dllStream.Length;
+                        using var ms = new MemoryStream();
+                        dllStream.CopyTo(ms);
+                        byte[] dllBytes = ms.ToArray();
+                        string embeddedHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(dllBytes));
+                        string prevEmbeddedHash = File.Exists(hashMarkerFile) ? File.ReadAllText(hashMarkerFile).Trim() : "";
+
+                        // Deploy if target DLL is missing OR the IPA's embedded resource hash changed (new IPA build installed)
+                        needDeploy = needDeploy || !string.Equals(embeddedHash, prevEmbeddedHash, StringComparison.OrdinalIgnoreCase);
                         if (needDeploy)
                         {
-                            using var fs = new FileStream(targetDll, FileMode.Create, FileAccess.Write, FileShare.None);
-                            dllStream.CopyTo(fs);
-                            EngineLogger.Log("[GameHost] Deployed embedded SDViOSTouchControls.dll to Documents/Mods.");
+                            File.WriteAllBytes(targetDll, dllBytes);
+                            File.WriteAllBytes(targetModDll, dllBytes);
+                            File.WriteAllText(hashMarkerFile, embeddedHash);
+                            EngineLogger.Log($"[GameHost] Deployed embedded SDViOSTouchControls ({dllBytes.Length} bytes, sha256={embeddedHash[..12]}).");
                         }
                     }
                 }
 
                 using (var mfStream = currentAsm.GetManifestResourceStream("SDViOS.Resources.Mods.SDViOSTouchControls.manifest.json"))
                 {
-                    if (mfStream != null)
+                    if (mfStream != null && (needDeploy || !File.Exists(targetManifest)))
                     {
-                        if (!File.Exists(targetManifest))
-                        {
-                            using var fs = new FileStream(targetManifest, FileMode.Create, FileAccess.Write, FileShare.None);
-                            mfStream.CopyTo(fs);
-                            EngineLogger.Log("[GameHost] Deployed embedded manifest.json to Documents/Mods.");
-                        }
+                        using var fs = new FileStream(targetManifest, FileMode.Create, FileAccess.Write, FileShare.None);
+                        mfStream.CopyTo(fs);
+                        EngineLogger.Log("[GameHost] Deployed manifest.json to Documents/Mods/SDViOSTouchControls.");
                     }
                 }
             }
@@ -795,8 +809,14 @@ namespace SDViOS.Loader
                         }
                     }
 
+                    DisableBuiltInTouchInput = !string.IsNullOrEmpty(ModsDir) &&
+                        File.Exists(Path.Combine(ModsDir, "SDViOSTouchControls", "SDViOSTouchControls.dll"));
+
                     LinkGameWindowToScene();
-                    AttachTouchOverlayToGameRunner();
+                    if (!DisableBuiltInTouchInput)
+                    {
+                        AttachTouchOverlayToGameRunner();
+                    }
                     UIApplication.SharedApplication.BeginInvokeOnMainThread(LinkGameWindowToScene);
                     NSTimer.CreateScheduledTimer(0.25, false, _ => LinkGameWindowToScene());
                     NSTimer.CreateScheduledTimer(1.0, false, _ => LinkGameWindowToScene());
@@ -1282,21 +1302,27 @@ namespace SDViOS.Loader
                             catch { }
                         }
 
-                        // Notify DidMoveToWindow so MonoGame initializes scale and context
-                        var didMoveMethod = _activeGameView.GetType().GetMethod("DidMoveToWindow", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                        didMoveMethod?.Invoke(_activeGameView, null);
-
-                        // Explicitly recreate / allocate framebuffer with the active landscape frame
-                        var destroyFbMethod = _activeGameView.GetType().GetMethod("DestroyFramebuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                        var createFbMethod = _activeGameView.GetType().GetMethod("CreateFramebuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                        destroyFbMethod?.Invoke(_activeGameView, null);
-                        createFbMethod?.Invoke(_activeGameView, null);
-
                         var fbField = _activeGameView.GetType().GetField("_framebuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
                         var cbField = _activeGameView.GetType().GetField("_colorbuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                        var fbId = fbField?.GetValue(_activeGameView);
-                        var cbId = cbField?.GetValue(_activeGameView);
-                        EngineLogger.Log($"[GameHost] _activeGameView Framebuffer: _framebuffer={fbId}, _colorbuffer={cbId}, Layer.Bounds={_activeGameView.Layer.Bounds.Width}x{_activeGameView.Layer.Bounds.Height}, Superview={_activeGameView.Superview?.GetType().Name}, Window={_activeGameView.Window != null}");
+                        int existingFb = Convert.ToInt32(fbField?.GetValue(_activeGameView) ?? 0);
+                        bool boundsLandscape = _activeGameView.Layer.Bounds.Width > _activeGameView.Layer.Bounds.Height && _activeGameView.Layer.Bounds.Width > 0;
+
+                        if (existingFb == 0 || !boundsLandscape)
+                        {
+                            // Notify DidMoveToWindow so MonoGame initializes scale and context
+                            var didMoveMethod = _activeGameView.GetType().GetMethod("DidMoveToWindow", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            didMoveMethod?.Invoke(_activeGameView, null);
+
+                            // Explicitly recreate / allocate framebuffer with the active landscape frame
+                            var destroyFbMethod = _activeGameView.GetType().GetMethod("DestroyFramebuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            var createFbMethod = _activeGameView.GetType().GetMethod("CreateFramebuffer", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            destroyFbMethod?.Invoke(_activeGameView, null);
+                            createFbMethod?.Invoke(_activeGameView, null);
+
+                            var fbId = fbField?.GetValue(_activeGameView);
+                            var cbId = cbField?.GetValue(_activeGameView);
+                            EngineLogger.Log($"[GameHost] _activeGameView Framebuffer allocated: _framebuffer={fbId}, _colorbuffer={cbId}, Layer.Bounds={_activeGameView.Layer.Bounds.Width}x{_activeGameView.Layer.Bounds.Height}, Superview={_activeGameView.Superview?.GetType().Name}, Window={_activeGameView.Window != null}");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -1324,7 +1350,6 @@ namespace SDViOS.Loader
                             if (gf != null)
                             {
                                 gf.SetValue(plat, targetGame);
-                                EngineLogger.Log($"[GameHost] Set {t.Name}.<Game> = targetGame ({targetGame.GetType().FullName})");
                             }
                         }
                     }
@@ -1333,22 +1358,14 @@ namespace SDViOS.Loader
                     for (Type? t = plat.GetType(); t != null; t = t.BaseType)
                     {
                         var dispF = t.GetField("disposed", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                        if (dispF != null)
-                        {
-                            dispF.SetValue(plat, false);
-                            EngineLogger.Log($"[GameHost] Reset {t.Name}.disposed = false on platform");
-                        }
+                        dispF?.SetValue(plat, false);
                     }
 
                     // Set _isActive = true on GamePlatform
                     for (Type? t = plat.GetType(); t != null; t = t.BaseType)
                     {
                         var actField = t.GetField("_isActive", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                        if (actField != null)
-                        {
-                            actField.SetValue(plat, true);
-                            EngineLogger.Log($"[GameHost] Set {t.Name}._isActive = true on platform");
-                        }
+                        actField?.SetValue(plat, true);
                     }
 
                     // Synchronize iOSGameWindow._viewController if present
@@ -1396,15 +1413,10 @@ namespace SDViOS.Loader
                         if (pf != null && plat != null)
                         {
                             pf.SetValue(g, plat);
-                            EngineLogger.Log($"[GameHost] Successfully assigned {t.Name}.Platform = plat on {g.GetType().Name}");
                         }
 
                         var dispF = t.GetField("_isDisposed", BindingFlags.NonPublic | BindingFlags.Instance);
-                        if (dispF != null)
-                        {
-                            dispF.SetValue(g, false);
-                            EngineLogger.Log($"[GameHost] Reset {t.Name}._isDisposed = false on {g.GetType().Name}");
-                        }
+                        dispF?.SetValue(g, false);
                     }
 
                     // Also ensure Game._instance is set
@@ -1414,10 +1426,6 @@ namespace SDViOS.Loader
                         instField?.SetValue(null, g);
                     }
                     catch { }
-
-                    bool act = false;
-                    try { act = g.IsActive; } catch (Exception ex) { EngineLogger.LogWarning($"[GameHost] {g.GetType().Name}.IsActive threw: {ex.Message}"); }
-                    EngineLogger.Log($"[GameHost] Check: {g.GetType().Name}.IsActive = {act}");
                 }
 
                 // 6. Create modern CADisplayLink driving game tick & direct render pipeline
@@ -1426,7 +1434,6 @@ namespace SDViOS.Loader
                     EngineLogger.Log("[GameHost] Creating modern CADisplayLink for game tick pipeline...");
                     _engineDisplayLink = CoreAnimation.CADisplayLink.Create(() =>
                     {
-                        ReviveSMAPILogFile(SMAPICoreInstance);
                         ExecuteDirectGameTick(runner, plat, _activeGameView);
                     });
                     try { _engineDisplayLink.PreferredFramesPerSecond = 60; } catch { }
@@ -1456,16 +1463,18 @@ namespace SDViOS.Loader
                     {
                         window.SetNeedsLayout();
                         window.LayoutIfNeeded();
-                        EngineLogger.Log($"[GameHost] === Window View Hierarchy Audit (Bounds={window.Bounds}, Frame={window.Frame}, Key={window.IsKeyWindow}) ===");
-                        LogViewHierarchy(window, 0);
-                        EngineLogger.Log("[GameHost] ===================================================================");
+                        if (!_viewHierarchyAudited)
+                        {
+                            _viewHierarchyAudited = true;
+                            EngineLogger.Log($"[GameHost] === Window View Hierarchy Audit (Bounds={window.Bounds}, Frame={window.Frame}, Key={window.IsKeyWindow}) ===");
+                            LogViewHierarchy(window, 0);
+                            EngineLogger.Log("[GameHost] ===================================================================");
+                        }
                     }
                     catch (Exception ex)
                     {
                         EngineLogger.LogWarning($"[GameHost] LayoutSubviews / Hierarchy Audit error: {ex.Message}");
                     }
-
-                    EngineLogger.Log($"[GameHost] Window: Bounds={window.Bounds}, Frame={window.Frame}, Hidden={window.Hidden}, Key={window.IsKeyWindow}");
                 }
 
                 try
@@ -1512,26 +1521,63 @@ namespace SDViOS.Loader
             }
         }
 
+        public static void OnDidEnterBackground()
+        {
+            try
+            {
+                if (_engineDisplayLink != null)
+                {
+                    _engineDisplayLink.Paused = true;
+                }
+                EngineLogger.Flush();
+            }
+            catch { }
+        }
+
+        public static void OnWillEnterForeground()
+        {
+            try
+            {
+                if (_engineDisplayLink != null)
+                {
+                    _engineDisplayLink.Paused = false;
+                }
+                ReviveSMAPILogFile(SMAPICoreInstance);
+                LinkGameWindowToScene();
+            }
+            catch { }
+        }
+
         private static object? GetPrimaryGame1Instance()
         {
             try
             {
-                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                if (_gameRunnerInstanceField == null)
                 {
-                    var runnerType = asm.GetType("StardewValley.GameRunner");
-                    if (runnerType != null)
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                     {
-                        var instanceField = runnerType.GetField("instance", BindingFlags.Static | BindingFlags.Public);
-                        var runner = instanceField?.GetValue(null);
-                        if (runner != null)
+                        var runnerType = asm.GetType("StardewValley.GameRunner");
+                        if (runnerType != null)
                         {
-                            var instField = runner.GetType().GetField("gameInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-                                         ?? runner.GetType().BaseType?.GetField("gameInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                            if (instField?.GetValue(runner) is System.Collections.IList list && list.Count > 0)
-                            {
-                                return list[0];
-                            }
+                            _gameRunnerInstanceField = runnerType.GetField("instance", BindingFlags.Static | BindingFlags.Public);
+                            _gameRunnerInstancesListField = runnerType.GetField("gameInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                                         ?? runnerType.BaseType?.GetField("gameInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            break;
                         }
+                    }
+                }
+
+                var runner = _gameRunnerInstanceField?.GetValue(null);
+                if (runner != null)
+                {
+                    if (_gameRunnerInstancesListField == null)
+                    {
+                        _gameRunnerInstancesListField = runner.GetType().GetField("gameInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                                     ?? runner.GetType().BaseType?.GetField("gameInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    }
+                    if (_gameRunnerInstancesListField?.GetValue(runner) is System.Collections.IList list && list.Count > 0)
+                    {
+                        return list[0];
                     }
                 }
             }
@@ -1625,14 +1671,22 @@ namespace SDViOS.Loader
             {
                 if (runner == null) return;
 
-                // 1. Ensure runner is marked active
+                // 1. Ensure runner is marked active (cached reflection)
                 if (!runner.IsActive)
                 {
-                    for (Type? t = runner.GetType(); t != null; t = t.BaseType)
+                    if (_runnerIsActiveField == null)
                     {
-                        var actField = t.GetField("_isActive", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                        actField?.SetValue(runner, true);
+                        for (Type? t = runner.GetType(); t != null; t = t.BaseType)
+                        {
+                            var actField = t.GetField("_isActive", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
+                            if (actField != null)
+                            {
+                                _runnerIsActiveField = actField;
+                                break;
+                            }
+                        }
                     }
+                    _runnerIsActiveField?.SetValue(runner, true);
                 }
 
                 // If gameView is null, look for it in key window
@@ -1659,13 +1713,16 @@ namespace SDViOS.Loader
                     ReviveGraphicsDeviceAndInstances(runner, plat, null, gameView);
                 }
 
-                // Ensure TouchOverlay is attached and input forwarded every frame
-                if (!_touchOverlayAttached)
+                // Built-in TouchOverlay is only needed when SMAPI SDViOSTouchControls mod is not active
+                if (!DisableBuiltInTouchInput)
                 {
-                    AttachTouchOverlayToGameRunner();
-                    _touchOverlayAttached = true;
+                    if (!_touchOverlayAttached)
+                    {
+                        AttachTouchOverlayToGameRunner();
+                        _touchOverlayAttached = true;
+                    }
+                    TouchVirtualPad.Instance.ForwardInputToGame();
                 }
-                TouchVirtualPad.Instance.ForwardInputToGame();
                 VirtualKeyboardManager.Update();
 
                 // 2. Introspect gameView and game state on tick 0
@@ -1689,22 +1746,25 @@ namespace SDViOS.Loader
                 bool makeCurrentSuccess = false;
                 if (gameView != null && gameView.Handle != IntPtr.Zero)
                 {
-                    var kw = UIApplication.SharedApplication.KeyWindow ?? UIApplication.SharedApplication.Windows.FirstOrDefault(w => w != null);
-                    if (gameView.Window == null && kw != null)
+                    if (gameView.Window == null)
                     {
-                        var targetParent = kw.RootViewController?.View ?? kw;
-                        if (targetParent != null && targetParent != gameView && targetParent.Handle != gameView.Handle)
+                        var kw = UIApplication.SharedApplication.KeyWindow ?? UIApplication.SharedApplication.Windows.FirstOrDefault(w => w != null);
+                        if (kw != null)
                         {
-                            if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Direct tick: gameView detached from window! Re-attaching to targetParent...");
-                            gameView.RemoveFromSuperview();
-                            targetParent.AddSubview(gameView);
-                            targetParent.BringSubviewToFront(gameView);
-                        }
-                        else if (gameView.Superview == null)
-                        {
-                            if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Direct tick: gameView has no superview! Adding directly to key window...");
-                            kw.AddSubview(gameView);
-                            kw.BringSubviewToFront(gameView);
+                            var targetParent = kw.RootViewController?.View ?? kw;
+                            if (targetParent != null && targetParent != gameView && targetParent.Handle != gameView.Handle)
+                            {
+                                if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Direct tick: gameView detached from window! Re-attaching to targetParent...");
+                                gameView.RemoveFromSuperview();
+                                targetParent.AddSubview(gameView);
+                                targetParent.BringSubviewToFront(gameView);
+                            }
+                            else if (gameView.Superview == null)
+                            {
+                                if (_directTickCount < 5) EngineLogger.LogWarning("[GameHost] Direct tick: gameView has no superview! Adding directly to key window...");
+                                kw.AddSubview(gameView);
+                                kw.BringSubviewToFront(gameView);
+                            }
                         }
                     }
 
@@ -1724,17 +1784,24 @@ namespace SDViOS.Loader
                 }
 
                 // 4. Tick Game (SMAPI + Stardew Valley Update & Draw)
-                ReviveSMAPILogFile(SMAPICoreInstance);
+                if (_directTickCount == 0 || _directTickCount % 120 == 0)
+                {
+                    ReviveSMAPILogFile(SMAPICoreInstance);
+                }
+
                 int ticksBefore = GetGame1Ticks();
                 bool platTickRan = false;
                 try
                 {
                     if (plat != null)
                     {
-                        var tickMethod = plat.GetType().GetMethod("Tick", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                        if (tickMethod != null)
+                        if (_platformTickMethod == null)
                         {
-                            tickMethod.Invoke(plat, null);
+                            _platformTickMethod = plat.GetType().GetMethod("Tick", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        }
+                        if (_platformTickMethod != null)
+                        {
+                            _platformTickMethod.Invoke(plat, null);
                             platTickRan = true;
                         }
                     }
@@ -1758,7 +1825,6 @@ namespace SDViOS.Loader
                         if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] runner.Tick error: {ex.InnerException ?? ex}");
                     }
                 }
-                int finalTicks = GetGame1Ticks();
 
                 // 5. Threading.Run
                 if (_threadingRunMethod == null)
@@ -1787,34 +1853,39 @@ namespace SDViOS.Loader
                     }
                 }
 
-                // 7. Present cleanly (MonoGame GraphicsDevice.Present calls iOSGameView.Present -> SwapBuffers)
-                bool gdPresentSuccess = false;
-                try
+                // 7. Present cleanly: plat.Tick() and runner.Tick() already call EndDraw() -> GraphicsDevice.Present().
+                // Only invoke manual Present() when diagnostic clear ran or when neither tick method presented.
+                bool gdPresentSuccess = platTickRan || runnerTickRan;
+                if (_directTickCount < 2 || (!platTickRan && !runnerTickRan))
                 {
-                    if (runner.GraphicsDevice != null)
+                    try
                     {
-                        runner.GraphicsDevice.Present();
-                        gdPresentSuccess = true;
-                    }
-                    else if (gameView != null && gameView.Handle != IntPtr.Zero)
-                    {
-                        if (_presentMethod == null)
+                        if (runner.GraphicsDevice != null)
                         {
-                            _presentMethod = gameView.GetType().GetMethod("Present", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
-                                          ?? gameView.GetType().GetMethod("SwapBuffers", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            runner.GraphicsDevice.Present();
+                            gdPresentSuccess = true;
                         }
-                        _presentMethod?.Invoke(gameView, null);
-                        gdPresentSuccess = true;
+                        else if (gameView != null && gameView.Handle != IntPtr.Zero)
+                        {
+                            if (_presentMethod == null)
+                            {
+                                _presentMethod = gameView.GetType().GetMethod("Present", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                                              ?? gameView.GetType().GetMethod("SwapBuffers", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            }
+                            _presentMethod?.Invoke(gameView, null);
+                            gdPresentSuccess = true;
+                        }
                     }
-                }
-                catch (Exception ex)
-                {
-                    if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Presentation error: {ex.Message}");
+                    catch (Exception ex)
+                    {
+                        if (_directTickCount < 5) EngineLogger.LogWarning($"[GameHost] Presentation error: {ex.Message}");
+                    }
                 }
 
-                if (_directTickCount < 10)
+                _directTickCount++;
+                if (_directTickCount <= 10)
                 {
-                    _directTickCount++;
+                    int finalTicks = GetGame1Ticks();
                     EngineLogger.Log($"[GameHost] Frame #{_directTickCount}: MC={makeCurrentSuccess}, DiagClear={diagClearSuccess}, PlatTick={platTickRan}, RunnerTick={runnerTickRan}, G1.ticks={finalTicks}, Present={gdPresentSuccess}, GD={runner.GraphicsDevice != null}, View={gameView != null}");
                 }
             }

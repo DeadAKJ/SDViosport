@@ -6,28 +6,39 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <GameFilesDir Condition="'$(GameFilesDir)' == '' and Exists('$(MSBuildThisFileDirectory)..\..\..\Game_Files')">$(MSBuildThisFileDirectory)..\..\..\Game_Files</GameFilesDir>
+    <GameFilesDir Condition="'$(GameFilesDir)' == ''">C:\Users\User\Desktop\SDVport Version\Game_Files</GameFilesDir>
   </PropertyGroup>
 
   <ItemGroup>
     <Reference Include="MonoGame.Framework">
-      <HintPath>C:\Users\User\Documents\GitHub\SDVios\lib\MonoGame.Framework.dll</HintPath>
+      <HintPath>$(MSBuildThisFileDirectory)..\..\..\lib\MonoGame.Framework.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="StardewModdingAPI">
-      <HintPath>C:\Users\User\Desktop\SDVport Version\Game_Files\StardewModdingAPI.dll</HintPath>
+      <HintPath>$(GameFilesDir)\StardewModdingAPI.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="Stardew Valley">
-      <HintPath>C:\Users\User\Desktop\SDVport Version\Game_Files\Stardew Valley.dll</HintPath>
+      <HintPath>$(GameFilesDir)\Stardew Valley.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>C:\Users\User\Desktop\SDVport Version\Game_Files\smapi-internal\0Harmony.dll</HintPath>
+      <HintPath>$(GameFilesDir)\smapi-internal\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="xTile">
-      <HintPath>C:\Users\User\Desktop\SDVport Version\Game_Files\xTile.dll</HintPath>
+      <HintPath>$(GameFilesDir)\xTile.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
+
+  <Target Name="SyncEmbeddedModResources" AfterTargets="Build">
+    <PropertyGroup>
+      <EmbeddedModDir>$(MSBuildThisFileDirectory)..\..\SDViOS\Resources\Mods\SDViOSTouchControls</EmbeddedModDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(EmbeddedModDir)" Condition="!Exists('$(EmbeddedModDir)')" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(EmbeddedModDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)manifest.json" DestinationFolder="$(EmbeddedModDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

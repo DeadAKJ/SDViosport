@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
     QHeaderView, QFileDialog, QMessageBox, QLineEdit, QTextEdit,
     QProgressBar, QFrame, QSplitter, QCheckBox, QAbstractItemView,
-    QDialog, QComboBox
+    QDialog, QComboBox, QInputDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QUrl
 from PyQt6.QtGui import QColor, QFont, QIcon, QDragEnterEvent, QDropEvent, QTextCursor, QDesktopServices
@@ -1739,6 +1739,12 @@ class ModManagerWindow(QMainWindow):
         self.btn_refresh_dev.clicked.connect(self._auto_connect_usb)
         h_layout.addWidget(self.btn_refresh_dev)
 
+        self.btn_connect_wifi = QPushButton("📡 Connect Wi-Fi")
+        self.btn_connect_wifi.setObjectName("SecondaryBtn")
+        self.btn_connect_wifi.setToolTip("Connect wirelessly to the SDViOS Remote Debug Server on port 8080")
+        self.btn_connect_wifi.clicked.connect(self._connect_wifi_dialog)
+        h_layout.addWidget(self.btn_connect_wifi)
+
         self.btn_local_folder = QPushButton("📁 Local Folder")
         self.btn_local_folder.setObjectName("SecondaryBtn")
         self.btn_local_folder.clicked.connect(self._select_local_folder)
@@ -1796,7 +1802,7 @@ class ModManagerWindow(QMainWindow):
         elif current_widget == self.tab_info:
             self._update_diagnostics()
         elif current_widget == self.tab_logs:
-            self._fetch_log()
+            self._fetch_smapi_log()
         elif current_widget == self.tab_mods:
             self._refresh_mods()
 
@@ -2539,8 +2545,14 @@ class ModManagerWindow(QMainWindow):
 
         toolbar = QHBoxLayout()
         self.btn_fetch_log = QPushButton("⟳ Fetch Latest SMAPI Log")
-        self.btn_fetch_log.clicked.connect(self._fetch_smapi_log)
+        self.btn_fetch_log.clicked.connect(lambda: self._fetch_smapi_log(previous=False))
         toolbar.addWidget(self.btn_fetch_log)
+
+        self.btn_fetch_prev_log = QPushButton("📜 Fetch Previous Crash Log")
+        self.btn_fetch_prev_log.setObjectName("SecondaryBtn")
+        self.btn_fetch_prev_log.setToolTip("Fetch SMAPI-previous.txt preserved before the last restart or crash")
+        self.btn_fetch_prev_log.clicked.connect(lambda: self._fetch_smapi_log(previous=True))
+        toolbar.addWidget(self.btn_fetch_prev_log)
 
         self.btn_copy_log = QPushButton("📋 Copy to Clipboard")
         self.btn_copy_log.setObjectName("SecondaryBtn")
@@ -2557,7 +2569,7 @@ class ModManagerWindow(QMainWindow):
 
         self.log_viewer = QTextEdit()
         self.log_viewer.setReadOnly(True)
-        self.log_viewer.setPlaceholderText("Click 'Fetch Latest SMAPI Log' to stream logs directly from your iPhone over USB...")
+        self.log_viewer.setPlaceholderText("Click 'Fetch Latest SMAPI Log' or 'Fetch Previous Crash Log' to stream logs from your iPhone over USB or Wi-Fi...")
         layout.addWidget(self.log_viewer)
 
     def _on_smapi_log_received(self, text: str):
@@ -2570,14 +2582,15 @@ class ModManagerWindow(QMainWindow):
             vsb.setValue(vsb.maximum())
         self.status_bar.setText(" SMAPI log fetched from device (scrolled to bottom).")
 
-    def _fetch_smapi_log(self):
+    def _fetch_smapi_log(self, previous: bool = False):
         if not self.backend.is_connected:
             QMessageBox.warning(self, "Not Connected", "Please connect your device first.")
             return
 
-        self.status_bar.setText(" Fetching SMAPI log from device...")
+        label = "previous crash" if previous else "latest SMAPI"
+        self.status_bar.setText(f" Fetching {label} log from device...")
         self.dispatcher.run_async(
-            self.backend.get_smapi_log(),
+            self.backend.get_smapi_log(previous=previous),
             on_success=self._on_smapi_log_received,
             on_error=lambda e: self.log_viewer.setPlainText(f"Error fetching log: {e}")
         )
@@ -2732,7 +2745,10 @@ class ModManagerWindow(QMainWindow):
     def _update_diagnostics(self):
         lines = []
         lines.append("=== STARDEW VALLEY iOS DEVICE DIAGNOSTICS ===")
-        lines.append(f"Connection Type: {'Local Folder' if self.backend.local_mode_dir else 'USB (Apple AFC)'}")
+        conn_type = "Local Folder" if self.backend.local_mode_dir else ("Wi-Fi Debug Server" if self.backend.wifi_url else "USB (Apple AFC)")
+        lines.append(f"Connection Type: {conn_type}")
+        if self.backend.wifi_url:
+            lines.append(f"Wi-Fi Endpoint: {self.backend.wifi_url}")
         if self.backend.device_info:
             for k, v in self.backend.device_info.items():
                 lines.append(f"{k}: {v}")
@@ -2777,6 +2793,12 @@ class ModManagerWindow(QMainWindow):
             self._refresh_mods()
             self._refresh_saves()
         else:
+            # Automatically probe last known Wi-Fi IP if USB is not connected
+            default_ip = self.config.get("wifi_ip", "192.168.1.123")
+            w_ok, w_msg = self.backend.connect_wifi(default_ip)
+            if w_ok:
+                self._on_wifi_connected(default_ip, w_msg)
+                return
             self.device_badge.setText("🔴 No Device Connected")
             self.device_badge.setStyleSheet("background-color: #3A1E1E; color: #E74C3C; padding: 6px 14px; border-radius: 14px; font-weight: bold; font-size: 12px;")
             self.status_bar.setText(f" Connection failed: {msg}")
@@ -2785,6 +2807,49 @@ class ModManagerWindow(QMainWindow):
         self.device_badge.setText("🔴 USB Error")
         self.device_badge.setStyleSheet("background-color: #3A1E1E; color: #E74C3C; padding: 6px 14px; border-radius: 14px; font-weight: bold; font-size: 12px;")
         self.status_bar.setText(f" USB Error: {err}")
+
+    def _connect_wifi_dialog(self):
+        default_ip = self.config.get("wifi_ip", "192.168.1.123:8080")
+        ip_str, ok = QInputDialog.getText(
+            self,
+            "Connect to iPhone over Wi-Fi",
+            "Enter the iPhone IP address (shown in SDViOS logs or router, default port 8080):\nMake sure Stardew Valley is open on your iPhone.",
+            QLineEdit.EchoMode.Normal,
+            default_ip
+        )
+        if not ok or not ip_str.strip():
+            return
+
+        ip_clean = ip_str.strip()
+        self.device_badge.setText(f"📡 Connecting to {ip_clean}...")
+        self.device_badge.setStyleSheet("background-color: #2D303E; color: #DA7C21; padding: 6px 14px; border-radius: 14px; font-weight: bold; font-size: 12px;")
+        self.status_bar.setText(f" Connecting wirelessly to {ip_clean}...")
+
+        def _try_wifi():
+            return self.backend.connect_wifi(ip_clean)
+
+        def _done(res):
+            w_ok, w_msg = res
+            if w_ok:
+                self.config["wifi_ip"] = ip_clean
+                save_config(self.config)
+                self._on_wifi_connected(ip_clean, w_msg)
+            else:
+                self.device_badge.setText("🔴 Wi-Fi Failed")
+                self.device_badge.setStyleSheet("background-color: #3A1E1E; color: #E74C3C; padding: 6px 14px; border-radius: 14px; font-weight: bold; font-size: 12px;")
+                self.status_bar.setText(f" {w_msg}")
+                QMessageBox.warning(self, "Wi-Fi Connection Failed", w_msg)
+
+        self.dispatcher.run_async(asyncio.to_thread(_try_wifi), on_success=_done, on_error=lambda e: QMessageBox.warning(self, "Wi-Fi Error", str(e)))
+
+    def _on_wifi_connected(self, ip_label: str, msg: str):
+        headroom = self.backend.device_info.get("ProductType", "")
+        self.device_badge.setText(f"📡 Wi-Fi: {ip_label} ({headroom})")
+        self.device_badge.setStyleSheet("background-color: #1A3A28; color: #2ECC71; padding: 6px 14px; border-radius: 14px; font-weight: bold; font-size: 12px;")
+        self.status_bar.setText(f" {msg}")
+        self._update_diagnostics()
+        self._refresh_mods()
+        self._refresh_saves()
 
     def _select_local_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Stardew Valley App Documents / Mods Folder")

@@ -25,7 +25,15 @@ namespace SDViOSTouchControls
         private static int _assetEventCount = 0;
 
         public static IMonitor? ModMonitor { get; private set; }
+        public static bool VerboseInputLogging { get; set; } = false;
         private static IClickableMenu? _lastTickMenu = null;
+
+        // Thread-safe status snapshot updated on the main thread for RemoteDebugServer
+        public static int CachedGameMode { get; private set; }
+        public static bool CachedWorldReady { get; private set; }
+        public static string CachedTimeString { get; private set; } = "Not loaded";
+        public static string CachedLocationName { get; private set; } = "Menu";
+        public static string CachedActiveMenuName { get; private set; } = "none";
 
         public static string GetCompactStackTrace(int skipFrames = 2, int maxFrames = 6)
         {
@@ -145,6 +153,23 @@ namespace SDViOSTouchControls
             }
         }
 
+        private void RemoveLegacyComponentsFrom(GameComponentCollection? components, string ownerName)
+        {
+            if (components == null) return;
+            for (int i = components.Count - 1; i >= 0; i--)
+            {
+                var c = components[i];
+                string? fullName = c?.GetType().FullName;
+                if (c != null && fullName != null && fullName.Contains("TouchOverlay", StringComparison.Ordinal))
+                {
+                    if (c is GameComponent gc) gc.Enabled = false;
+                    if (c is DrawableGameComponent dgc) dgc.Visible = false;
+                    components.RemoveAt(i);
+                    Monitor.Log($"[SDViOSTouchControls] Removed legacy {fullName} from {ownerName}.Components.", LogLevel.Info);
+                }
+            }
+        }
+
         private void NeutralizeOldTouchVirtualPad()
         {
             try
@@ -152,24 +177,11 @@ namespace SDViOSTouchControls
                 var sdvIosAsm = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == "SDViOS");
                 if (sdvIosAsm != null)
                 {
-                    // 1. Remove TouchOverlay from Game1.game1.Components
+                    // 1. Remove TouchOverlay from both Game1.game1.Components and GameRunner.instance.Components
                     try
                     {
-                        var game = Game1.game1;
-                        if (game != null)
-                        {
-                            for (int i = game.Components.Count - 1; i >= 0; i--)
-                            {
-                                var c = game.Components[i];
-                                if (c != null && c.GetType().FullName != null && c.GetType().FullName.Contains("TouchOverlay"))
-                                {
-                                    if (c is GameComponent gc) gc.Enabled = false;
-                                    if (c is DrawableGameComponent dgc) dgc.Visible = false;
-                                    game.Components.RemoveAt(i);
-                                    Monitor.Log($"[SDViOSTouchControls] Removed legacy {c.GetType().FullName} from Game.Components.", LogLevel.Info);
-                                }
-                            }
-                        }
+                        RemoveLegacyComponentsFrom(Game1.game1?.Components, "Game1");
+                        RemoveLegacyComponentsFrom(StardewValley.GameRunner.instance?.Components, "GameRunner");
                     }
                     catch (Exception cex)
                     {
@@ -488,6 +500,20 @@ namespace SDViOSTouchControls
                 {
                     harmony.Patch(mClientChanged, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixWindowClientSizeChanged), BindingFlags.Static | BindingFlags.NonPublic)));
                     Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.Window_ClientSizeChanged.", LogLevel.Info);
+                }
+
+                var mRunnerClientChanged = typeof(GameRunner).GetMethod("Window_ClientSizeChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance, null, new[] { typeof(object), typeof(EventArgs) }, null);
+                if (mRunnerClientChanged != null)
+                {
+                    harmony.Patch(mRunnerClientChanged, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixWindowClientSizeChanged), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched GameRunner.Window_ClientSizeChanged.", LogLevel.Info);
+                }
+
+                var mApplyChanges = gdmType.GetMethod("ApplyChanges", BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+                if (mApplyChanges != null)
+                {
+                    harmony.Patch(mApplyChanges, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixApplyChanges), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched GraphicsDeviceManager.ApplyChanges -> skip redundant calls.", LogLevel.Info);
                 }
             }
             catch (Exception ex)
@@ -815,6 +841,12 @@ namespace SDViOSTouchControls
             }
         }
 
+        private static MethodInfo? _mcmGetModFileGeneric;
+        private static MethodInfo? _mcmGetInternalAssetKey;
+        private static MethodInfo? _mcmGetContentKey;
+        private static FieldInfo? _mcmCoordinatorField;
+        private static MethodInfo? _coordParseAssetNameMethod;
+
         private static bool PrefixTryGetTilesheetAssetName(
             object __instance,
             string modRelativeMapFolder,
@@ -849,15 +881,21 @@ namespace SDViOSTouchControls
                     if (!relativePath.StartsWith("..") && !relativePath.Contains(".."))
                     {
                         string modPath = System.IO.Path.Combine(modRelativeMapFolder ?? "", relativePath);
-                        var mGetModFile = mcmType.GetMethod("GetModFile", BindingFlags.Instance | BindingFlags.NonPublic);
-                        if (mGetModFile != null)
+                        if (_mcmGetModFileGeneric == null)
                         {
-                            var mGeneric = mGetModFile.MakeGenericMethod(typeof(Texture2D));
-                            var fileInfo = mGeneric.Invoke(__instance, new object[] { modPath }) as System.IO.FileInfo;
+                            var mGetModFile = mcmType.GetMethod("GetModFile", BindingFlags.Instance | BindingFlags.NonPublic);
+                            if (mGetModFile != null)
+                            {
+                                _mcmGetModFileGeneric = mGetModFile.MakeGenericMethod(typeof(Texture2D));
+                            }
+                        }
+                        if (_mcmGetModFileGeneric != null)
+                        {
+                            var fileInfo = _mcmGetModFileGeneric.Invoke(__instance, new object[] { modPath }) as System.IO.FileInfo;
                             if (fileInfo != null && fileInfo.Exists)
                             {
-                                var mGetInternal = mcmType.GetMethod("GetInternalAssetKey", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                                assetName = mGetInternal?.Invoke(__instance, new object[] { modPath }) as IAssetName;
+                                _mcmGetInternalAssetKey ??= mcmType.GetMethod("GetInternalAssetKey", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                                assetName = _mcmGetInternalAssetKey?.Invoke(__instance, new object[] { modPath }) as IAssetName;
                                 __result = true;
                                 return false;
                             }
@@ -866,18 +904,18 @@ namespace SDViOSTouchControls
 
                     // 2. Otherwise it's a content asset (e.g. Maps/ZCCC_Entrance_Tilesheet)
                     // Resolve asset name WITHOUT loading the full Texture2D through GameContentManager!
-                    var mGetContentKey = mcmType.GetMethod("GetContentKeyForTilesheetImageSource", BindingFlags.Instance | BindingFlags.NonPublic);
-                    string? contentKey = mGetContentKey?.Invoke(__instance, new object[] { relativePath }) as string;
+                    _mcmGetContentKey ??= mcmType.GetMethod("GetContentKeyForTilesheetImageSource", BindingFlags.Instance | BindingFlags.NonPublic);
+                    string? contentKey = _mcmGetContentKey?.Invoke(__instance, new object[] { relativePath }) as string;
                     if (contentKey != null)
                     {
-                        var fCoord = mcmType.BaseType?.GetField("Coordinator", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                        var coord = fCoord?.GetValue(__instance);
+                        _mcmCoordinatorField ??= mcmType.BaseType?.GetField("Coordinator", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        var coord = _mcmCoordinatorField?.GetValue(__instance);
                         if (coord != null)
                         {
-                            var mParse = coord.GetType().GetMethod("ParseAssetName", new[] { typeof(string), typeof(bool) });
-                            if (mParse != null)
+                            _coordParseAssetNameMethod ??= coord.GetType().GetMethod("ParseAssetName", new[] { typeof(string), typeof(bool) });
+                            if (_coordParseAssetNameMethod != null)
                             {
-                                assetName = mParse.Invoke(coord, new object[] { contentKey, false }) as IAssetName;
+                                assetName = _coordParseAssetNameMethod.Invoke(coord, new object[] { contentKey, false }) as IAssetName;
                                 __result = true;
                                 return false; // Return success immediately without loading texture into RAM!
                             }
@@ -936,6 +974,36 @@ namespace SDViOSTouchControls
             return false;
         }
 
+        /// <summary>
+        /// Ensures a location's map and its tilesheet textures are loaded on-demand when the player enters it.
+        /// Locations loaded during save load (gameMode == 6) may have had their map or tilesheet textures deferred
+        /// to keep peak RAM under the iOS Jetsam limit.
+        /// </summary>
+        public static void EnsureLocationMapAndTileSheetsLoaded(GameLocation? location)
+        {
+            if (location == null) return;
+            try
+            {
+                _forceMapLoad = true;
+                if (location.map == null)
+                {
+                    location.reloadMap();
+                }
+                if (location.map != null && Game1.mapDisplayDevice != null)
+                {
+                    location.map.LoadTileSheets(Game1.mapDisplayDevice);
+                }
+            }
+            catch (Exception ex)
+            {
+                ModMonitor?.Log($"[SDViOSTouchControls] Note loading map/tilesheets for '{location.Name}': {ex.Message}", LogLevel.Trace);
+            }
+            finally
+            {
+                _forceMapLoad = false;
+            }
+        }
+
         private static bool PrefixLocationReloadMap(GameLocation __instance)
         {
             if (Game1.gameMode == 6 && !_forceMapLoad)
@@ -963,6 +1031,10 @@ namespace SDViOSTouchControls
                 {
                     _forceMapLoad = true;
                     __instance.reloadMap();
+                    if (__instance.map != null && Game1.mapDisplayDevice != null)
+                    {
+                        __instance.map.LoadTileSheets(Game1.mapDisplayDevice);
+                    }
                 }
                 catch { }
                 finally
@@ -975,12 +1047,11 @@ namespace SDViOSTouchControls
         private static void PostfixLocationLoadMap(GameLocation __instance)
         {
             _loadedMapsCount++;
-            if (_loadedMapsCount % 2 == 0)
+            if (_loadedMapsCount % 8 == 0)
             {
                 try
                 {
-                    System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                    GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    GC.Collect(1, GCCollectionMode.Optimized);
                 }
                 catch { }
             }
@@ -989,12 +1060,11 @@ namespace SDViOSTouchControls
         private static void PostfixNpcReloadSprite(NPC __instance)
         {
             _loadedNpcCount++;
-            if (_loadedNpcCount % 2 == 0)
+            if (_loadedNpcCount % 15 == 0)
             {
                 try
                 {
-                    System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                    GC.Collect(2, GCCollectionMode.Forced, true, true);
+                    GC.Collect(1, GCCollectionMode.Optimized);
                 }
                 catch { }
             }
@@ -1002,40 +1072,22 @@ namespace SDViOSTouchControls
 
         private static void PrefixNewDayAfterFade()
         {
-            try
-            {
-                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                GC.Collect(2, GCCollectionMode.Forced, true, true);
-                ModMonitor?.Log("[SDViOSTouchControls] PrefixNewDayAfterFade: Compacted LOH before day transition.", LogLevel.Info);
-            }
-            catch { }
+            MemoryWatchdog.ForceCollect("PrefixNewDayAfterFade", minIntervalMs: 1000);
         }
 
         private static void PostfixNewDayAfterFade()
         {
-            try
-            {
-                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                GC.Collect(2, GCCollectionMode.Forced, true, true);
-                ModMonitor?.Log("[SDViOSTouchControls] PostfixNewDayAfterFade: Compacted LOH after day transition.", LogLevel.Info);
-            }
-            catch { }
+            MemoryWatchdog.ForceCollect("PostfixNewDayAfterFade", minIntervalMs: 1000);
         }
 
         private static void PostfixForceGC()
         {
-            try
-            {
-                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                GC.Collect(2, GCCollectionMode.Forced, true, true);
-                ModMonitor?.Log("[SDViOSTouchControls] Compacted LOH and collected GC gen 2 after heavy operation.", LogLevel.Info);
-            }
-            catch { }
+            MemoryWatchdog.ForceCollect("FarmTypeManager", minIntervalMs: 1500);
         }
 
         private static bool PrefixMapLoadTileSheets(xTile.Map __instance)
         {
-            if (!_forceMapLoad)
+            if (Game1.gameMode == 6 && !_forceMapLoad)
             {
                 if (!IsEssentialMap(__instance))
                 {
@@ -1047,7 +1099,7 @@ namespace SDViOSTouchControls
 
         private static bool PrefixDevLoadTileSheet(xTile.Tiles.TileSheet tileSheet)
         {
-            if (!_forceMapLoad)
+            if (Game1.gameMode == 6 && !_forceMapLoad)
             {
                 if (tileSheet == null || !IsEssentialMap(tileSheet.Map))
                 {
@@ -1082,6 +1134,23 @@ namespace SDViOSTouchControls
         private static bool PrefixWindowClientSizeChanged(object sender, EventArgs e)
         {
             return false;
+        }
+
+        private static bool PrefixApplyChanges(GraphicsDeviceManager __instance)
+        {
+            try
+            {
+                var gd = __instance?.GraphicsDevice;
+                if (gd != null && !gd.IsDisposed &&
+                    gd.PresentationParameters.BackBufferWidth == _staticNativeWidth &&
+                    gd.PresentationParameters.BackBufferHeight == _staticNativeHeight &&
+                    Game1.game1?.screen != null)
+                {
+                    return false; // Skip redundant ApplyChanges when GraphicsDevice is already initialized at native resolution
+                }
+            }
+            catch { }
+            return true;
         }
 
         private static void PrefixSetPreferredWidth(ref int value)
@@ -1129,9 +1198,9 @@ namespace SDViOSTouchControls
             if (pad != null && pad.HasActiveInput)
             {
                 __result = pad.CurrentSimulatedKeyboardState;
-                if (pad.ButtonY || pad.ButtonB || pad.ButtonMenu)
+                if (VerboseInputLogging && (pad.ButtonY || pad.ButtonB || pad.ButtonMenu))
                 {
-                    ModMonitor?.Log($"[PAD_DEBUG] PrefixGetKeyboardState: keys=[{string.Join(",", __result.GetPressedKeys())}], menu={Game1.activeClickableMenu?.GetType().Name ?? "none"}", LogLevel.Info);
+                    ModMonitor?.Log($"[PAD_DEBUG] PrefixGetKeyboardState: keys=[{string.Join(",", __result.GetPressedKeys())}], menu={Game1.activeClickableMenu?.GetType().Name ?? "none"}", LogLevel.Trace);
                 }
                 return false;
             }
@@ -1148,9 +1217,9 @@ namespace SDViOSTouchControls
             // connected state only while touching and fell back to native (disconnected) on release,
             // which made the game spam "gamepad connected/disconnected" notifications.
             __result = pad.EffectiveGamePadState;
-            if (pad.ButtonY || pad.ButtonB || pad.ButtonMenu)
+            if (VerboseInputLogging && (pad.ButtonY || pad.ButtonB || pad.ButtonMenu))
             {
-                ModMonitor?.Log($"[PAD_DEBUG] PrefixGetGamePadState: connected={__result.IsConnected}, buttons={__result.Buttons}, menu={Game1.activeClickableMenu?.GetType().Name ?? "none"}", LogLevel.Info);
+                ModMonitor?.Log($"[PAD_DEBUG] PrefixGetGamePadState: connected={__result.IsConnected}, buttons={__result.Buttons}, menu={Game1.activeClickableMenu?.GetType().Name ?? "none"}", LogLevel.Trace);
             }
             return false;
         }
@@ -1160,7 +1229,6 @@ namespace SDViOSTouchControls
             // Skip CheckGamepadMode completely on iOS:
             // Prevents "Gamepad mode activated." HUD spam, controller auto-toggle flapping,
             // and automatic GameMenu reopening (pause-on-disconnect).
-            ModMonitor?.Log("[PAD_DEBUG] PrefixCheckGamepadMode called! Skipping completely.", LogLevel.Trace);
             return false;
         }
 
@@ -1171,7 +1239,10 @@ namespace SDViOSTouchControls
             // Suppress gamepad connect/disconnect notifications that spam the screen on iOS
             if (message.Contains("Gamepad") || message.Contains("gamepad") || message.Contains("manette"))
             {
-                ModMonitor?.Log($"[MSG_DEBUG] Suppressed gamepad notification: '{message}' | CallStack: {GetCompactStackTrace(2, 6)}", LogLevel.Info);
+                if (VerboseInputLogging)
+                {
+                    ModMonitor?.Log($"[MSG_DEBUG] Suppressed gamepad notification: '{message}' | CallStack: {GetCompactStackTrace(2, 6)}", LogLevel.Trace);
+                }
                 return false;
             }
             return true;
@@ -1182,7 +1253,10 @@ namespace SDViOSTouchControls
             if (value is GameMenu)
             {
                 string stack = Environment.StackTrace;
-                ModMonitor?.Log($"[MENU_DEBUG] set_activeClickableMenu(GameMenu)! CallStack:\n{stack}", LogLevel.Error);
+                if (VerboseInputLogging)
+                {
+                    ModMonitor?.Log($"[MENU_DEBUG] set_activeClickableMenu(GameMenu)! CallStack:\n{stack}", LogLevel.Trace);
+                }
 
                 // If GameMenu was triggered by CheckGamepadMode (pause-on-disconnect glitch), block it!
                 if (stack.Contains("CheckGamepadMode"))
@@ -1198,51 +1272,58 @@ namespace SDViOSTouchControls
         {
             try
             {
-                long before = GC.GetTotalMemory(false);
-                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                GC.Collect(2, GCCollectionMode.Forced, true, true);
-                long after = GC.GetTotalMemory(false);
-                ModMonitor?.Log($"[MEM_DEBUG] Pre-GameMenu GC: {before / 1048576} MB -> {after / 1048576} MB", LogLevel.Info);
+                long availMb = MemoryWatchdog.Available() / (1024 * 1024);
+                long growthMb = (GC.GetTotalMemory(false) - MemoryWatchdog.LastPostGcManaged) / (1024 * 1024);
+                if (availMb < 80 || (availMb < 350 && growthMb >= 25))
+                {
+                    MemoryWatchdog.ForceCollect("Pre-GameMenu", minIntervalMs: 5000, compactLoh: availMb < 100);
+                }
             }
             catch { }
         }
 
         private static void PrefixExitActiveMenu()
         {
+            if (!VerboseInputLogging) return;
             var menu = Game1.activeClickableMenu;
             string menuName = menu != null ? menu.GetType().Name : "null";
-            ModMonitor?.Log($"[MENU_DEBUG] Game1.exitActiveMenu() called! activeClickableMenu={menuName}, CallStack: {GetCompactStackTrace(2, 8)}", LogLevel.Info);
+            ModMonitor?.Log($"[MENU_DEBUG] Game1.exitActiveMenu() called! activeClickableMenu={menuName}, CallStack: {GetCompactStackTrace(2, 8)}", LogLevel.Trace);
         }
 
         private static void PrefixExitThisMenu(IClickableMenu __instance)
         {
+            if (!VerboseInputLogging) return;
             string menuName = __instance != null ? __instance.GetType().Name : "unknown";
-            ModMonitor?.Log($"[MENU_DEBUG] IClickableMenu.exitThisMenu() on {menuName}! CallStack: {GetCompactStackTrace(2, 8)}", LogLevel.Info);
+            ModMonitor?.Log($"[MENU_DEBUG] IClickableMenu.exitThisMenu() on {menuName}! CallStack: {GetCompactStackTrace(2, 8)}", LogLevel.Trace);
         }
 
         private static void PrefixExitThisMenuNoSound(IClickableMenu __instance)
         {
+            if (!VerboseInputLogging) return;
             string menuName = __instance != null ? __instance.GetType().Name : "unknown";
-            ModMonitor?.Log($"[MENU_DEBUG] IClickableMenu.exitThisMenuNoSound() on {menuName}! CallStack: {GetCompactStackTrace(2, 8)}", LogLevel.Info);
+            ModMonitor?.Log($"[MENU_DEBUG] IClickableMenu.exitThisMenuNoSound() on {menuName}! CallStack: {GetCompactStackTrace(2, 8)}", LogLevel.Trace);
         }
 
         private static void PrefixReceiveLeftClick(IClickableMenu __instance, int x, int y)
         {
+            if (!VerboseInputLogging) return;
             string menuName = __instance != null ? __instance.GetType().Name : "unknown";
             bool inside = __instance != null && __instance.isWithinBounds(x, y);
-            ModMonitor?.Log($"[MENU_DEBUG] {menuName}.receiveLeftClick({x}, {y}, inside={inside})", LogLevel.Info);
+            ModMonitor?.Log($"[MENU_DEBUG] {menuName}.receiveLeftClick({x}, {y}, inside={inside})", LogLevel.Trace);
         }
 
         private static void PrefixReceiveKeyPress(IClickableMenu __instance, Keys key)
         {
+            if (!VerboseInputLogging) return;
             string menuName = __instance != null ? __instance.GetType().Name : "unknown";
-            ModMonitor?.Log($"[MENU_DEBUG] {menuName}.receiveKeyPress({key})! CallStack: {GetCompactStackTrace(2, 6)}", LogLevel.Info);
+            ModMonitor?.Log($"[MENU_DEBUG] {menuName}.receiveKeyPress({key})! CallStack: {GetCompactStackTrace(2, 6)}", LogLevel.Trace);
         }
 
         private static void PrefixReceiveGamePadButton(IClickableMenu __instance, Buttons b)
         {
+            if (!VerboseInputLogging) return;
             string menuName = __instance != null ? __instance.GetType().Name : "unknown";
-            ModMonitor?.Log($"[MENU_DEBUG] {menuName}.receiveGamePadButton({b})! CallStack: {GetCompactStackTrace(2, 6)}", LogLevel.Info);
+            ModMonitor?.Log($"[MENU_DEBUG] {menuName}.receiveGamePadButton({b})! CallStack: {GetCompactStackTrace(2, 6)}", LogLevel.Trace);
         }
 
         private static void PrefixUpdateActiveMenu(out IClickableMenu? __state)
@@ -1252,9 +1333,9 @@ namespace SDViOSTouchControls
 
         private static void PostfixUpdateActiveMenu(IClickableMenu? __state)
         {
-            if (__state != null && Game1.activeClickableMenu == null)
+            if (VerboseInputLogging && __state != null && Game1.activeClickableMenu == null)
             {
-                ModMonitor?.Log($"[MENU_DEBUG] Game1.updateActiveMenu CLOSED menu! Was: {__state.GetType().Name}, Now: null!", LogLevel.Info);
+                ModMonitor?.Log($"[MENU_DEBUG] Game1.updateActiveMenu CLOSED menu! Was: {__state.GetType().Name}, Now: null!", LogLevel.Trace);
             }
         }
 
@@ -1322,18 +1403,24 @@ namespace SDViOSTouchControls
 
         private void OnMenuChanged(object? sender, MenuChangedEventArgs e)
         {
-            string oldMenu = e.OldMenu != null ? e.OldMenu.GetType().Name : "null";
-            string newMenu = e.NewMenu != null ? e.NewMenu.GetType().Name : "null";
-            Monitor.Log($"[MENU_DEBUG] OnMenuChanged: {oldMenu} -> {newMenu}", LogLevel.Info);
+            if (VerboseInputLogging)
+            {
+                string oldMenu = e.OldMenu != null ? e.OldMenu.GetType().Name : "null";
+                string newMenu = e.NewMenu != null ? e.NewMenu.GetType().Name : "null";
+                Monitor.Log($"[MENU_DEBUG] OnMenuChanged: {oldMenu} -> {newMenu}", LogLevel.Trace);
+            }
 
-            // Free the closed GameMenu (MapPage/SocialPage textures etc.) immediately
+            // Free the closed GameMenu (MapPage/SocialPage textures etc.) when headroom is low and heap grew
             if (e.OldMenu is GameMenu && e.NewMenu == null)
             {
                 try
                 {
-                    System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                    GC.Collect(2, GCCollectionMode.Forced, true, true);
-                    Monitor.Log($"[MEM_DEBUG] Post-GameMenu-close GC: {GC.GetTotalMemory(false) / 1048576} MB", LogLevel.Info);
+                    long availMb = MemoryWatchdog.Available() / (1024 * 1024);
+                    long growthMb = (GC.GetTotalMemory(false) - MemoryWatchdog.LastPostGcManaged) / (1024 * 1024);
+                    if (availMb < 80 || (availMb < 350 && growthMb >= 20))
+                    {
+                        MemoryWatchdog.ForceCollect("Post-GameMenu-Close", minIntervalMs: 5000, compactLoh: availMb < 100);
+                    }
                 }
                 catch { }
             }
@@ -1345,24 +1432,34 @@ namespace SDViOSTouchControls
 
             if (Game1.gameMode == 6)
             {
-                if (_assetEventCount % 4 == 0)
+                if (_assetEventCount % 6 == 0)
                 {
                     try
                     {
-                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                        GC.Collect(2, GCCollectionMode.Forced, true, true);
+                        long availMb = MemoryWatchdog.Available() / (1024 * 1024);
+                        if (availMb < 450)
+                        {
+                            MemoryWatchdog.ForceCollect("SaveLoadAssetReady", minIntervalMs: 1200);
+                        }
+                        else
+                        {
+                            GC.Collect(1, GCCollectionMode.Optimized);
+                        }
                     }
                     catch { }
                 }
             }
             else if (Game1.activeClickableMenu is StardewValley.Menus.TitleMenu)
             {
-                if (_assetEventCount % 12 == 0)
+                if (_assetEventCount % 16 == 0)
                 {
                     try
                     {
-                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                        GC.Collect(2, GCCollectionMode.Forced, true, true);
+                        long availMb = MemoryWatchdog.Available() / (1024 * 1024);
+                        if (availMb < 400)
+                        {
+                            MemoryWatchdog.ForceCollect("TitleMenuAssetReady", minIntervalMs: 2000);
+                        }
                     }
                     catch { }
                 }
@@ -1375,9 +1472,10 @@ namespace SDViOSTouchControls
         {
             try
             {
-                Monitor.Log("[SDViOSTouchControls] DayEnding: triggering pre-save memory compaction and log backup...", LogLevel.Info);
+                Monitor.Log("[SDViOSTouchControls] DayEnding: purging transient assets, compacting memory, and backing up logs...", LogLevel.Info);
+                PurgeContentAssets();
                 RemoteDebugServer.BackupLogs("DayEnding");
-                MemoryWatchdog.ForceCollect("DayEnding");
+                MemoryWatchdog.ForceCollect("DayEnding", minIntervalMs: 500);
             }
             catch { }
         }
@@ -1388,7 +1486,7 @@ namespace SDViOSTouchControls
             {
                 Monitor.Log("[SDViOSTouchControls] Saving: compacting memory before XML serialization...", LogLevel.Info);
                 RemoteDebugServer.BackupLogs("Saving");
-                MemoryWatchdog.ForceCollect("Saving");
+                MemoryWatchdog.ForceCollect("Saving", minIntervalMs: 500);
             }
             catch { }
         }
@@ -1397,20 +1495,9 @@ namespace SDViOSTouchControls
         {
             try
             {
-                Monitor.Log("[SDViOSTouchControls] Saved: save complete, purging assets before day transition...", LogLevel.Info);
+                Monitor.Log("[SDViOSTouchControls] Saved: save complete, running GC before day transition...", LogLevel.Info);
                 RemoteDebugServer.BackupLogs("Saved");
-
-                try
-                {
-                    Helper.GameContent.InvalidateCache(asset => asset.Name.Name.StartsWith("Maps/") && !asset.Name.Name.Contains("FarmHouse") && !asset.Name.Name.Contains("Farm"));
-                }
-                catch (Exception ex)
-                {
-                    Monitor.Log($"[MEM_PURGE] InvalidateCache error: {ex.Message}", LogLevel.Trace);
-                }
-
-                PurgeContentAssets();
-                MemoryWatchdog.ForceCollect("Saved");
+                MemoryWatchdog.ForceCollect("Saved", minIntervalMs: 500);
             }
             catch { }
         }
@@ -1432,8 +1519,7 @@ namespace SDViOSTouchControls
                             if (s.StartsWith("Characters/schedules", StringComparison.OrdinalIgnoreCase) ||
                                 s.StartsWith("Characters/Dialogue", StringComparison.OrdinalIgnoreCase) ||
                                 s.StartsWith("Strings/", StringComparison.OrdinalIgnoreCase) ||
-                                s.StartsWith("Data/Events", StringComparison.OrdinalIgnoreCase) ||
-                                (s.StartsWith("Maps/", StringComparison.OrdinalIgnoreCase) && !s.Contains("FarmHouse") && !s.Contains("Farm")))
+                                s.StartsWith("Data/Events", StringComparison.OrdinalIgnoreCase))
                             {
                                 keysToRemove.Add(key);
                             }
@@ -1451,16 +1537,7 @@ namespace SDViOSTouchControls
 
         private void OnAssetsInvalidated(object? sender, AssetsInvalidatedEventArgs e)
         {
-            try
-            {
-                // When Content Patcher or game invalidates map/texture assets, collect old textures if headroom is tight
-                long avail = MemoryWatchdog.Available();
-                if (avail >= 0 && avail < 200 * 1024 * 1024)
-                {
-                    MemoryWatchdog.ForceCollect("AssetsInvalidated");
-                }
-            }
-            catch { }
+            // Do not force GC on every asset invalidation to avoid GC lockups during mass Content Patcher loads
         }
 
         private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
@@ -1479,8 +1556,9 @@ namespace SDViOSTouchControls
                     Game1.exitActiveMenu();
                 }
 
-                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                EnsureLocationMapAndTileSheetsLoaded(Game1.currentLocation);
+                MemoryWatchdog.ForceCollect("SaveLoaded", minIntervalMs: 500);
+                RemoteDebugServer.BackupLogs("SaveLoaded");
                 Monitor.Log("[SDViOSTouchControls] Save loaded successfully. Gamepad locked ForceOff & memory compacted.", LogLevel.Info);
             }
             catch { }
@@ -1500,8 +1578,9 @@ namespace SDViOSTouchControls
                     Game1.exitActiveMenu();
                 }
 
-                System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                EnsureLocationMapAndTileSheetsLoaded(Game1.currentLocation);
+                MemoryWatchdog.ForceCollect("DayStarted", minIntervalMs: 1000);
+                RemoteDebugServer.BackupLogs("DayStarted");
                 Monitor.Log("[SDViOSTouchControls] Day started: Large Object Heap compacted.", LogLevel.Info);
             }
             catch { }
@@ -1537,13 +1616,16 @@ namespace SDViOSTouchControls
                     Game1.hudMessages.RemoveAll(msg => msg.message != null && (msg.message.Contains("Gamepad") || msg.message.Contains("gamepad")));
                 }
 
-                // Periodically compact LOH during loading to stay under iOS 2GB jetsam limit
-                if (Game1.gameMode == 6 && e.IsMultipleOf(10))
+                // Periodically compact LOH during loading when memory headroom drops below 450 MB
+                if (Game1.gameMode == 6 && e.IsMultipleOf(15))
                 {
                     try
                     {
-                        System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-                        GC.Collect(2, GCCollectionMode.Forced, true, true);
+                        long availMb = MemoryWatchdog.Available() / (1024 * 1024);
+                        if (availMb < 450)
+                        {
+                            MemoryWatchdog.ForceCollect("LoadingTick", minIntervalMs: 1200);
+                        }
                     }
                     catch { }
                 }
@@ -1563,7 +1645,10 @@ namespace SDViOSTouchControls
                 if (_lastTickMenu != null && Game1.activeClickableMenu == null)
                 {
                     _menuClosedTick = Game1.ticks;
-                    Monitor.Log($"[MENU_DEBUG] Menu became null before UpdateTicking! Was: {_lastTickMenu.GetType().Name}", LogLevel.Info);
+                    if (VerboseInputLogging)
+                    {
+                        Monitor.Log($"[MENU_DEBUG] Menu became null before UpdateTicking! Was: {_lastTickMenu.GetType().Name}", LogLevel.Trace);
+                    }
                 }
                 _lastTickMenu = Game1.activeClickableMenu;
 
@@ -1584,7 +1669,10 @@ namespace SDViOSTouchControls
             if (_lastTickMenu != null && Game1.activeClickableMenu == null)
             {
                 _menuClosedTick = Game1.ticks;
-                Monitor.Log($"[MENU_DEBUG] Menu became null during Game1.Update! Was: {_lastTickMenu.GetType().Name}", LogLevel.Info);
+                if (VerboseInputLogging)
+                {
+                    Monitor.Log($"[MENU_DEBUG] Menu became null during Game1.Update! Was: {_lastTickMenu.GetType().Name}", LogLevel.Trace);
+                }
             }
             else if (Game1.activeClickableMenu is GameMenu && Game1.ticks - _menuClosedTick <= 10 && !TouchVirtualPad.Instance.PlayerRequestedMenuOpen)
             {
@@ -1593,6 +1681,21 @@ namespace SDViOSTouchControls
             }
 
             _lastTickMenu = Game1.activeClickableMenu;
+
+            // Update thread-safe status snapshot every 15 ticks (4x/sec) for RemoteDebugServer
+            if (e.IsMultipleOf(15))
+            {
+                try
+                {
+                    CachedGameMode = Game1.gameMode;
+                    bool worldReady = Context.IsWorldReady;
+                    CachedWorldReady = worldReady;
+                    CachedTimeString = worldReady ? $"{Game1.timeOfDay} (Day {Game1.dayOfMonth} {Game1.currentSeason} Y{Game1.year})" : "Not loaded";
+                    CachedLocationName = worldReady ? (Game1.currentLocation?.Name ?? "none") : "Menu";
+                    CachedActiveMenuName = Game1.activeClickableMenu?.GetType().Name ?? "none";
+                }
+                catch { }
+            }
         }
 
         private void OnRenderedStep(object? sender, RenderedStepEventArgs e)
@@ -1659,10 +1762,10 @@ namespace SDViOSTouchControls
                     // and update viewport & uiViewport with zoom & uiScale calculations!
                     Game1.game1.SetWindowSize(targetW, targetH);
 
+                    TouchVirtualPad.Instance?.UpdateLayout(targetW, targetH);
+
                     Monitor.Log($"[SDViOSTouchControls] Synchronized game native resolution to {targetW}x{targetH} via SetWindowSize.", LogLevel.Info);
                 }
-
-                TouchVirtualPad.Instance?.UpdateLayout(targetW, targetH);
             }
             catch (Exception ex)
             {

@@ -26,12 +26,20 @@ namespace SDViOSTouchControls
         private static IMonitor? _monitor;
         private static bool _nativeAvailable = true;
         private static long _minSeen = long.MaxValue;
+        private static long _lastPostGcManaged = 0;
+        private static DateTime _lastBackup = DateTime.MinValue;
+        private static DateTime _lastGc = DateTime.MinValue;
+        private static readonly object _gcLock = new object();
+
+        public static long MinSeenMB => _minSeen == long.MaxValue ? -1 : _minSeen / MB;
+        public static long LastPostGcManaged => Interlocked.Read(ref _lastPostGcManaged);
 
         public static void Start(IMonitor monitor)
         {
             if (_thread != null) return;
             _monitor = monitor;
-            _thread = new Thread(Loop) { IsBackground = true, Name = "SDViOS-MemWatchdog", Priority = ThreadPriority.AboveNormal };
+            Interlocked.Exchange(ref _lastPostGcManaged, GC.GetTotalMemory(false));
+            _thread = new Thread(Loop) { IsBackground = true, Name = "SDViOS-MemWatchdog", Priority = ThreadPriority.BelowNormal };
             _thread.Start();
             monitor.Log($"[MEM_DEBUG] Watchdog started. Available now: {Available() / MB} MB", LogLevel.Info);
         }
@@ -44,31 +52,47 @@ namespace SDViOSTouchControls
             catch { _nativeAvailable = false; return -1; }
         }
 
-        /// <summary>Forces an immediate Gen2 GC and Large Object Heap compaction.</summary>
-        public static void ForceCollect(string reason)
+        /// <summary>Forces an immediate Gen2 GC and optional Large Object Heap compaction with cooldown deduplication.</summary>
+        public static void ForceCollect(string reason, int minIntervalMs = 1500, bool compactLoh = true)
         {
             try
             {
-                long availBefore = Available();
-                long managedBefore = GC.GetTotalMemory(false);
-                try { System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce; }
-                catch (Exception sex) { LogErr("GCSettings.LOHCompactionMode", sex); }
-
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                try
+                lock (_gcLock)
                 {
-                    GC.Collect(2, GCCollectionMode.Forced, true, true);
-                    GC.WaitForPendingFinalizers();
-                }
-                catch (Exception gex)
-                {
-                    LogErr("GC.Collect(compacting)", gex);
-                    try { GC.Collect(); } catch (Exception g2) { LogErr("GC.Collect()", g2); }
-                }
+                    var now = DateTime.UtcNow;
+                    if (minIntervalMs > 0 && (now - _lastGc).TotalMilliseconds < minIntervalMs)
+                    {
+                        return;
+                    }
+                    _lastGc = now;
 
-                long availAfter = Available();
-                long managedAfter = GC.GetTotalMemory(false);
-                _monitor?.Log($"[MEM_DEBUG] ForceCollect ({reason}) in {sw.ElapsedMilliseconds} ms: avail {availBefore / MB} -> {availAfter / MB} MB, managed {managedBefore / MB} -> {managedAfter / MB} MB", LogLevel.Info);
+                    long availBefore = Available();
+                    if (availBefore >= 0 && availBefore < _minSeen) _minSeen = availBefore;
+                    long managedBefore = GC.GetTotalMemory(false);
+                    if (compactLoh)
+                    {
+                        try { System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce; }
+                        catch (Exception sex) { LogErr("GCSettings.LOHCompactionMode", sex); }
+                    }
+
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    try
+                    {
+                        GC.Collect(2, GCCollectionMode.Forced, true, compactLoh);
+                    }
+                    catch (Exception gex)
+                    {
+                        LogErr("GC.Collect(compacting)", gex);
+                        try { GC.Collect(); } catch (Exception g2) { LogErr("GC.Collect()", g2); }
+                    }
+
+                    _lastGc = DateTime.UtcNow;
+                    long availAfter = Available();
+                    if (availAfter >= 0 && availAfter < _minSeen) _minSeen = availAfter;
+                    long managedAfter = GC.GetTotalMemory(false);
+                    Interlocked.Exchange(ref _lastPostGcManaged, managedAfter);
+                    _monitor?.Log($"[MEM_DEBUG] ForceCollect ({reason}) in {sw.ElapsedMilliseconds} ms: avail {availBefore / MB} -> {availAfter / MB} MB, managed {managedBefore / MB} -> {managedAfter / MB} MB", LogLevel.Info);
+                }
             }
             catch (Exception ex)
             {
@@ -79,66 +103,98 @@ namespace SDViOSTouchControls
         private static void Loop()
         {
             DateTime lastLog = DateTime.MinValue;
-            DateTime lastGc = DateTime.MinValue;
 
             while (true)
             {
                 try
                 {
-                    bool loading = Game1.gameMode == 6 || !Context.IsWorldReady;
+                    bool loading = false;
+                    int gameMode = 0;
+                    bool worldReady = false;
+                    try
+                    {
+                        gameMode = Game1.gameMode;
+                        worldReady = Context.IsWorldReady;
+                        loading = gameMode == 6 || !worldReady;
+                    }
+                    catch { }
+
                     long avail = Available();
                     long managed = GC.GetTotalMemory(false);
+                    long lastManaged = Interlocked.Read(ref _lastPostGcManaged);
+                    long managedGrowth = managed - lastManaged;
                     var now = DateTime.UtcNow;
 
                     if (avail >= 0 && avail < _minSeen) _minSeen = avail;
 
-                    // Dynamically scale GC interval based on remaining headroom
-                    double gcInterval;
-                    if (avail >= 0 && avail < 25 * MB)
-                        gcInterval = 250;      // Immediate emergency
-                    else if (avail >= 0 && avail < EmergencyBytes)
-                        gcInterval = 500;      // Critical headroom
-                    else if (avail >= 0 && avail < 150 * MB)
-                        gcInterval = 1200;
-                    else
-                        gcInterval = loading ? 750 : 3500;
+                    bool shouldCollect = false;
+                    int gcInterval = 3500;
+                    bool compactLoh = true;
 
-                    if (avail >= 0 && avail < LowWaterBytes && (now - lastGc).TotalMilliseconds > gcInterval)
+                    if (loading)
                     {
-                        lastGc = DateTime.UtcNow;
-                        if (avail < EmergencyBytes)
+                        // During save loading or screen transitions, collect aggressively when headroom is low
+                        if (avail >= 0 && avail < 25 * MB)
+                            gcInterval = 400;
+                        else if (avail >= 0 && avail < EmergencyBytes)
+                            gcInterval = 800;
+                        else if (avail >= 0 && avail < 150 * MB)
+                            gcInterval = 1500;
+                        else
+                            gcInterval = 2500;
+
+                        if (avail >= 0 && avail < LowWaterBytes &&
+                            (now - _lastGc).TotalMilliseconds > gcInterval &&
+                            (managedGrowth >= 15 * MB || avail < EmergencyBytes))
                         {
+                            shouldCollect = true;
+                        }
+                    }
+                    else
+                    {
+                        // During active gameplay, NEVER freeze the game every 1.5s when managed memory is steady!
+                        // Only collect if managed memory has actually grown significantly since the last GC.
+                        if (avail >= 0 && avail < 35 * MB && managedGrowth >= 15 * MB && (now - _lastGc).TotalMilliseconds >= 4000)
+                        {
+                            shouldCollect = true;
+                            gcInterval = 4000;
+                            compactLoh = true;
+                        }
+                        else if (avail >= 0 && avail < 150 * MB && managedGrowth >= 48 * MB && (now - _lastGc).TotalMilliseconds >= 10000)
+                        {
+                            shouldCollect = true;
+                            gcInterval = 10000;
+                            compactLoh = false; // Fast Gen2 GC without expensive LOH compaction during gameplay
+                        }
+                        else if (avail >= 0 && avail < LowWaterBytes && managedGrowth >= 70 * MB && (now - _lastGc).TotalMilliseconds >= 15000)
+                        {
+                            shouldCollect = true;
+                            gcInterval = 15000;
+                            compactLoh = false;
+                        }
+                    }
+
+                    if (shouldCollect)
+                    {
+                        if (avail < EmergencyBytes && (now - _lastBackup).TotalSeconds > 15)
+                        {
+                            _lastBackup = now;
                             RemoteDebugServer.BackupLogs("LowMemoryEmergency");
                         }
-                        _monitor?.Log($"[MEM_DEBUG] LOW MEMORY: avail={avail / MB} MB, managed={managed / MB} MB -> starting GC", LogLevel.Warn);
-                        try { System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce; }
-                        catch (Exception sex) { LogErr("GCSettings.LOHCompactionMode", sex); }
-                        var sw = System.Diagnostics.Stopwatch.StartNew();
-                        try
-                        {
-                            GC.Collect(2, GCCollectionMode.Forced, true, true);
-                            GC.WaitForPendingFinalizers();
-                        }
-                        catch (Exception gex)
-                        {
-                            LogErr("GC.Collect(compacting)", gex);
-                            try { GC.Collect(); } catch (Exception g2) { LogErr("GC.Collect()", g2); }
-                        }
-                        long after = Available();
-                        _monitor?.Log($"[MEM_DEBUG] LOW MEMORY GC done in {sw.ElapsedMilliseconds} ms: avail {avail / MB} -> {after / MB} MB, managed {managed / MB} -> {GC.GetTotalMemory(false) / MB} MB", LogLevel.Warn);
+                        ForceCollect($"Watchdog(avail={avail / MB}MB, +{managedGrowth / MB}MB)", minIntervalMs: gcInterval, compactLoh: compactLoh);
                         lastLog = DateTime.UtcNow;
                     }
                     else
                     {
-                        double logEvery = (avail >= 0 && avail < CriticalBytes) ? 0.25 : loading ? 2 : 15;
+                        double logEvery = loading ? ((avail >= 0 && avail < CriticalBytes) ? 2.0 : 5.0) : 20.0;
                         if ((now - lastLog).TotalSeconds >= logEvery)
                         {
-                            _monitor?.Log($"[MEM_DEBUG] avail={avail / MB} MB (min {_minSeen / MB} MB), managed={managed / MB} MB, gameMode={Game1.gameMode}, worldReady={Context.IsWorldReady}", LogLevel.Info);
+                            _monitor?.Log($"[MEM_DEBUG] avail={avail / MB} MB (min {_minSeen / MB} MB), managed={managed / MB} MB (+{Math.Max(0, managedGrowth) / MB} MB), gameMode={gameMode}, worldReady={worldReady}", LogLevel.Info);
                             lastLog = now;
                         }
                     }
 
-                    int sleepMs = (avail >= 0 && avail < EmergencyBytes) ? 100 : loading ? 200 : 800;
+                    int sleepMs = loading ? ((avail >= 0 && avail < EmergencyBytes) ? 150 : 300) : 1000;
                     Thread.Sleep(sleepMs);
                 }
                 catch (Exception ex)

@@ -24,7 +24,16 @@ __pycache__/
 *.pyc
 tools/mod_manager/config.json
 tools/mod_manager/downloads/
-# Local debug tools
+
+# Local debug tools & temporary logs/artifacts
 tools/deploy_hotfix.py
 tools/parse_ips.py
 tools/sync_hotfix.py
+tools/parse_sve.py
+*.log
+SMAPI-*.txt
+sve_content.json
+temp_*.ps1
+temp_*/
+test_extract/
+FarmTypeManager.dll

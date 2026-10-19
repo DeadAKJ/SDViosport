@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -13,7 +14,7 @@ namespace SDViOSTouchControls
 {
     /// <summary>
     /// Lightweight embedded HTTP server that provides wireless log viewing, memory inspection,
-    /// and file upload/download over the local Wi-Fi network without requiring a USB cable or iTunes.
+    /// and file/mod management over the local Wi-Fi network without requiring a USB cable or iTunes.
     /// </summary>
     public static class RemoteDebugServer
     {
@@ -21,6 +22,8 @@ namespace SDViOSTouchControls
         private static Thread? _thread;
         private static IMonitor? _monitor;
         private static string _baseDir = "";
+        private static readonly object _backupLock = new();
+        private static DateTime _lastBackupUtc = DateTime.MinValue;
         private const int Port = 8080;
 
         public static void Start(IMonitor monitor)
@@ -116,8 +119,8 @@ namespace SDViOSTouchControls
             {
                 try
                 {
-                    client.ReceiveTimeout = 15000;
-                    client.SendTimeout = 15000;
+                    client.ReceiveTimeout = 30000;
+                    client.SendTimeout = 30000;
                     using var stream = client.GetStream();
 
                     // Read HTTP request header
@@ -178,7 +181,7 @@ namespace SDViOSTouchControls
 
                         // Payload start
                         int bodyAlreadyRead = totalRead - headerEnd;
-                        HandlePost(stream, path, queryParams, buffer, headerEnd, bodyAlreadyRead, contentLength);
+                        HandlePost(stream, path, queryParams, headers, buffer, headerEnd, bodyAlreadyRead, contentLength);
                     }
                     else
                     {
@@ -246,39 +249,55 @@ namespace SDViOSTouchControls
             return dict;
         }
 
-        public static void BackupLogs(string reason)
+        public static void BackupLogs(string reason, int minIntervalMs = 2000)
         {
-            try
+            lock (_backupLock)
             {
-                string latest = FindLogFile("SMAPI-latest.txt");
-                if (File.Exists(latest) && new FileInfo(latest).Length > 0)
+                var now = DateTime.UtcNow;
+                if (minIntervalMs > 0 && (now - _lastBackupUtc).TotalMilliseconds < minIntervalMs)
                 {
-                    string dir = Path.GetDirectoryName(latest)!;
-                    string dest = Path.Combine(dir, "SMAPI-previous.txt");
-                    using (var src = new FileStream(latest, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                    using (var dst = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
-                    {
-                        src.CopyTo(dst);
-                    }
-                    _monitor?.Log($"[RemoteServer] Preserved log snapshot ({reason}) to SMAPI-previous.txt", LogLevel.Trace);
+                    return;
                 }
+                _lastBackupUtc = now;
 
-                string engine = FindLogFile("engine-latest.log");
-                if (File.Exists(engine) && new FileInfo(engine).Length > 0)
+                try
                 {
-                    string dir = Path.GetDirectoryName(engine)!;
-                    string dest = Path.Combine(dir, "engine-previous.log");
-                    using (var src = new FileStream(engine, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                    using (var dst = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+                    string latest = FindLogFile("SMAPI-latest.txt");
+                    if (File.Exists(latest) && new FileInfo(latest).Length > 0)
                     {
-                        src.CopyTo(dst);
+                        string dir = Path.GetDirectoryName(latest)!;
+                        string dest = Path.Combine(dir, "SMAPI-previous.txt");
+                        using (var src = new FileStream(latest, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                        using (var dst = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+                        {
+                            src.CopyTo(dst);
+                        }
+                        _monitor?.Log($"[RemoteServer] Preserved log snapshot ({reason}) to SMAPI-previous.txt", LogLevel.Trace);
+                    }
+
+                    string engine = FindLogFile("engine-latest.log");
+                    if (File.Exists(engine) && new FileInfo(engine).Length > 0)
+                    {
+                        string dir = Path.GetDirectoryName(engine)!;
+                        string dest = Path.Combine(dir, "engine-previous.log");
+                        using (var src = new FileStream(engine, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                        using (var dst = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+                        {
+                            src.CopyTo(dst);
+                        }
                     }
                 }
+                catch (Exception ex)
+                {
+                    _monitor?.Log($"[RemoteServer] Note backing up log: {ex.Message}", LogLevel.Trace);
+                }
             }
-            catch (Exception ex)
-            {
-                _monitor?.Log($"[RemoteServer] Note backing up log: {ex.Message}", LogLevel.Trace);
-            }
+        }
+
+        private static string EscapeJson(string? s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n");
         }
 
         private static void HandleGet(Stream stream, string path, Dictionary<string, string> q)
@@ -288,6 +307,62 @@ namespace SDViOSTouchControls
                 string html = BuildDashboardHtml();
                 SendResponse(stream, 200, "OK", "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html));
             }
+            else if (path == "/status")
+            {
+                long availMb = MemoryWatchdog.Available() / (1024 * 1024);
+                long minMb = MemoryWatchdog.MinSeenMB == long.MaxValue ? availMb : MemoryWatchdog.MinSeenMB;
+                long managedMb = GC.GetTotalMemory(false) / (1024 * 1024);
+                string json = "{" +
+                    $"\"avail_mb\": {availMb}, " +
+                    $"\"min_avail_mb\": {minMb}, " +
+                    $"\"managed_mb\": {managedMb}, " +
+                    $"\"game_mode\": {ModEntry.CachedGameMode}, " +
+                    $"\"world_ready\": {(ModEntry.CachedWorldReady ? "true" : "false")}, " +
+                    $"\"time\": \"{EscapeJson(ModEntry.CachedTimeString)}\", " +
+                    $"\"location\": \"{EscapeJson(ModEntry.CachedLocationName)}\", " +
+                    $"\"active_menu\": \"{EscapeJson(ModEntry.CachedActiveMenuName)}\", " +
+                    $"\"base_dir\": \"{EscapeJson(_baseDir)}\"" +
+                    "}";
+                SendResponse(stream, 200, "OK", "application/json; charset=utf-8", Encoding.UTF8.GetBytes(json));
+            }
+            else if (path == "/api/list")
+            {
+                string relDir = q.GetValueOrDefault("dir", "");
+                try
+                {
+                    string fullDir = ResolveSafePath(relDir);
+                    if (!Directory.Exists(fullDir))
+                    {
+                        SendResponse(stream, 404, "Not Found", "application/json", Encoding.UTF8.GetBytes("{\"error\": \"Directory not found\"}"));
+                        return;
+                    }
+
+                    var sb = new StringBuilder();
+                    sb.Append("{\"dir\": \"").Append(EscapeJson(relDir)).Append("\", \"entries\": [");
+                    bool first = true;
+                    var dirInfo = new DirectoryInfo(fullDir);
+                    foreach (var d in dirInfo.GetDirectories())
+                    {
+                        if (!first) sb.Append(',');
+                        first = false;
+                        long mtime = new DateTimeOffset(d.LastWriteTimeUtc).ToUnixTimeSeconds();
+                        sb.Append($"{{\"name\": \"{EscapeJson(d.Name)}\", \"is_dir\": true, \"size\": 0, \"mtime\": {mtime}}}");
+                    }
+                    foreach (var f in dirInfo.GetFiles())
+                    {
+                        if (!first) sb.Append(',');
+                        first = false;
+                        long mtime = new DateTimeOffset(f.LastWriteTimeUtc).ToUnixTimeSeconds();
+                        sb.Append($"{{\"name\": \"{EscapeJson(f.Name)}\", \"is_dir\": false, \"size\": {f.Length}, \"mtime\": {mtime}}}");
+                    }
+                    sb.Append("]}");
+                    SendResponse(stream, 200, "OK", "application/json; charset=utf-8", Encoding.UTF8.GetBytes(sb.ToString()));
+                }
+                catch (Exception ex)
+                {
+                    SendResponse(stream, 400, "Bad Request", "application/json", Encoding.UTF8.GetBytes($"{{\"error\": \"{EscapeJson(ex.Message)}\"}}"));
+                }
+            }
             else if (path == "/log")
             {
                 string logPath = FindLogFile("SMAPI-latest.txt");
@@ -296,7 +371,11 @@ namespace SDViOSTouchControls
             else if (path == "/log-previous" || path == "/previous-log")
             {
                 string logPath = FindLogFile("SMAPI-previous.txt");
-                SendFileStream(stream, logPath, "text/plain; charset=utf-8", "SMAPI-previous.txt");
+                if (!File.Exists(logPath))
+                {
+                    logPath = FindLogFile("engine-previous.log");
+                }
+                SendFileStream(stream, logPath, "text/plain; charset=utf-8", Path.GetFileName(logPath));
             }
             else if (path == "/engine-log")
             {
@@ -321,8 +400,17 @@ namespace SDViOSTouchControls
                 int linesCount = 100;
                 if (q.TryGetValue("lines", out var lStr) && int.TryParse(lStr, out var n)) linesCount = Math.Max(1, Math.Min(n, 2000));
                 string logPath = FindLogFile("SMAPI-previous.txt");
+                if (!File.Exists(logPath))
+                {
+                    logPath = FindLogFile("engine-previous.log");
+                }
                 string tailText = ReadLastLines(logPath, linesCount);
                 SendResponse(stream, 200, "OK", "text/plain; charset=utf-8", Encoding.UTF8.GetBytes(tailText));
+            }
+            else if (path == "/backup")
+            {
+                BackupLogs("ManualTrigger", minIntervalMs: 0);
+                SendResponse(stream, 200, "OK", "application/json", Encoding.UTF8.GetBytes("{\"success\": true, \"message\": \"Logs backed up.\"}"));
             }
             else if (path == "/mem" || path == "/gc")
             {
@@ -332,7 +420,7 @@ namespace SDViOSTouchControls
 
                 if (forceGc)
                 {
-                    MemoryWatchdog.ForceCollect("RemoteDebugServer");
+                    MemoryWatchdog.ForceCollect("RemoteDebugServer", minIntervalMs: 500);
                 }
 
                 long afterAvail = MemoryWatchdog.Available() / (1024 * 1024);
@@ -344,28 +432,41 @@ namespace SDViOSTouchControls
             else if (path == "/files")
             {
                 string relDir = q.GetValueOrDefault("dir", "");
-                string fullDir = ResolveSafePath(relDir);
-
-                if (!Directory.Exists(fullDir))
+                try
                 {
-                    SendResponse(stream, 404, "Not Found", "text/plain", Encoding.UTF8.GetBytes($"Directory not found: {relDir}"));
-                    return;
-                }
+                    string fullDir = ResolveSafePath(relDir);
+                    if (!Directory.Exists(fullDir))
+                    {
+                        SendResponse(stream, 404, "Not Found", "text/plain", Encoding.UTF8.GetBytes($"Directory not found: {relDir}"));
+                        return;
+                    }
 
-                string html = BuildDirectoryListingHtml(relDir, fullDir);
-                SendResponse(stream, 200, "OK", "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html));
+                    string html = BuildDirectoryListingHtml(relDir, fullDir);
+                    SendResponse(stream, 200, "OK", "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html));
+                }
+                catch (Exception ex)
+                {
+                    SendResponse(stream, 400, "Bad Request", "text/plain", Encoding.UTF8.GetBytes(ex.Message));
+                }
             }
             else if (path == "/download")
             {
                 string relFile = q.GetValueOrDefault("path", "");
-                string fullFile = ResolveSafePath(relFile);
-                if (!File.Exists(fullFile))
+                try
                 {
-                    SendResponse(stream, 404, "Not Found", "text/plain", Encoding.UTF8.GetBytes($"File not found: {relFile}"));
-                    return;
-                }
+                    string fullFile = ResolveSafePath(relFile);
+                    if (!File.Exists(fullFile))
+                    {
+                        SendResponse(stream, 404, "Not Found", "text/plain", Encoding.UTF8.GetBytes($"File not found: {relFile}"));
+                        return;
+                    }
 
-                SendFileStream(stream, fullFile, "application/octet-stream", Path.GetFileName(fullFile));
+                    SendFileStream(stream, fullFile, "application/octet-stream", Path.GetFileName(fullFile));
+                }
+                catch (Exception ex)
+                {
+                    SendResponse(stream, 400, "Bad Request", "text/plain", Encoding.UTF8.GetBytes(ex.Message));
+                }
             }
             else
             {
@@ -373,36 +474,41 @@ namespace SDViOSTouchControls
             }
         }
 
-        private static void HandlePost(Stream stream, string path, Dictionary<string, string> q, byte[] buffer, int bodyOffset, int bodyAlreadyRead, long contentLength)
+        private static void HandlePost(Stream stream, string path, Dictionary<string, string> q, Dictionary<string, string> headers, byte[] buffer, int bodyOffset, int bodyAlreadyRead, long contentLength)
         {
             if (path == "/upload")
             {
                 string relTarget = q.GetValueOrDefault("path", "");
                 if (string.IsNullOrWhiteSpace(relTarget))
                 {
-                    SendResponse(stream, 400, "Bad Request", "text/plain", Encoding.UTF8.GetBytes("Missing 'path' query parameter"));
+                    SendResponse(stream, 400, "Bad Request", "application/json", Encoding.UTF8.GetBytes("{\"success\": false, \"error\": \"Missing 'path' query parameter\"}"));
                     return;
                 }
 
-                string fullTarget = ResolveSafePath(relTarget);
+                if (headers.TryGetValue("content-type", out var ct) && ct.StartsWith("multipart/form-data", StringComparison.OrdinalIgnoreCase))
+                {
+                    SendResponse(stream, 400, "Bad Request", "application/json", Encoding.UTF8.GetBytes("{\"success\": false, \"error\": \"Send raw file bytes in POST body, not multipart/form-data\"}"));
+                    return;
+                }
+
                 try
                 {
+                    string fullTarget = ResolveSafePath(relTarget);
                     string? dir = Path.GetDirectoryName(fullTarget);
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     {
                         Directory.CreateDirectory(dir);
                     }
 
-                    using (var fs = new FileStream(fullTarget, FileMode.Create, FileAccess.Write, FileShare.None))
+                    string tempTarget = fullTarget + ".upload_tmp";
+                    using (var fs = new FileStream(tempTarget, FileMode.Create, FileAccess.Write, FileShare.None))
                     {
-                        // Write initial bytes from header buffer
                         if (bodyAlreadyRead > 0)
                         {
                             int writeLen = (int)Math.Min(bodyAlreadyRead, contentLength > 0 ? contentLength : bodyAlreadyRead);
                             fs.Write(buffer, bodyOffset, writeLen);
                         }
 
-                        // Stream remaining payload
                         long remaining = contentLength > 0 ? contentLength - bodyAlreadyRead : 0;
                         byte[] chunk = new byte[32768];
                         while (remaining > 0)
@@ -415,15 +521,177 @@ namespace SDViOSTouchControls
                         }
                     }
 
+                    File.Move(tempTarget, fullTarget, overwrite: true);
+
                     long finalSize = new FileInfo(fullTarget).Length;
                     _monitor?.Log($"[RemoteServer] Successfully uploaded '{relTarget}' ({finalSize} bytes) over Wi-Fi.", LogLevel.Info);
-                    string resp = $"{{\"success\": true, \"path\": \"{relTarget}\", \"bytes\": {finalSize}}}";
+                    string resp = $"{{\"success\": true, \"path\": \"{EscapeJson(relTarget)}\", \"bytes\": {finalSize}}}";
                     SendResponse(stream, 200, "OK", "application/json", Encoding.UTF8.GetBytes(resp));
                 }
                 catch (Exception ex)
                 {
                     _monitor?.Log($"[RemoteServer] Upload failed for '{relTarget}': {ex.Message}", LogLevel.Warn);
-                    SendResponse(stream, 500, "Internal Server Error", "text/plain", Encoding.UTF8.GetBytes($"Upload error: {ex.Message}"));
+                    SendResponse(stream, 500, "Internal Server Error", "application/json", Encoding.UTF8.GetBytes($"{{\"success\": false, \"error\": \"{EscapeJson(ex.Message)}\"}}"));
+                }
+            }
+            else if (path == "/api/mkdir")
+            {
+                string relTarget = q.GetValueOrDefault("path", "");
+                if (string.IsNullOrWhiteSpace(relTarget))
+                {
+                    SendResponse(stream, 400, "Bad Request", "application/json", Encoding.UTF8.GetBytes("{\"success\": false, \"error\": \"Missing 'path' query parameter\"}"));
+                    return;
+                }
+                try
+                {
+                    string fullTarget = ResolveSafePath(relTarget);
+                    Directory.CreateDirectory(fullTarget);
+                    SendResponse(stream, 200, "OK", "application/json", Encoding.UTF8.GetBytes($"{{\"success\": true, \"path\": \"{EscapeJson(relTarget)}\"}}"));
+                }
+                catch (Exception ex)
+                {
+                    SendResponse(stream, 500, "Internal Server Error", "application/json", Encoding.UTF8.GetBytes($"{{\"success\": false, \"error\": \"{EscapeJson(ex.Message)}\"}}"));
+                }
+            }
+            else if (path == "/api/delete")
+            {
+                string relTarget = q.GetValueOrDefault("path", "");
+                if (string.IsNullOrWhiteSpace(relTarget))
+                {
+                    SendResponse(stream, 400, "Bad Request", "application/json", Encoding.UTF8.GetBytes("{\"success\": false, \"error\": \"Missing 'path' query parameter\"}"));
+                    return;
+                }
+                try
+                {
+                    string fullTarget = ResolveSafePath(relTarget);
+                    string baseFull = Path.GetFullPath(_baseDir).TrimEnd('/', '\\');
+                    if (string.Equals(fullTarget.TrimEnd('/', '\\'), baseFull, StringComparison.OrdinalIgnoreCase))
+                    {
+                        SendResponse(stream, 400, "Bad Request", "application/json", Encoding.UTF8.GetBytes("{\"success\": false, \"error\": \"Cannot delete root Documents directory\"}"));
+                        return;
+                    }
+
+                    if (File.Exists(fullTarget))
+                    {
+                        File.Delete(fullTarget);
+                    }
+                    else if (Directory.Exists(fullTarget))
+                    {
+                        Directory.Delete(fullTarget, recursive: true);
+                    }
+                    SendResponse(stream, 200, "OK", "application/json", Encoding.UTF8.GetBytes($"{{\"success\": true, \"path\": \"{EscapeJson(relTarget)}\"}}"));
+                }
+                catch (Exception ex)
+                {
+                    SendResponse(stream, 500, "Internal Server Error", "application/json", Encoding.UTF8.GetBytes($"{{\"success\": false, \"error\": \"{EscapeJson(ex.Message)}\"}}"));
+                }
+            }
+            else if (path == "/api/rename")
+            {
+                string relFrom = q.GetValueOrDefault("from", "");
+                string relTo = q.GetValueOrDefault("to", "");
+                if (string.IsNullOrWhiteSpace(relFrom) || string.IsNullOrWhiteSpace(relTo))
+                {
+                    SendResponse(stream, 400, "Bad Request", "application/json", Encoding.UTF8.GetBytes("{\"success\": false, \"error\": \"Missing 'from' or 'to' query parameter\"}"));
+                    return;
+                }
+                try
+                {
+                    string fullFrom = ResolveSafePath(relFrom);
+                    string fullTo = ResolveSafePath(relTo);
+                    if (Directory.Exists(fullFrom))
+                    {
+                        Directory.Move(fullFrom, fullTo);
+                    }
+                    else if (File.Exists(fullFrom))
+                    {
+                        File.Move(fullFrom, fullTo, overwrite: true);
+                    }
+                    else
+                    {
+                        SendResponse(stream, 404, "Not Found", "application/json", Encoding.UTF8.GetBytes("{\"success\": false, \"error\": \"Source path does not exist\"}"));
+                        return;
+                    }
+                    SendResponse(stream, 200, "OK", "application/json", Encoding.UTF8.GetBytes($"{{\"success\": true, \"from\": \"{EscapeJson(relFrom)}\", \"to\": \"{EscapeJson(relTo)}\"}}"));
+                }
+                catch (Exception ex)
+                {
+                    SendResponse(stream, 500, "Internal Server Error", "application/json", Encoding.UTF8.GetBytes($"{{\"success\": false, \"error\": \"{EscapeJson(ex.Message)}\"}}"));
+                }
+            }
+            else if (path == "/api/upload-zip")
+            {
+                string relDest = q.GetValueOrDefault("dest", "Mods");
+                try
+                {
+                    string fullDest = ResolveSafePath(relDest);
+                    Directory.CreateDirectory(fullDest);
+
+                    string tempZip = Path.Combine(Path.GetTempPath(), $"sdvios_upload_{Guid.NewGuid():N}.zip");
+                    try
+                    {
+                        using (var fs = new FileStream(tempZip, FileMode.Create, FileAccess.Write, FileShare.None))
+                        {
+                            if (bodyAlreadyRead > 0)
+                            {
+                                int writeLen = (int)Math.Min(bodyAlreadyRead, contentLength > 0 ? contentLength : bodyAlreadyRead);
+                                fs.Write(buffer, bodyOffset, writeLen);
+                            }
+
+                            long remaining = contentLength > 0 ? contentLength - bodyAlreadyRead : 0;
+                            byte[] chunk = new byte[32768];
+                            while (remaining > 0)
+                            {
+                                int toRead = (int)Math.Min(chunk.Length, remaining);
+                                int read = stream.Read(chunk, 0, toRead);
+                                if (read <= 0) break;
+                                fs.Write(chunk, 0, read);
+                                remaining -= read;
+                            }
+                        }
+
+                        int extractedCount = 0;
+                        string destRootFull = Path.GetFullPath(fullDest);
+                        if (!destRootFull.EndsWith(Path.DirectorySeparatorChar.ToString()))
+                            destRootFull += Path.DirectorySeparatorChar;
+
+                        using (var archive = ZipFile.OpenRead(tempZip))
+                        {
+                            foreach (var entry in archive.Entries)
+                            {
+                                if (string.IsNullOrEmpty(entry.FullName)) continue;
+                                string entryRel = entry.FullName.Replace('\\', '/').TrimStart('/');
+                                string targetPath = Path.GetFullPath(Path.Combine(fullDest, entryRel));
+                                if (!targetPath.StartsWith(destRootFull, StringComparison.Ordinal))
+                                    continue;
+
+                                if (entry.FullName.EndsWith("/") || entry.FullName.EndsWith("\\"))
+                                {
+                                    Directory.CreateDirectory(targetPath);
+                                }
+                                else
+                                {
+                                    string? entryDir = Path.GetDirectoryName(targetPath);
+                                    if (!string.IsNullOrEmpty(entryDir))
+                                        Directory.CreateDirectory(entryDir);
+                                    entry.ExtractToFile(targetPath, overwrite: true);
+                                    extractedCount++;
+                                }
+                            }
+                        }
+
+                        _monitor?.Log($"[RemoteServer] Extracted {extractedCount} files from ZIP upload into '{relDest}'.", LogLevel.Info);
+                        SendResponse(stream, 200, "OK", "application/json", Encoding.UTF8.GetBytes($"{{\"success\": true, \"dest\": \"{EscapeJson(relDest)}\", \"extracted_files\": {extractedCount}}}"));
+                    }
+                    finally
+                    {
+                        try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _monitor?.Log($"[RemoteServer] ZIP upload failed for '{relDest}': {ex.Message}", LogLevel.Warn);
+                    SendResponse(stream, 500, "Internal Server Error", "application/json", Encoding.UTF8.GetBytes($"{{\"success\": false, \"error\": \"{EscapeJson(ex.Message)}\"}}"));
                 }
             }
             else
@@ -483,17 +751,32 @@ namespace SDViOSTouchControls
 
         private static string ResolveSafePath(string relativePath)
         {
-            string clean = relativePath.TrimStart('/', '\\').Replace("..", "");
-            return Path.GetFullPath(Path.Combine(_baseDir, clean));
+            string baseFull = Path.GetFullPath(_baseDir);
+            string normalizedRel = (relativePath ?? "").Replace('\\', '/').TrimStart('/');
+            if (string.IsNullOrEmpty(normalizedRel))
+                return baseFull;
+
+            string combined = Path.GetFullPath(Path.Combine(baseFull, normalizedRel));
+            string baseWithSep = baseFull.EndsWith(Path.DirectorySeparatorChar.ToString())
+                ? baseFull
+                : baseFull + Path.DirectorySeparatorChar;
+
+            if (!combined.Equals(baseFull, StringComparison.Ordinal) &&
+                !combined.StartsWith(baseWithSep, StringComparison.Ordinal))
+            {
+                throw new UnauthorizedAccessException("Access outside Documents directory is not permitted.");
+            }
+            return combined;
         }
 
         private static string BuildDashboardHtml()
         {
             long availMb = MemoryWatchdog.Available() / (1024 * 1024);
+            long minMb = MemoryWatchdog.MinSeenMB == long.MaxValue ? availMb : MemoryWatchdog.MinSeenMB;
             long managedMb = GC.GetTotalMemory(false) / (1024 * 1024);
-            string timeStr = Context.IsWorldReady ? $"{Game1.timeOfDay} (Day {Game1.dayOfMonth} {Game1.currentSeason} Y{Game1.year})" : "Not loaded";
-            string locStr = Context.IsWorldReady ? (Game1.currentLocation?.Name ?? "none") : "Menu";
-            string menuStr = Game1.activeClickableMenu?.GetType().Name ?? "none";
+            string timeStr = WebUtility.HtmlEncode(ModEntry.CachedTimeString);
+            string locStr = WebUtility.HtmlEncode(ModEntry.CachedLocationName);
+            string menuStr = WebUtility.HtmlEncode(ModEntry.CachedActiveMenuName);
 
             return $@"<!DOCTYPE html>
 <html>
@@ -520,10 +803,10 @@ namespace SDViOSTouchControls
 <body>
     <h1>Stardew Valley iOS Debug Server</h1>
     <div class='card'>
-        <div class='stat'><span>iOS Available Memory (Headroom):</span><span class='stat-val'>{availMb} MB</span></div>
+        <div class='stat'><span>iOS Available Memory (Headroom / Min Seen):</span><span class='stat-val'>{availMb} MB (min: {minMb} MB)</span></div>
         <div class='stat'><span>Managed Heap (.NET Memory):</span><span class='stat-val'>{managedMb} MB</span></div>
-        <div class='stat'><span>Game Mode:</span><span class='stat-val'>{Game1.gameMode}</span></div>
-        <div class='stat'><span>World Ready:</span><span class='stat-val'>{Context.IsWorldReady}</span></div>
+        <div class='stat'><span>Game Mode:</span><span class='stat-val'>{ModEntry.CachedGameMode}</span></div>
+        <div class='stat'><span>World Ready:</span><span class='stat-val'>{ModEntry.CachedWorldReady}</span></div>
         <div class='stat'><span>In-Game Time:</span><span class='stat-val'>{timeStr}</span></div>
         <div class='stat'><span>Current Location:</span><span class='stat-val'>{locStr}</span></div>
         <div class='stat'><span>Active Menu:</span><span class='stat-val'>{menuStr}</span></div>
@@ -543,7 +826,7 @@ namespace SDViOSTouchControls
 
     <div class='card'>
         <h3>Upload File Over Wi-Fi</h3>
-        <form method='POST' action='/upload' enctype='multipart/form-data' onsubmit='return doUpload(event)'>
+        <form onsubmit='return doUpload(event)'>
             <p>Target Path (relative to Documents, e.g. <code>Mods/SDViOSTouchControls/SDViOSTouchControls.dll</code>):</p>
             <input type='text' id='targetPath' style='width: 100%; padding: 8px; margin-bottom: 12px; border-radius: 4px; border: 1px solid #444; background: #181822; color: #fff;' value='Mods/SDViOSTouchControls/SDViOSTouchControls.dll'><br>
             <input type='file' id='fileInput' style='margin-bottom: 12px;'><br>
@@ -566,6 +849,7 @@ namespace SDViOSTouchControls
             try {{
                 const resp = await fetch('/upload?path=' + encodeURIComponent(target), {{
                     method: 'POST',
+                    headers: {{ 'Content-Type': 'application/octet-stream' }},
                     body: file
                 }});
                 const res = await resp.json();

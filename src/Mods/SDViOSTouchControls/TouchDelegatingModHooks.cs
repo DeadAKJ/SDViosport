@@ -11,6 +11,8 @@ namespace SDViOSTouchControls
 {
     public class TouchDelegatingModHooks : DelegatingModHooks
     {
+        private readonly HashSet<Keys> _mergedKeys = new HashSet<Keys>();
+
         public TouchDelegatingModHooks(ModHooks parent) : base(parent)
         {
         }
@@ -33,15 +35,25 @@ namespace SDViOSTouchControls
                     catch { }
                 }
 
-                // Inject simulated keyboard keys (WASD, Arrows, Action buttons)
+                // Inject simulated keyboard keys (WASD, Arrows, Action buttons) without unnecessary allocations
                 if (pad.HasActiveInput)
                 {
-                    var keys = new HashSet<Keys>(keyboardState.GetPressedKeys());
-                    foreach (var k in pad.CurrentSimulatedKeyboardState.GetPressedKeys())
+                    var simState = pad.CurrentSimulatedKeyboardState;
+                    var existingKeys = keyboardState.GetPressedKeys();
+                    if (existingKeys == null || existingKeys.Length == 0)
                     {
-                        keys.Add(k);
+                        keyboardState = simState;
                     }
-                    keyboardState = new KeyboardState(keys.ToArray());
+                    else
+                    {
+                        _mergedKeys.Clear();
+                        for (int i = 0; i < existingKeys.Length; i++)
+                            _mergedKeys.Add(existingKeys[i]);
+                        var simKeys = simState.GetPressedKeys();
+                        for (int i = 0; i < simKeys.Length; i++)
+                            _mergedKeys.Add(simKeys[i]);
+                        keyboardState = new KeyboardState(_mergedKeys.ToArray());
+                    }
                 }
 
                 // Inject simulated mouse state if overridden
@@ -56,15 +68,15 @@ namespace SDViOSTouchControls
 
         public override void OnGameLocation_ResetForPlayerEntry(GameLocation location, Action action)
         {
-            if (location != null && location.map == null)
+            if (location != null)
             {
-                try
-                {
-                    location.reloadMap();
-                }
-                catch { }
+                ModEntry.EnsureLocationMapAndTileSheetsLoaded(location);
+                base.OnGameLocation_ResetForPlayerEntry(location, action);
             }
-            base.OnGameLocation_ResetForPlayerEntry(location, action);
+            else
+            {
+                action?.Invoke();
+            }
         }
     }
 }

@@ -21,7 +21,73 @@ namespace SDViOSTouchControls
         public float Deadzone { get; set; } = 0.25f;
         public bool ShowKeyboardBtn { get; set; } = true;
         public bool ShowMenuBtn { get; set; } = true;
+        public bool ShowHotkeyDrawerBtn { get; set; } = true;
+        public bool AutoCloseHotkeyDrawer { get; set; } = false;
         public bool SimulateMouseOnTap { get; set; } = true;
+
+        public const int HotkeySlotCount = 8;
+
+        private static readonly string[] DefaultHotkeyLabels = new string[HotkeySlotCount]
+        {
+            "CHEAT",
+            "ITEMS",
+            "MOD N",
+            "DEBUG",
+            "INFO",
+            "AUTO",
+            "MAP",
+            "ESC"
+        };
+
+        private static readonly Microsoft.Xna.Framework.Input.Keys[] DefaultHotkeyKeys = new Microsoft.Xna.Framework.Input.Keys[HotkeySlotCount]
+        {
+            Microsoft.Xna.Framework.Input.Keys.P,
+            Microsoft.Xna.Framework.Input.Keys.I,
+            Microsoft.Xna.Framework.Input.Keys.N,
+            Microsoft.Xna.Framework.Input.Keys.F2,
+            Microsoft.Xna.Framework.Input.Keys.F1,
+            Microsoft.Xna.Framework.Input.Keys.U,
+            Microsoft.Xna.Framework.Input.Keys.M,
+            Microsoft.Xna.Framework.Input.Keys.Escape
+        };
+
+        public string[] HotkeyLabels { get; } = new string[HotkeySlotCount]
+        {
+            "CHEAT", "ITEMS", "MOD N", "DEBUG", "INFO", "AUTO", "MAP", "ESC"
+        };
+
+        public Microsoft.Xna.Framework.Input.Keys[] HotkeyKeys { get; } = new Microsoft.Xna.Framework.Input.Keys[HotkeySlotCount]
+        {
+            Microsoft.Xna.Framework.Input.Keys.P,
+            Microsoft.Xna.Framework.Input.Keys.I,
+            Microsoft.Xna.Framework.Input.Keys.N,
+            Microsoft.Xna.Framework.Input.Keys.F2,
+            Microsoft.Xna.Framework.Input.Keys.F1,
+            Microsoft.Xna.Framework.Input.Keys.U,
+            Microsoft.Xna.Framework.Input.Keys.M,
+            Microsoft.Xna.Framework.Input.Keys.Escape
+        };
+
+        public static void ResetHotkeySlotToDefault(int index, string[] labels, Microsoft.Xna.Framework.Input.Keys[] keys)
+        {
+            if (index < 0 || index >= HotkeySlotCount) return;
+            labels[index] = DefaultHotkeyLabels[index];
+            keys[index] = DefaultHotkeyKeys[index];
+        }
+
+        public static string SanitizeHotkeyLabel(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return "KEY";
+            var chars = new System.Collections.Generic.List<char>(7);
+            foreach (char c in raw.Trim().ToUpperInvariant())
+            {
+                if (c == '"' || c == ':' || c == ',' || c == '\r' || c == '\n' || c == '\\')
+                    continue;
+                chars.Add(c);
+                if (chars.Count >= 7) break;
+            }
+            return chars.Count > 0 ? new string(chars.ToArray()) : "KEY";
+        }
 
         // Mobile UI Scaling
         public float TargetUIScale { get; set; } = 1.35f;
@@ -36,6 +102,12 @@ namespace SDViOSTouchControls
         public float JoystickNormY { get; set; } = 0.82f;
         public float ButtonsNormX { get; set; } = 0.85f;
         public float ButtonsNormY { get; set; } = 0.82f;
+
+        public bool CustomTriggersSet { get; set; } = false;
+        public float LeftTriggerNormX { get; set; } = 0.085f;
+        public float LeftTriggerNormY { get; set; } = 0.68f;
+        public float RightTriggerNormX { get; set; } = 0.915f;
+        public float RightTriggerNormY { get; set; } = 0.67f;
 
         public static Action<string>? LogAction { get; set; }
 
@@ -85,6 +157,10 @@ namespace SDViOSTouchControls
                         ShowKeyboardBtn = sk;
                     else if (key.Equals("ShowMenuBtn", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool sm))
                         ShowMenuBtn = sm;
+                    else if (key.Equals("ShowHotkeyDrawerBtn", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool shd))
+                        ShowHotkeyDrawerBtn = shd;
+                    else if (key.Equals("AutoCloseHotkeyDrawer", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool achd))
+                        AutoCloseHotkeyDrawer = achd;
                     else if (key.Equals("SimulateMouseOnTap", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool smt))
                         SimulateMouseOnTap = smt;
                     else if (key.Equals("TargetUIScale", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float tuis))
@@ -108,6 +184,32 @@ namespace SDViOSTouchControls
                         ButtonsNormX = Math.Clamp(bx, 0.05f, 0.95f);
                     else if (key.Equals("ButtonsNormY", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float by))
                         ButtonsNormY = Math.Clamp(by, 0.05f, 0.95f);
+                    else if (key.Equals("CustomTriggersSet", StringComparison.OrdinalIgnoreCase) && bool.TryParse(val, out bool cts))
+                        CustomTriggersSet = cts;
+                    else if (key.Equals("LeftTriggerNormX", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float ltx))
+                        LeftTriggerNormX = Math.Clamp(ltx, 0.04f, 0.96f);
+                    else if (key.Equals("LeftTriggerNormY", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float lty))
+                        LeftTriggerNormY = Math.Clamp(lty, 0.05f, 0.95f);
+                    else if (key.Equals("RightTriggerNormX", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float rtx))
+                        RightTriggerNormX = Math.Clamp(rtx, 0.04f, 0.96f);
+                    else if (key.Equals("RightTriggerNormY", StringComparison.OrdinalIgnoreCase) && float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out float rty))
+                        RightTriggerNormY = Math.Clamp(rty, 0.05f, 0.95f);
+                    else if (key.StartsWith("Hotkey", StringComparison.OrdinalIgnoreCase) && key.Length >= 10)
+                    {
+                        if (int.TryParse(key.Substring(6, 1), out int slotIdx) && slotIdx >= 0 && slotIdx < HotkeySlotCount)
+                        {
+                            string suffix = key.Substring(7);
+                            if (suffix.Equals("Label", StringComparison.OrdinalIgnoreCase))
+                            {
+                                HotkeyLabels[slotIdx] = SanitizeHotkeyLabel(val);
+                            }
+                            else if (suffix.Equals("Key", StringComparison.OrdinalIgnoreCase) &&
+                                     Enum.TryParse<Microsoft.Xna.Framework.Input.Keys>(val, true, out var parsedKey))
+                            {
+                                HotkeyKeys[slotIdx] = parsedKey;
+                            }
+                        }
+                    }
                 }
 
                 Log($"[TouchOverlaySettings] Loaded settings: Opacity={Opacity:F2}, Scale={Scale:F2}, UIScale={TargetUIScale:F2}, Zoom={TargetZoomLevel:F2}, LeftHanded={LeftHanded}, Deadzone={Deadzone:F2}, MouseMode={MouseControlMode}, Sensitivity={TrackpadSensitivity:F1}");
@@ -123,24 +225,39 @@ namespace SDViOSTouchControls
             try
             {
                 string path = GetConfigPath();
-                string json = "{\n" +
-                    $"  \"Opacity\": {Opacity.ToString("0.00", CultureInfo.InvariantCulture)},\n" +
-                    $"  \"Scale\": {Scale.ToString("0.00", CultureInfo.InvariantCulture)},\n" +
-                    $"  \"LeftHanded\": {(LeftHanded ? "true" : "false")},\n" +
-                    $"  \"Deadzone\": {Deadzone.ToString("0.00", CultureInfo.InvariantCulture)},\n" +
-                    $"  \"ShowKeyboardBtn\": {(ShowKeyboardBtn ? "true" : "false")},\n" +
-                    $"  \"ShowMenuBtn\": {(ShowMenuBtn ? "true" : "false")},\n" +
-                    $"  \"SimulateMouseOnTap\": {(SimulateMouseOnTap ? "true" : "false")},\n" +
-                    $"  \"TargetUIScale\": {TargetUIScale.ToString("0.00", CultureInfo.InvariantCulture)},\n" +
-                    $"  \"TargetZoomLevel\": {TargetZoomLevel.ToString("0.00", CultureInfo.InvariantCulture)},\n" +
-                    $"  \"MouseControlMode\": \"{MouseControlMode}\",\n" +
-                    $"  \"TrackpadSensitivity\": {TrackpadSensitivity.ToString("0.00", CultureInfo.InvariantCulture)},\n" +
-                    $"  \"CustomPositionsSet\": {(CustomPositionsSet ? "true" : "false")},\n" +
-                    $"  \"JoystickNormX\": {JoystickNormX.ToString("0.000", CultureInfo.InvariantCulture)},\n" +
-                    $"  \"JoystickNormY\": {JoystickNormY.ToString("0.000", CultureInfo.InvariantCulture)},\n" +
-                    $"  \"ButtonsNormX\": {ButtonsNormX.ToString("0.000", CultureInfo.InvariantCulture)},\n" +
-                    $"  \"ButtonsNormY\": {ButtonsNormY.ToString("0.000", CultureInfo.InvariantCulture)}\n" +
-                    "}";
+                var sb = new System.Text.StringBuilder(1024);
+                sb.Append("{\n");
+                sb.Append($"  \"Opacity\": {Opacity.ToString("0.00", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"Scale\": {Scale.ToString("0.00", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"LeftHanded\": {(LeftHanded ? "true" : "false")},\n");
+                sb.Append($"  \"Deadzone\": {Deadzone.ToString("0.00", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"ShowKeyboardBtn\": {(ShowKeyboardBtn ? "true" : "false")},\n");
+                sb.Append($"  \"ShowMenuBtn\": {(ShowMenuBtn ? "true" : "false")},\n");
+                sb.Append($"  \"ShowHotkeyDrawerBtn\": {(ShowHotkeyDrawerBtn ? "true" : "false")},\n");
+                sb.Append($"  \"AutoCloseHotkeyDrawer\": {(AutoCloseHotkeyDrawer ? "true" : "false")},\n");
+                sb.Append($"  \"SimulateMouseOnTap\": {(SimulateMouseOnTap ? "true" : "false")},\n");
+                sb.Append($"  \"TargetUIScale\": {TargetUIScale.ToString("0.00", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"TargetZoomLevel\": {TargetZoomLevel.ToString("0.00", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"MouseControlMode\": \"{MouseControlMode}\",\n");
+                sb.Append($"  \"TrackpadSensitivity\": {TrackpadSensitivity.ToString("0.00", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"CustomPositionsSet\": {(CustomPositionsSet ? "true" : "false")},\n");
+                sb.Append($"  \"JoystickNormX\": {JoystickNormX.ToString("0.000", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"JoystickNormY\": {JoystickNormY.ToString("0.000", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"ButtonsNormX\": {ButtonsNormX.ToString("0.000", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"ButtonsNormY\": {ButtonsNormY.ToString("0.000", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"CustomTriggersSet\": {(CustomTriggersSet ? "true" : "false")},\n");
+                sb.Append($"  \"LeftTriggerNormX\": {LeftTriggerNormX.ToString("0.000", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"LeftTriggerNormY\": {LeftTriggerNormY.ToString("0.000", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"RightTriggerNormX\": {RightTriggerNormX.ToString("0.000", CultureInfo.InvariantCulture)},\n");
+                sb.Append($"  \"RightTriggerNormY\": {RightTriggerNormY.ToString("0.000", CultureInfo.InvariantCulture)},\n");
+                for (int i = 0; i < HotkeySlotCount; i++)
+                {
+                    string safeLabel = SanitizeHotkeyLabel(HotkeyLabels[i]);
+                    string comma = (i == HotkeySlotCount - 1) ? "" : ",";
+                    sb.Append($"  \"Hotkey{i}Label\": \"{safeLabel}\",\n");
+                    sb.Append($"  \"Hotkey{i}Key\": \"{HotkeyKeys[i]}\"{comma}\n");
+                }
+                sb.Append("}");
 
                 string? dir = Path.GetDirectoryName(path);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -148,7 +265,7 @@ namespace SDViOSTouchControls
                     Directory.CreateDirectory(dir);
                 }
 
-                File.WriteAllText(path, json);
+                File.WriteAllText(path, sb.ToString());
                 Log("[TouchOverlaySettings] Successfully saved settings.");
             }
             catch (Exception ex)
@@ -165,6 +282,8 @@ namespace SDViOSTouchControls
             Deadzone = 0.25f;
             ShowKeyboardBtn = true;
             ShowMenuBtn = true;
+            ShowHotkeyDrawerBtn = true;
+            AutoCloseHotkeyDrawer = false;
             SimulateMouseOnTap = true;
             TargetUIScale = 1.35f;
             TargetZoomLevel = 1.25f;
@@ -175,6 +294,16 @@ namespace SDViOSTouchControls
             JoystickNormY = 0.82f;
             ButtonsNormX = 0.85f;
             ButtonsNormY = 0.82f;
+            CustomTriggersSet = false;
+            LeftTriggerNormX = 0.085f;
+            LeftTriggerNormY = 0.68f;
+            RightTriggerNormX = 0.915f;
+            RightTriggerNormY = 0.67f;
+            for (int i = 0; i < HotkeySlotCount; i++)
+            {
+                HotkeyLabels[i] = DefaultHotkeyLabels[i];
+                HotkeyKeys[i] = DefaultHotkeyKeys[i];
+            }
             Save();
         }
     }

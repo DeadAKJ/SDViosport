@@ -18,6 +18,8 @@ namespace SDViOSTouchControls
         public bool IsVisible { get; set; } = true;
         public bool IsSettingsOpen { get; set; } = false;
         public bool IsEditLayoutMode { get; set; } = false;
+        public bool IsHotkeyDrawerOpen { get; set; } = false;
+        public bool IsKeyPickerOpen { get; set; } = false;
         public bool PlayerRequestedMenuOpen { get; set; } = false;
 
         // Current virtual control states
@@ -26,34 +28,84 @@ namespace SDViOSTouchControls
         public bool ButtonB { get; private set; } = false;
         public bool ButtonX { get; private set; } = false;
         public bool ButtonY { get; private set; } = false;
+        public bool ButtonLT { get; private set; } = false;
+        public bool ButtonRT { get; private set; } = false;
         public bool ButtonMenu { get; private set; } = false;
 
         // Visual states for drawing
         public bool IsVisualButtonA => ButtonA;
         public bool IsVisualButtonX => ButtonX;
-        public bool IsVisualButtonY => _yTouchActive || _yPulseFrames > 0;
-        public bool IsVisualButtonB => _bTouchActive || _bPulseFrames > 0;
-        public bool IsVisualButtonMenu => _menuTouchActive || _menuPulseFrames > 0;
+        public bool IsVisualButtonY => _yTouchActive || _yPulseFrames > 0 || _yVisualFrames > 0;
+        public bool IsVisualButtonB => _bTouchActive || _bPulseFrames > 0 || _bVisualFrames > 0;
+        public bool IsVisualButtonLT => ButtonLT || _ltVisualFrames > 0;
+        public bool IsVisualButtonRT => ButtonRT || _rtVisualFrames > 0;
+        public bool IsVisualButtonMenu => _menuTouchActive || _menuPulseFrames > 0 || _menuVisualFrames > 0;
 
-        // Pulse and debounce state for menu toggle / cancel buttons
+        // Pulse and debounce state for menu toggle / cancel / trigger buttons
         private bool _yTouchActive = false;
         private int _yPulseFrames = 0;
+        private int _yVisualFrames = 0;
         private double _lastYPressTime = 0;
 
         private bool _bTouchActive = false;
         private int _bPulseFrames = 0;
+        private int _bVisualFrames = 0;
         private double _lastBPressTime = 0;
+
+        private bool _ltTouchActive = false;
+        private int _ltVisualFrames = 0;
+        private double _lastLTPressTime = 0;
+        private double _ltNextRepeatTime = 0;
+
+        private bool _rtTouchActive = false;
+        private int _rtVisualFrames = 0;
+        private double _lastRTPressTime = 0;
+        private double _rtNextRepeatTime = 0;
+
+        private bool _comboShiftTriggered = false;
+        private double _lastToolbarShiftTime = 0;
 
         private bool _menuTouchActive = false;
         private int _menuPulseFrames = 0;
+        private int _menuVisualFrames = 0;
         private double _lastMenuPressTime = 0;
+
+        private double _lastKeyBtnPressTime = 0;
+
+        // Mod Hotkey Drawer state
+        private bool _isHotkeyRebindMode = false;
+        private int _editingHotkeySlotIndex = -1;
+        private double _lastDrawerToggleTime = 0;
+        private double _lastDrawerActionTime = 0;
+        private readonly bool[] _hotkeyTouchActive = new bool[TouchOverlaySettings.HotkeySlotCount];
+        private readonly int[] _hotkeyPulseFrames = new int[TouchOverlaySettings.HotkeySlotCount];
+        private readonly int[] _hotkeyVisualFrames = new int[TouchOverlaySettings.HotkeySlotCount];
+        private readonly double[] _lastHotkeyPressTime = new double[TouchOverlaySettings.HotkeySlotCount];
+
+        public bool HasActiveHotkeyInput
+        {
+            get
+            {
+                for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
+                {
+                    if (_hotkeyTouchActive[i] || _hotkeyPulseFrames[i] > 0)
+                        return true;
+                }
+                return false;
+            }
+        }
 
         public bool DPadUp => LeftStick.Y < -Settings.Deadzone;
         public bool DPadDown => LeftStick.Y > Settings.Deadzone;
         public bool DPadLeft => LeftStick.X < -Settings.Deadzone;
         public bool DPadRight => LeftStick.X > Settings.Deadzone;
 
-        public bool HasActiveInput => LeftStick != Vector2.Zero || ButtonA || ButtonB || ButtonX || ButtonY || ButtonMenu;
+        public bool HasActiveInput => LeftStick != Vector2.Zero || ButtonA || ButtonB || ButtonX || ButtonY || ButtonLT || ButtonRT || ButtonMenu || HasActiveHotkeyInput;
+
+        private readonly HashSet<Keys> _simKeysSet = new(16);
+        private readonly List<Keys> _activeKeysList = new(16);
+        private readonly object[] _setKeysArgs = new object[1];
+        private static readonly KeyboardState _emptyKeyboardState = new KeyboardState();
 
         private static void AddOptionKeys(HashSet<Keys> set, InputButton[]? buttons)
         {
@@ -69,59 +121,77 @@ namespace SDViOSTouchControls
         {
             get
             {
-                var keys = new HashSet<Keys>();
+                if (!HasActiveInput)
+                    return _emptyKeyboardState;
+
+                _simKeysSet.Clear();
                 var opt = Game1.options;
 
                 if (DPadUp)
                 {
-                    keys.Add(Keys.W);
-                    keys.Add(Keys.Up);
-                    AddOptionKeys(keys, opt?.moveUpButton);
+                    _simKeysSet.Add(Keys.W);
+                    _simKeysSet.Add(Keys.Up);
+                    AddOptionKeys(_simKeysSet, opt?.moveUpButton);
                 }
                 if (DPadDown)
                 {
-                    keys.Add(Keys.S);
-                    keys.Add(Keys.Down);
-                    AddOptionKeys(keys, opt?.moveDownButton);
+                    _simKeysSet.Add(Keys.S);
+                    _simKeysSet.Add(Keys.Down);
+                    AddOptionKeys(_simKeysSet, opt?.moveDownButton);
                 }
                 if (DPadLeft)
                 {
-                    keys.Add(Keys.A);
-                    keys.Add(Keys.Left);
-                    AddOptionKeys(keys, opt?.moveLeftButton);
+                    _simKeysSet.Add(Keys.A);
+                    _simKeysSet.Add(Keys.Left);
+                    AddOptionKeys(_simKeysSet, opt?.moveLeftButton);
                 }
                 if (DPadRight)
                 {
-                    keys.Add(Keys.D);
-                    keys.Add(Keys.Right);
-                    AddOptionKeys(keys, opt?.moveRightButton);
+                    _simKeysSet.Add(Keys.D);
+                    _simKeysSet.Add(Keys.Right);
+                    AddOptionKeys(_simKeysSet, opt?.moveRightButton);
                 }
 
                 bool isGamepad = opt != null && opt.gamepadControls;
 
                 if (ButtonA)
                 {
-                    keys.Add(Keys.X);
-                    keys.Add(Keys.Space);
-                    AddOptionKeys(keys, opt?.actionButton);
+                    _simKeysSet.Add(Keys.X);
+                    _simKeysSet.Add(Keys.Space);
+                    AddOptionKeys(_simKeysSet, opt?.actionButton);
                 }
                 if (ButtonX)
                 {
-                    keys.Add(Keys.C);
-                    AddOptionKeys(keys, opt?.useToolButton);
+                    _simKeysSet.Add(Keys.C);
+                    AddOptionKeys(_simKeysSet, opt?.useToolButton);
                 }
                 if (ButtonY && !isGamepad)
                 {
-                    keys.Add(Keys.E);
-                    AddOptionKeys(keys, opt?.menuButton);
+                    _simKeysSet.Add(Keys.E);
+                    AddOptionKeys(_simKeysSet, opt?.menuButton);
                 }
                 if ((ButtonB || ButtonMenu) && !isGamepad)
                 {
-                    keys.Add(Keys.Escape);
-                    AddOptionKeys(keys, opt?.cancelButton);
+                    _simKeysSet.Add(Keys.Escape);
+                    AddOptionKeys(_simKeysSet, opt?.cancelButton);
                 }
 
-                return new KeyboardState(keys.ToArray());
+                for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
+                {
+                    if (_hotkeyTouchActive[i] || _hotkeyPulseFrames[i] > 0)
+                    {
+                        Keys hk = Settings.HotkeyKeys[i];
+                        if (hk != Keys.None)
+                            _simKeysSet.Add(hk);
+                    }
+                }
+
+                if (_simKeysSet.Count == 0)
+                    return _emptyKeyboardState;
+
+                var arr = new Keys[_simKeysSet.Count];
+                _simKeysSet.CopyTo(arr);
+                return new KeyboardState(arr);
             }
         }
 
@@ -135,7 +205,9 @@ namespace SDViOSTouchControls
                     ((ButtonB && isGamepad) ? Buttons.B : 0) |
                     (ButtonX ? Buttons.X : 0) |
                     ((ButtonY && isGamepad) ? Buttons.Y : 0) |
-                    ((ButtonMenu && isGamepad) ? Buttons.Start : 0)
+                    ((ButtonMenu && isGamepad) ? Buttons.Start : 0) |
+                    (ButtonLT ? Buttons.LeftTrigger : 0) |
+                    (ButtonRT ? Buttons.RightTrigger : 0)
                 );
                 var dpad = new GamePadDPad(
                     DPadUp ? ButtonState.Pressed : ButtonState.Released,
@@ -144,17 +216,16 @@ namespace SDViOSTouchControls
                     DPadRight ? ButtonState.Pressed : ButtonState.Released
                 );
                 var thumbsticks = new GamePadThumbSticks(new Vector2(LeftStick.X, -LeftStick.Y), Vector2.Zero);
-                return new GamePadState(thumbsticks, new GamePadTriggers(), buttons, dpad);
+                var triggers = new GamePadTriggers(ButtonLT ? 1f : 0f, ButtonRT ? 1f : 0f);
+                return new GamePadState(thumbsticks, triggers, buttons, dpad);
             }
         }
 
         /// <summary>
-        /// Gamepad state that is ALWAYS connected (IsConnected never changes).
-        /// Vanilla Game1.CheckGamepadMode shows "gamepad connected/disconnected" and opens a GameMenu (pause on
-        /// unplug) whenever IsConnected changes, and it also flips options.gamepadControls itself — so IsConnected
-        /// must never depend on gamepadControls or touch state, or it becomes a menu-opening feedback loop.
-        /// Keyboard/mouse mode: connected but idle (no buttons), so touching the pad never auto-switches to gamepad mode.
-        /// Gamepad mode: connected with the simulated buttons/sticks.
+        /// Gamepad state exposed to Game1 and SMAPI SInputState.
+        /// Note: Game1.CheckGamepadMode is Harmony-patched out and Game1.options.gamepadControls is locked false,
+        /// so reporting LeftTrigger/RightTrigger here allows SMAPI mods to detect SButton.LeftTrigger / SButton.RightTrigger
+        /// without triggering vanilla gamepad connect/disconnect notifications.
         /// </summary>
         public GamePadState EffectiveGamePadState
         {
@@ -163,6 +234,15 @@ namespace SDViOSTouchControls
                 bool isGamepad = Game1.options != null && Game1.options.gamepadControls;
                 if (isGamepad)
                     return CurrentSimulatedGamePadState;
+                if (ButtonLT || ButtonRT)
+                {
+                    var buttons = new GamePadButtons(
+                        (ButtonLT ? Buttons.LeftTrigger : 0) |
+                        (ButtonRT ? Buttons.RightTrigger : 0)
+                    );
+                    var triggers = new GamePadTriggers(ButtonLT ? 1f : 0f, ButtonRT ? 1f : 0f);
+                    return new GamePadState(default, triggers, buttons, default);
+                }
                 return default;
             }
         }
@@ -175,7 +255,16 @@ namespace SDViOSTouchControls
         private int _pointClickTouchId = -1;
         private int _pointClickHoldFrames = 0;
 
-        public bool IsMouseOverridden => !IsSettingsOpen && !IsEditLayoutMode && Settings.MouseControlMode != MouseMode.Disabled;
+        public void ResetSimulatedMouse()
+        {
+            SimulatedMousePosition = new Point(-1000, -1000);
+            SimulatedMouseLeftDown = false;
+            SimulatedMouseRightDown = false;
+            _pointClickTouchId = -1;
+            _pointClickHoldFrames = 0;
+        }
+
+        public bool IsMouseOverridden => !IsSettingsOpen && !IsEditLayoutMode && !IsKeyPickerOpen && Settings.MouseControlMode != MouseMode.Disabled;
 
         public bool IsLeftClickActive => SimulatedMouseLeftDown || (Settings.MouseControlMode == MouseMode.Trackpad && ButtonA);
         public bool IsRightClickActive => SimulatedMouseRightDown || (Settings.MouseControlMode == MouseMode.Trackpad && ButtonX);
@@ -230,17 +319,37 @@ namespace SDViOSTouchControls
         private Vector2 _joystickCenter;
         private float _joystickRadius = 80f;
         private Vector2 _buttonsCenter;
+        private Vector2 _ltCenter;
+        private Vector2 _rtCenter;
 
         private Rectangle _joystickBaseRect;
         private Rectangle _btnARect;
         private Rectangle _btnBRect;
         private Rectangle _btnXRect;
         private Rectangle _btnYRect;
+        private Rectangle _btnLTRect;
+        private Rectangle _btnRTRect;
         private Rectangle _btnToggleRect;
         private Rectangle _btnSettingsRect;
         private Rectangle _btnKeyboardRect;
         private Rectangle _btnMenuRect;
+        private Rectangle _btnHotkeyDrawerToggleRect;
         private Rectangle _btnDoneEditRect;
+
+        // Mod Hotkey Drawer rectangles
+        private Rectangle _hotkeyDrawerRect;
+        private readonly Rectangle[] _hotkeySlotRects = new Rectangle[TouchOverlaySettings.HotkeySlotCount];
+        private Rectangle _btnHotkeyBindModeRect;
+        private Rectangle _btnHotkeyAutoCloseRect;
+        private Rectangle _btnHotkeyCloseDrawerRect;
+
+        // Key Picker Modal rectangles
+        private Rectangle _keyPickerModalRect;
+        private Rectangle _keyPickerCloseRect;
+        private Rectangle _btnKeyPickerRenameRect;
+        private Rectangle _btnKeyPickerPresetRect;
+        private Rectangle _btnKeyPickerResetSlotRect;
+        private Rectangle _btnKeyPickerCancelRect;
 
         // Settings modal rectangles
         private Rectangle _settingsModalRect;
@@ -253,6 +362,7 @@ namespace SDViOSTouchControls
         private Rectangle _btnDeadzone;
         private Rectangle _btnToggleKeyboard;
         private Rectangle _btnToggleMenu;
+        private Rectangle _btnToggleHotkeyDrawer;
         private Rectangle _btnToggleMouseMode;
         private Rectangle _btnSensitivityMinus;
         private Rectangle _btnSensitivityPlus;
@@ -370,6 +480,34 @@ namespace SDViOSTouchControls
             _btnYRect = new Rectangle((int)(_buttonsCenter.X - btnSize / 2f), (int)(_buttonsCenter.Y - spacing - btnSize / 2f), (int)btnSize, (int)btnSize);          // Top: Y
             _btnBRect = new Rectangle((int)(_buttonsCenter.X + spacing - btnSize / 2f), (int)(_buttonsCenter.Y - btnSize / 2f), (int)btnSize, (int)btnSize);          // Right: B
 
+            // Left Trigger (LT) and Right Trigger (RT) shoulder layout
+            float trigW = 86f * baseScale;
+            float trigH = 44f * baseScale;
+            if (Settings.CustomTriggersSet)
+            {
+                _ltCenter = new Vector2(Settings.LeftTriggerNormX * width, Settings.LeftTriggerNormY * height);
+                _rtCenter = new Vector2(Settings.RightTriggerNormX * width, Settings.RightTriggerNormY * height);
+            }
+            else
+            {
+                bool stickOnLeft = _joystickCenter.X <= _buttonsCenter.X;
+                Vector2 leftCluster = stickOnLeft ? _joystickCenter : _buttonsCenter;
+                Vector2 rightCluster = stickOnLeft ? _buttonsCenter : _joystickCenter;
+                float leftOffset = stickOnLeft ? (_joystickRadius + 46f * baseScale) : (spacing + btnSize / 2f + 42f * baseScale);
+                float rightOffset = stickOnLeft ? (spacing + btnSize / 2f + 42f * baseScale) : (_joystickRadius + 46f * baseScale);
+
+                _ltCenter = new Vector2(
+                    Math.Clamp(leftCluster.X, trigW / 2f + 16f, width - trigW / 2f - 16f),
+                    Math.Clamp(leftCluster.Y - leftOffset, trigH / 2f + 64f, height - trigH / 2f - 16f)
+                );
+                _rtCenter = new Vector2(
+                    Math.Clamp(rightCluster.X, trigW / 2f + 16f, width - trigW / 2f - 16f),
+                    Math.Clamp(rightCluster.Y - rightOffset, trigH / 2f + 64f, height - trigH / 2f - 16f)
+                );
+            }
+            _btnLTRect = new Rectangle((int)(_ltCenter.X - trigW / 2f), (int)(_ltCenter.Y - trigH / 2f), (int)trigW, (int)trigH);
+            _btnRTRect = new Rectangle((int)(_rtCenter.X - trigW / 2f), (int)(_rtCenter.Y - trigH / 2f), (int)trigW, (int)trigH);
+
             // Top utility buttons (top-left aligned to avoid notch, rounded corners, and Stardew clock/money HUD)
             float topY = 16f;
             float topBtnH = 34f;
@@ -407,6 +545,62 @@ namespace SDViOSTouchControls
                 _btnMenuRect = Rectangle.Empty;
             }
 
+            // 5. Mod Hotkey Drawer toggle button
+            if (Settings.ShowHotkeyDrawerBtn)
+            {
+                float modsW = 68f;
+                _btnHotkeyDrawerToggleRect = new Rectangle((int)curX, (int)topY, (int)modsW, (int)topBtnH);
+                curX += (modsW + 8f);
+            }
+            else
+            {
+                _btnHotkeyDrawerToggleRect = Rectangle.Empty;
+                IsHotkeyDrawerOpen = false;
+            }
+
+            // Mod Hotkey Drawer panel layout (4x2 grid + utility footer under top bar)
+            int drawerX = 40;
+            int drawerY = (int)(topY + topBtnH + 8f);
+            int slotW = 92;
+            int slotH = 44;
+            int slotGapX = 8;
+            int slotGapY = 8;
+            int drawerPad = 12;
+            int gridW = 4 * slotW + 3 * slotGapX;
+            int drawerW = drawerPad * 2 + gridW;
+            int footerY = drawerY + drawerPad + 2 * slotH + slotGapY + 10;
+            int footerH = 30;
+            int drawerH = (footerY - drawerY) + footerH + drawerPad;
+            _hotkeyDrawerRect = new Rectangle(drawerX, drawerY, drawerW, drawerH);
+
+            for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
+            {
+                int col = i % 4;
+                int row = i / 4;
+                int sx = drawerX + drawerPad + col * (slotW + slotGapX);
+                int sy = drawerY + drawerPad + row * (slotH + slotGapY);
+                _hotkeySlotRects[i] = new Rectangle(sx, sy, slotW, slotH);
+            }
+
+            int footerX = drawerX + drawerPad;
+            _btnHotkeyBindModeRect = new Rectangle(footerX, footerY, 138, footerH);
+            _btnHotkeyAutoCloseRect = new Rectangle(footerX + 146, footerY, 148, footerH);
+            _btnHotkeyCloseDrawerRect = new Rectangle(footerX + 302, footerY, gridW - 302, footerH);
+
+            // Key Picker Modal layout
+            int kpW = Math.Min(720, width - 40);
+            int kpH = Math.Min(480, height - 30);
+            _keyPickerModalRect = new Rectangle((width - kpW) / 2, (height - kpH) / 2, kpW, kpH);
+            _keyPickerCloseRect = new Rectangle(_keyPickerModalRect.Right - 38, _keyPickerModalRect.Top + 8, 30, 30);
+            int kpBotY = _keyPickerModalRect.Bottom - 44;
+            int kpBtnGap = 10;
+            int kpBtnW = (kpW - 40 - 3 * kpBtnGap) / 4;
+            int kpStartX = _keyPickerModalRect.Left + 20;
+            _btnKeyPickerRenameRect = new Rectangle(kpStartX, kpBotY, kpBtnW, 34);
+            _btnKeyPickerPresetRect = new Rectangle(kpStartX + (kpBtnW + kpBtnGap), kpBotY, kpBtnW, 34);
+            _btnKeyPickerResetSlotRect = new Rectangle(kpStartX + 2 * (kpBtnW + kpBtnGap), kpBotY, kpBtnW, 34);
+            _btnKeyPickerCancelRect = new Rectangle(kpStartX + 3 * (kpBtnW + kpBtnGap), kpBotY, kpBtnW, 34);
+
             // Edit mode "DONE" button
             _btnDoneEditRect = new Rectangle(width / 2 - 60, 20, 120, 44);
 
@@ -427,7 +621,8 @@ namespace SDViOSTouchControls
             _btnHandedness = new Rectangle(ctrlX, startY + rowSpacing * 2, 170, 28);
             _btnDeadzone = new Rectangle(ctrlX, startY + rowSpacing * 3, 170, 28);
             _btnToggleKeyboard = new Rectangle(ctrlX, startY + rowSpacing * 4, 80, 28);
-            _btnToggleMenu = new Rectangle(ctrlX + 90, startY + rowSpacing * 4, 80, 28);
+            _btnToggleMenu = new Rectangle(ctrlX + 88, startY + rowSpacing * 4, 80, 28);
+            _btnToggleHotkeyDrawer = new Rectangle(ctrlX + 176, startY + rowSpacing * 4, 88, 28);
             _btnToggleMouseMode = new Rectangle(ctrlX, startY + rowSpacing * 5, 170, 28);
             _btnSensitivityMinus = new Rectangle(ctrlX, startY + rowSpacing * 6, 40, 28);
             _btnSensitivityPlus = new Rectangle(ctrlX + 110, startY + rowSpacing * 6, 40, 28);
@@ -464,13 +659,30 @@ namespace SDViOSTouchControls
             if (_bPulseFrames > 0) _bPulseFrames--;
             if (_menuPulseFrames > 0) _menuPulseFrames--;
 
+            if (_yVisualFrames > 0) _yVisualFrames--;
+            if (_bVisualFrames > 0) _bVisualFrames--;
+            if (_ltVisualFrames > 0) _ltVisualFrames--;
+            if (_rtVisualFrames > 0) _rtVisualFrames--;
+            if (_menuVisualFrames > 0) _menuVisualFrames--;
+
+            for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
+            {
+                if (_hotkeyPulseFrames[i] > 0) _hotkeyPulseFrames[i]--;
+                if (_hotkeyVisualFrames[i] > 0) _hotkeyVisualFrames[i]--;
+            }
+
             bool yTouchFound = false;
             bool bTouchFound = false;
+            bool ltTouchFound = false;
+            bool rtTouchFound = false;
             bool menuTouchFound = false;
+            Span<bool> hotkeyTouchFound = stackalloc bool[TouchOverlaySettings.HotkeySlotCount];
 
             // Reset momentary states
             ButtonA = false;
             ButtonX = false;
+            ButtonLT = false;
+            ButtonRT = false;
             SimulatedMouseRightDown = false;
 
             // Update hold frames for point-and-click tap recognition
@@ -496,6 +708,23 @@ namespace SDViOSTouchControls
                 _trackpadRightClickFrames--;
             }
 
+            // 0. Process Key Picker Modal Interaction
+            if (IsKeyPickerOpen)
+            {
+                _trackpadPrimaryTouchId = -1;
+                _trackpadSecondTouchId = -1;
+                _stickTouchId = -1;
+                _pointClickTouchId = -1;
+                _pointClickHoldFrames = 0;
+                SimulatedMouseLeftDown = false;
+                SimulatedMouseRightDown = false;
+                for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
+                    _hotkeyTouchActive[i] = false;
+                UpdateKeyPickerTouches(touches, curTime);
+                ForwardInputToGame();
+                return;
+            }
+
             // 1. Process Settings Menu Interaction
             if (IsSettingsOpen)
             {
@@ -506,6 +735,8 @@ namespace SDViOSTouchControls
                 _pointClickHoldFrames = 0;
                 SimulatedMouseLeftDown = false;
                 SimulatedMouseRightDown = false;
+                for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
+                    _hotkeyTouchActive[i] = false;
                 UpdateSettingsTouches(touches);
                 ForwardInputToGame();
                 return;
@@ -521,6 +752,8 @@ namespace SDViOSTouchControls
                 _pointClickHoldFrames = 0;
                 SimulatedMouseLeftDown = false;
                 SimulatedMouseRightDown = false;
+                for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
+                    _hotkeyTouchActive[i] = false;
                 UpdateEditModeTouches(touches);
                 ForwardInputToGame();
                 return;
@@ -529,116 +762,19 @@ namespace SDViOSTouchControls
             // 3. Process Gamepad & Mouse Touches
             bool stickTouchPresent = false;
             bool pointClickTouchPresent = false;
+            bool trackpadPrimaryPresent = false;
+            bool trackpadSecondPresent = false;
 
             foreach (var touch in touches)
             {
+                if (touch.Id == _trackpadPrimaryTouchId) trackpadPrimaryPresent = true;
+                if (touch.Id == _trackpadSecondTouchId) trackpadSecondPresent = true;
+
                 // Map raw touch coordinate to viewport coordinate
                 Point pt = MapTouchToViewport(touch.Position);
 
-                // Top utility bar check
-                if (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved)
-                {
-                    if (_btnToggleRect.Contains(pt))
-                    {
-                        if (touch.State == TouchLocationState.Pressed)
-                            IsVisible = !IsVisible;
-                        continue;
-                    }
-                    if (_btnSettingsRect.Contains(pt))
-                    {
-                        if (touch.State == TouchLocationState.Pressed)
-                            IsSettingsOpen = true;
-                        continue;
-                    }
-                    if (Settings.ShowKeyboardBtn && !_btnKeyboardRect.IsEmpty && _btnKeyboardRect.Contains(pt))
-                    {
-                        // Open keyboard
-                        continue;
-                    }
-                    if (Settings.ShowMenuBtn && !_btnMenuRect.IsEmpty && _btnMenuRect.Contains(pt))
-                    {
-                        menuTouchFound = true;
-                        if (!_menuTouchActive && (curTime - _lastMenuPressTime > 0.25))
-                        {
-                            _menuPulseFrames = 1;
-                            _lastMenuPressTime = curTime;
-                            Log($"[TVP_DEBUG] Touch on Button Menu! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
-                            if (Game1.activeClickableMenu != null)
-                            {
-                                PlayerRequestedMenuOpen = false;
-                                try
-                                {
-                                    if (Game1.activeClickableMenu.readyToClose())
-                                        Game1.activeClickableMenu.exitThisMenu();
-                                }
-                                catch (Exception ex)
-                                {
-                                    Log($"[TVP_DEBUG] Exception closing menu on MenuBtn: {ex.Message}");
-                                }
-                            }
-                            else
-                            {
-                                PlayerRequestedMenuOpen = true;
-                            }
-                        }
-                        continue;
-                    }
-                }
-
-                // If overlay is hidden, treat all touches as screen clicks
-                if (!IsVisible)
-                {
-                    HandleBackgroundTouch(touch, pt, gameTime);
-                    continue;
-                }
-
-                // Check Action Buttons
-                bool hitButton = false;
-                if (_btnARect.Contains(pt)) { ButtonA = true; hitButton = true; }
-                if (_btnXRect.Contains(pt)) { ButtonX = true; hitButton = true; }
-
-                if (_btnYRect.Contains(pt))
-                {
-                    yTouchFound = true;
-                    hitButton = true;
-                    if (!_yTouchActive && (curTime - _lastYPressTime > 0.25))
-                    {
-                        _yPulseFrames = 1;
-                        _lastYPressTime = curTime;
-                        PlayerRequestedMenuOpen = true;
-                        Log($"[TVP_DEBUG] Touch on Button Y! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
-                    }
-                }
-
-                if (_btnBRect.Contains(pt))
-                {
-                    bTouchFound = true;
-                    hitButton = true;
-                    if (!_bTouchActive && (curTime - _lastBPressTime > 0.25))
-                    {
-                        _bPulseFrames = 1;
-                        _lastBPressTime = curTime;
-                        PlayerRequestedMenuOpen = false;
-                        Log($"[TVP_DEBUG] Touch on Button B! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}, isGamepad={Game1.options?.gamepadControls}");
-                        if (Game1.activeClickableMenu != null)
-                        {
-                            try
-                            {
-                                if (Game1.activeClickableMenu.readyToClose())
-                                    Game1.activeClickableMenu.exitThisMenu();
-                            }
-                            catch (Exception ex)
-                            {
-                                Log($"[TVP_DEBUG] Exception closing menu on ButtonB: {ex.Message}");
-                            }
-                        }
-                    }
-                }
-
-                if (hitButton) continue;
-
-                // Check Joystick
-                if (_stickTouchId == touch.Id)
+                // Priority 1: If this touch is already claimed by the joystick, continue tracking it even if dragged across screen
+                if (_stickTouchId != -1 && touch.Id == _stickTouchId)
                 {
                     if (touch.State == TouchLocationState.Released)
                     {
@@ -653,10 +789,235 @@ namespace SDViOSTouchControls
                     }
                     continue;
                 }
-                else if (_stickTouchId == -1 && (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved))
+
+                // Priority 2: If this touch is already claimed by the trackpad, continue tracking it
+                if ((_trackpadPrimaryTouchId != -1 && touch.Id == _trackpadPrimaryTouchId) ||
+                    (_trackpadSecondTouchId != -1 && touch.Id == _trackpadSecondTouchId))
+                {
+                    HandleTrackpadTouch(touch, gameTime);
+                    continue;
+                }
+
+                // Top utility bar check
+                if (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved)
+                {
+                    if (_btnToggleRect.Contains(pt))
+                    {
+                        if (touch.State == TouchLocationState.Pressed)
+                            IsVisible = !IsVisible;
+                        continue;
+                    }
+                    if (_btnSettingsRect.Contains(pt))
+                    {
+                        if (touch.State == TouchLocationState.Pressed)
+                        {
+                            IsSettingsOpen = true;
+                            _isHotkeyRebindMode = false;
+                        }
+                        continue;
+                    }
+                    if (Settings.ShowKeyboardBtn && !_btnKeyboardRect.IsEmpty && _btnKeyboardRect.Contains(pt))
+                    {
+                        if (touch.State == TouchLocationState.Pressed && (curTime - _lastKeyBtnPressTime > 0.4))
+                        {
+                            _lastKeyBtnPressTime = curTime;
+                            TriggerVirtualKeyboard();
+                        }
+                        continue;
+                    }
+                    if (Settings.ShowMenuBtn && !_btnMenuRect.IsEmpty && _btnMenuRect.Contains(pt))
+                    {
+                        menuTouchFound = true;
+                        if (!_menuTouchActive && (curTime - _lastMenuPressTime > 0.25))
+                        {
+                            _menuVisualFrames = 4;
+                            _lastMenuPressTime = curTime;
+                            if (ModEntry.VerboseInputLogging)
+                            {
+                                Log($"[TVP_DEBUG] Touch on Button Menu! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}");
+                            }
+                            if (Game1.activeClickableMenu != null)
+                            {
+                                PlayerRequestedMenuOpen = false;
+                                try
+                                {
+                                    if (Game1.activeClickableMenu.readyToClose())
+                                        Game1.activeClickableMenu.exitThisMenu();
+                                }
+                                catch (Exception ex)
+                                {
+                                    if (ModEntry.VerboseInputLogging)
+                                        Log($"[TVP_DEBUG] Exception closing menu on MenuBtn: {ex.Message}");
+                                }
+                                // Only pulse Escape key if menu did not already close via exitThisMenu()
+                                if (Game1.activeClickableMenu != null)
+                                {
+                                    _menuPulseFrames = 1;
+                                }
+                            }
+                            else
+                            {
+                                PlayerRequestedMenuOpen = true;
+                                _menuPulseFrames = 1;
+                            }
+                        }
+                        continue;
+                    }
+                    if (Settings.ShowHotkeyDrawerBtn && !_btnHotkeyDrawerToggleRect.IsEmpty && _btnHotkeyDrawerToggleRect.Contains(pt))
+                    {
+                        if (touch.State == TouchLocationState.Pressed && (curTime - _lastDrawerToggleTime > 0.20))
+                        {
+                            _lastDrawerToggleTime = curTime;
+                            IsHotkeyDrawerOpen = !IsHotkeyDrawerOpen;
+                            if (!IsHotkeyDrawerOpen)
+                                _isHotkeyRebindMode = false;
+                        }
+                        continue;
+                    }
+                }
+
+                // Mod Hotkey Drawer check when open
+                if (IsHotkeyDrawerOpen && Settings.ShowHotkeyDrawerBtn && _hotkeyDrawerRect.Contains(pt))
+                {
+                    if (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved)
+                    {
+                        if (touch.State == TouchLocationState.Pressed && (curTime - _lastDrawerActionTime > 0.18))
+                        {
+                            if (_btnHotkeyBindModeRect.Contains(pt))
+                            {
+                                _lastDrawerActionTime = curTime;
+                                _isHotkeyRebindMode = !_isHotkeyRebindMode;
+                                continue;
+                            }
+                            if (_btnHotkeyAutoCloseRect.Contains(pt))
+                            {
+                                _lastDrawerActionTime = curTime;
+                                Settings.AutoCloseHotkeyDrawer = !Settings.AutoCloseHotkeyDrawer;
+                                Settings.Save();
+                                continue;
+                            }
+                            if (_btnHotkeyCloseDrawerRect.Contains(pt))
+                            {
+                                _lastDrawerActionTime = curTime;
+                                IsHotkeyDrawerOpen = false;
+                                _isHotkeyRebindMode = false;
+                                continue;
+                            }
+                        }
+
+                        for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
+                        {
+                            if (_hotkeySlotRects[i].Contains(pt))
+                            {
+                                if (_isHotkeyRebindMode)
+                                {
+                                    if (touch.State == TouchLocationState.Pressed && (curTime - _lastDrawerActionTime > 0.20))
+                                    {
+                                        _lastDrawerActionTime = curTime;
+                                        _editingHotkeySlotIndex = i;
+                                        _isHotkeyRebindMode = false;
+                                        IsKeyPickerOpen = true;
+                                    }
+                                }
+                                else
+                                {
+                                    hotkeyTouchFound[i] = true;
+                                    if (!_hotkeyTouchActive[i] && (curTime - _lastHotkeyPressTime[i] > 0.18))
+                                    {
+                                        _lastHotkeyPressTime[i] = curTime;
+                                        _hotkeyPulseFrames[i] = 3;
+                                        _hotkeyVisualFrames[i] = 6;
+                                        PlayerRequestedMenuOpen = true;
+                                        OnHotkeySlotActivated(i);
+                                        if (Settings.AutoCloseHotkeyDrawer)
+                                        {
+                                            IsHotkeyDrawerOpen = false;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // If overlay is hidden, treat all touches as screen clicks
+                if (!IsVisible)
+                {
+                    HandleBackgroundTouch(touch, pt, gameTime);
+                    continue;
+                }
+
+                // Check Action & Trigger Buttons
+                bool hitButton = false;
+                if (_btnARect.Contains(pt)) { ButtonA = true; hitButton = true; }
+                if (_btnXRect.Contains(pt)) { ButtonX = true; hitButton = true; }
+                if (_btnLTRect.Contains(pt)) { ltTouchFound = true; hitButton = true; }
+                if (_btnRTRect.Contains(pt)) { rtTouchFound = true; hitButton = true; }
+
+                if (_btnYRect.Contains(pt))
+                {
+                    yTouchFound = true;
+                    hitButton = true;
+                    if (!_yTouchActive && (curTime - _lastYPressTime > 0.25))
+                    {
+                        _yPulseFrames = 1;
+                        _yVisualFrames = 4;
+                        _lastYPressTime = curTime;
+                        PlayerRequestedMenuOpen = true;
+                        if (ModEntry.VerboseInputLogging)
+                        {
+                            Log($"[TVP_DEBUG] Touch on Button Y! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}");
+                        }
+                    }
+                }
+
+                if (_btnBRect.Contains(pt))
+                {
+                    bTouchFound = true;
+                    hitButton = true;
+                    if (!_bTouchActive && (curTime - _lastBPressTime > 0.25))
+                    {
+                        _bVisualFrames = 4;
+                        _lastBPressTime = curTime;
+                        PlayerRequestedMenuOpen = false;
+                        if (ModEntry.VerboseInputLogging)
+                        {
+                            Log($"[TVP_DEBUG] Touch on Button B! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}");
+                        }
+                        if (Game1.activeClickableMenu != null)
+                        {
+                            try
+                            {
+                                if (Game1.activeClickableMenu.readyToClose())
+                                    Game1.activeClickableMenu.exitThisMenu();
+                            }
+                            catch (Exception ex)
+                            {
+                                if (ModEntry.VerboseInputLogging)
+                                    Log($"[TVP_DEBUG] Exception closing menu on ButtonB: {ex.Message}");
+                            }
+                            // Only pulse Escape if menu did not already close via exitThisMenu()
+                            if (Game1.activeClickableMenu != null)
+                            {
+                                _bPulseFrames = 1;
+                            }
+                        }
+                        else if (Game1.eventUp)
+                        {
+                            _bPulseFrames = 1;
+                        }
+                    }
+                }
+
+                if (hitButton) continue;
+
+                // Acquire Joystick if touch starts in joystick zone
+                if (_stickTouchId == -1 && (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved))
                 {
                     float dist = Vector2.Distance(new Vector2(pt.X, pt.Y), _joystickCenter);
-                    if (_joystickBaseRect.Contains(pt) || dist <= _joystickRadius * 2.0f)
+                    if (_joystickBaseRect.Contains(pt) || dist <= _joystickRadius * 1.4f)
                     {
                         _stickTouchId = touch.Id;
                         stickTouchPresent = true;
@@ -690,15 +1051,277 @@ namespace SDViOSTouchControls
                 _pointClickTouchId = -1;
             }
 
+            if (!trackpadPrimaryPresent && _trackpadPrimaryTouchId != -1)
+            {
+                _trackpadPrimaryTouchId = -1;
+                if (_trackpadSecondTouchId == -1)
+                    _trackpadHadSecondTouch = false;
+            }
+
+            if (!trackpadSecondPresent && _trackpadSecondTouchId != -1)
+            {
+                _trackpadSecondTouchId = -1;
+                if (_trackpadPrimaryTouchId == -1)
+                    _trackpadHadSecondTouch = false;
+            }
+
+            // Process Left Trigger (LT) and Right Trigger (RT) states, hold-repeat, and dual-press row shift
+            if (!ltTouchFound && !rtTouchFound)
+            {
+                _comboShiftTriggered = false;
+            }
+            else if (ltTouchFound && rtTouchFound)
+            {
+                ButtonLT = true;
+                ButtonRT = true;
+                if (!_comboShiftTriggered && (curTime - _lastToolbarShiftTime > 0.30))
+                {
+                    _comboShiftTriggered = true;
+                    _lastToolbarShiftTime = curTime;
+                    _ltVisualFrames = 6;
+                    _rtVisualFrames = 6;
+                    if (Game1.activeClickableMenu == null && Game1.player != null && !Game1.player.UsingTool && !Game1.eventUp && !Game1.freezeControls)
+                    {
+                        try { Game1.player.shiftToolbar(true); } catch { }
+                    }
+                }
+            }
+            else if (ltTouchFound && !_comboShiftTriggered)
+            {
+                ButtonLT = true;
+                if (!_ltTouchActive && (curTime - _lastLTPressTime > 0.12))
+                {
+                    _lastLTPressTime = curTime;
+                    _ltNextRepeatTime = curTime + 0.35;
+                    _ltVisualFrames = 4;
+                    OnTriggerActivated(isRight: false);
+                }
+                else if (_ltTouchActive && Game1.activeClickableMenu == null && curTime >= _ltNextRepeatTime)
+                {
+                    _ltNextRepeatTime = curTime + 0.11;
+                    _ltVisualFrames = 2;
+                    OnTriggerActivated(isRight: false);
+                }
+            }
+            else if (rtTouchFound && !_comboShiftTriggered)
+            {
+                ButtonRT = true;
+                if (!_rtTouchActive && (curTime - _lastRTPressTime > 0.12))
+                {
+                    _lastRTPressTime = curTime;
+                    _rtNextRepeatTime = curTime + 0.35;
+                    _rtVisualFrames = 4;
+                    OnTriggerActivated(isRight: true);
+                }
+                else if (_rtTouchActive && Game1.activeClickableMenu == null && curTime >= _rtNextRepeatTime)
+                {
+                    _rtNextRepeatTime = curTime + 0.11;
+                    _rtVisualFrames = 2;
+                    OnTriggerActivated(isRight: true);
+                }
+            }
+
+            _ltTouchActive = ltTouchFound;
+            _rtTouchActive = rtTouchFound;
             _yTouchActive = yTouchFound;
             _bTouchActive = bTouchFound;
             _menuTouchActive = menuTouchFound;
+            for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
+            {
+                _hotkeyTouchActive[i] = hotkeyTouchFound[i];
+            }
 
             ButtonY = _yPulseFrames > 0;
             ButtonB = _bPulseFrames > 0;
             ButtonMenu = _menuPulseFrames > 0;
 
             ForwardInputToGame();
+        }
+
+        private void OnHotkeySlotActivated(int slotIndex)
+        {
+            if (slotIndex < 0 || slotIndex >= TouchOverlaySettings.HotkeySlotCount) return;
+            try
+            {
+                Keys key = Settings.HotkeyKeys[slotIndex];
+                if (key == Keys.None) return;
+
+                if (Game1.activeClickableMenu != null)
+                {
+                    if (key == Keys.Escape)
+                    {
+                        PlayerRequestedMenuOpen = false;
+                        try
+                        {
+                            if (Game1.activeClickableMenu.readyToClose())
+                                Game1.activeClickableMenu.exitThisMenu();
+                        }
+                        catch { }
+                    }
+                    else
+                    {
+                        try { Game1.activeClickableMenu.receiveKeyPress(key); } catch { }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (ModEntry.VerboseInputLogging)
+                    Log($"[TVP_DEBUG] OnHotkeySlotActivated({slotIndex}) error: {ex.Message}");
+            }
+        }
+
+        private void OnTriggerActivated(bool isRight)
+        {
+            try
+            {
+                if (Game1.activeClickableMenu != null)
+                {
+                    Buttons btn = isRight ? Buttons.RightTrigger : Buttons.LeftTrigger;
+                    Game1.activeClickableMenu.receiveGamePadButton(btn);
+                    return;
+                }
+
+                var player = Game1.player;
+                if (player != null && !player.UsingTool && !Game1.eventUp && !Game1.freezeControls)
+                {
+                    int dir = isRight ? 1 : -1;
+                    int cur = player.CurrentToolIndex;
+                    int next = (cur + dir) % 12;
+                    if (next < 0) next += 12;
+                    player.CurrentToolIndex = next;
+                    try { Game1.playSound("toolSwap"); } catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (ModEntry.VerboseInputLogging)
+                    Log($"[TVP_DEBUG] OnTriggerActivated({(isRight ? "RT" : "LT")}) error: {ex.Message}");
+            }
+        }
+
+        private void TriggerVirtualKeyboard()
+        {
+            try
+            {
+                Type? vkmType = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (asm.GetName().Name == "SDViOS")
+                    {
+                        vkmType = asm.GetType("SDViOS.Input.VirtualKeyboardManager");
+                        break;
+                    }
+                }
+                if (vkmType == null) return;
+
+                var subscriber = Game1.keyboardDispatcher?.Subscriber;
+                if (subscriber != null)
+                {
+                    var showMethod = vkmType.GetMethod("ShowKeyboard", BindingFlags.Public | BindingFlags.Static);
+                    showMethod?.Invoke(null, new object[] { subscriber });
+                    return;
+                }
+
+                var promptMethod = vkmType.GetMethod("PromptManualInput", BindingFlags.Public | BindingFlags.Static);
+                if (promptMethod != null)
+                {
+                    Action<string> callback = FeedTextToGame;
+                    promptMethod.Invoke(null, new object[] { callback });
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"[TouchVirtualPad] Error triggering virtual keyboard: {ex.Message}");
+            }
+        }
+
+        private void PromptRenameHotkeyLabel(int slotIndex)
+        {
+            if (slotIndex < 0 || slotIndex >= TouchOverlaySettings.HotkeySlotCount) return;
+            try
+            {
+                Type? vkmType = null;
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (asm.GetName().Name == "SDViOS")
+                    {
+                        vkmType = asm.GetType("SDViOS.Input.VirtualKeyboardManager");
+                        break;
+                    }
+                }
+                if (vkmType != null)
+                {
+                    var promptMethod = vkmType.GetMethod("PromptManualInput", BindingFlags.Public | BindingFlags.Static);
+                    if (promptMethod != null)
+                    {
+                        Action<string> callback = text =>
+                        {
+                            if (!string.IsNullOrWhiteSpace(text))
+                            {
+                                Settings.HotkeyLabels[slotIndex] = TouchOverlaySettings.SanitizeHotkeyLabel(text);
+                                Settings.Save();
+                            }
+                        };
+                        promptMethod.Invoke(null, new object[] { callback });
+                        return;
+                    }
+                }
+                CyclePresetHotkeyLabel(slotIndex);
+            }
+            catch
+            {
+                CyclePresetHotkeyLabel(slotIndex);
+            }
+        }
+
+        private static readonly string[] PresetHotkeyLabels = new[]
+        {
+            "CHEAT", "ITEMS", "INFO", "DEBUG", "AUTO", "MAP", "MOD N", "NOCLIP", "TIME", "WARP", "SAVE", "CFG", "MOD 1", "MOD 2", "ESC"
+        };
+
+        private void CyclePresetHotkeyLabel(int slotIndex)
+        {
+            if (slotIndex < 0 || slotIndex >= TouchOverlaySettings.HotkeySlotCount) return;
+            string cur = Settings.HotkeyLabels[slotIndex];
+            int idx = Array.IndexOf(PresetHotkeyLabels, cur);
+            int nextIdx = (idx + 1) % PresetHotkeyLabels.Length;
+            Settings.HotkeyLabels[slotIndex] = PresetHotkeyLabels[nextIdx];
+            Settings.Save();
+        }
+
+        private void FeedTextToGame(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            try
+            {
+                var subscriber = Game1.keyboardDispatcher?.Subscriber;
+                if (subscriber != null)
+                {
+                    var textProp = subscriber.GetType().GetProperty("Text", BindingFlags.Public | BindingFlags.Instance);
+                    if (textProp != null && textProp.CanWrite)
+                    {
+                        textProp.SetValue(subscriber, text);
+                        return;
+                    }
+                    foreach (char c in text)
+                    {
+                        subscriber.RecieveTextInput(c);
+                    }
+                }
+                else if (Game1.chatBox != null)
+                {
+                    Game1.chatBox.activate();
+                    if (Game1.chatBox.chatBox != null)
+                    {
+                        Game1.chatBox.chatBox.Text = text;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"[TouchVirtualPad] FeedTextToGame warning: {ex.Message}");
+            }
         }
 
         private Point MapTouchToViewport(Vector2 rawPos)
@@ -717,21 +1340,28 @@ namespace SDViOSTouchControls
         {
             if (Settings.MouseControlMode == MouseMode.Disabled) return;
 
+            // Never process touches on the top bar or open Mod Hotkey Drawer as background mouse events
+            if (_btnToggleRect.Contains(pt) || _btnSettingsRect.Contains(pt) ||
+                (!_btnKeyboardRect.IsEmpty && _btnKeyboardRect.Contains(pt)) ||
+                (!_btnMenuRect.IsEmpty && _btnMenuRect.Contains(pt)) ||
+                (!_btnHotkeyDrawerToggleRect.IsEmpty && _btnHotkeyDrawerToggleRect.Contains(pt)) ||
+                (IsHotkeyDrawerOpen && Settings.ShowHotkeyDrawerBtn && _hotkeyDrawerRect.Contains(pt)))
+            {
+                return;
+            }
+
             // Never process touches on the virtual pad as background mouse events!
             if (IsVisible)
             {
-                if (_joystickBaseRect.Contains(pt) || Vector2.Distance(new Vector2(pt.X, pt.Y), _joystickCenter) <= _joystickRadius * 2.0f)
+                if (_joystickBaseRect.Contains(pt) || Vector2.Distance(new Vector2(pt.X, pt.Y), _joystickCenter) <= _joystickRadius * 1.4f)
                     return;
                 if (_btnARect.Contains(pt) || _btnBRect.Contains(pt) || _btnXRect.Contains(pt) || _btnYRect.Contains(pt) ||
+                    _btnLTRect.Contains(pt) || _btnRTRect.Contains(pt) ||
                     Vector2.Distance(new Vector2(pt.X, pt.Y), _buttonsCenter) <= 125f)
-                    return;
-                if (_btnToggleRect.Contains(pt) || _btnSettingsRect.Contains(pt) ||
-                    (!_btnKeyboardRect.IsEmpty && _btnKeyboardRect.Contains(pt)) ||
-                    (!_btnMenuRect.IsEmpty && _btnMenuRect.Contains(pt)))
                     return;
             }
 
-            if (Game1.activeClickableMenu != null)
+            if (ModEntry.VerboseInputLogging && Game1.activeClickableMenu != null)
             {
                 Log($"[TVP_DEBUG] HandleBackgroundTouch while menu={Game1.activeClickableMenu.GetType().Name}! touchState={touch.State}, touchId={touch.Id}, pt=({pt.X},{pt.Y}), mouseMode={Settings.MouseControlMode}");
             }
@@ -892,6 +1522,7 @@ namespace SDViOSTouchControls
                 {
                     Settings.LeftHanded = !Settings.LeftHanded;
                     Settings.CustomPositionsSet = false;
+                    Settings.CustomTriggersSet = false;
                     UpdateLayout(_viewportWidth, _viewportHeight);
                     Settings.Save();
                     break;
@@ -914,6 +1545,13 @@ namespace SDViOSTouchControls
                 if (_btnToggleMenu.Contains(pt))
                 {
                     Settings.ShowMenuBtn = !Settings.ShowMenuBtn;
+                    UpdateLayout(_viewportWidth, _viewportHeight);
+                    Settings.Save();
+                    break;
+                }
+                if (_btnToggleHotkeyDrawer.Contains(pt))
+                {
+                    Settings.ShowHotkeyDrawerBtn = !Settings.ShowHotkeyDrawerBtn;
                     UpdateLayout(_viewportWidth, _viewportHeight);
                     Settings.Save();
                     break;
@@ -957,6 +1595,120 @@ namespace SDViOSTouchControls
                     UpdateLayout(_viewportWidth, _viewportHeight);
                     break;
                 }
+            }
+        }
+
+        private static readonly Keys[][] KeyPickerRows = new Keys[][]
+        {
+            new[] { Keys.F1, Keys.F2, Keys.F3, Keys.F4, Keys.F5, Keys.F6, Keys.F7, Keys.F8, Keys.F9, Keys.F10, Keys.F11, Keys.F12 },
+            new[] { Keys.A, Keys.B, Keys.C, Keys.D, Keys.E, Keys.F, Keys.G, Keys.H, Keys.I, Keys.J, Keys.K, Keys.L, Keys.M },
+            new[] { Keys.N, Keys.O, Keys.P, Keys.Q, Keys.R, Keys.S, Keys.T, Keys.U, Keys.V, Keys.W, Keys.X, Keys.Y, Keys.Z },
+            new[] { Keys.D0, Keys.D1, Keys.D2, Keys.D3, Keys.D4, Keys.D5, Keys.D6, Keys.D7, Keys.D8, Keys.D9, Keys.OemTilde, Keys.OemComma, Keys.OemPeriod },
+            new[] { Keys.Escape, Keys.Tab, Keys.Space, Keys.LeftShift, Keys.LeftControl, Keys.LeftAlt, Keys.Delete, Keys.Insert, Keys.Home, Keys.End, Keys.PageUp, Keys.PageDown }
+        };
+
+        public static string FormatKeyShort(Keys key)
+        {
+            return key switch
+            {
+                Keys.Escape => "ESC",
+                Keys.Space => "SPC",
+                Keys.Tab => "TAB",
+                Keys.LeftShift or Keys.RightShift => "SHFT",
+                Keys.LeftControl or Keys.RightControl => "CTRL",
+                Keys.LeftAlt or Keys.RightAlt => "ALT",
+                Keys.Delete => "DEL",
+                Keys.Insert => "INS",
+                Keys.PageUp => "PGUP",
+                Keys.PageDown => "PGDN",
+                Keys.OemTilde => "TLD",
+                Keys.OemComma => ",",
+                Keys.OemPeriod => ".",
+                >= Keys.D0 and <= Keys.D9 => ((int)(key - Keys.D0)).ToString(),
+                _ => key.ToString().ToUpperInvariant()
+            };
+        }
+
+        private Rectangle GetKeyPickerCellRect(int row, int col, int colsInRow)
+        {
+            int padX = 20;
+            int gridTop = _keyPickerModalRect.Top + 56;
+            int availW = _keyPickerModalRect.Width - padX * 2;
+            int gapX = 6;
+            int gapY = 8;
+            int cellH = 44;
+            int cellW = (availW - (colsInRow - 1) * gapX) / colsInRow;
+            int totalRowW = colsInRow * cellW + (colsInRow - 1) * gapX;
+            int rowStartX = _keyPickerModalRect.Left + (_keyPickerModalRect.Width - totalRowW) / 2;
+            int x = rowStartX + col * (cellW + gapX);
+            int y = gridTop + row * (cellH + gapY);
+            return new Rectangle(x, y, cellW, cellH);
+        }
+
+        private void UpdateKeyPickerTouches(TouchCollection touches, double curTime)
+        {
+            if (_editingHotkeySlotIndex < 0 || _editingHotkeySlotIndex >= TouchOverlaySettings.HotkeySlotCount)
+            {
+                IsKeyPickerOpen = false;
+                return;
+            }
+
+            foreach (var touch in touches)
+            {
+                if (touch.State != TouchLocationState.Pressed) continue;
+                if (curTime - _lastDrawerActionTime < 0.15) continue;
+
+                Point pt = MapTouchToViewport(touch.Position);
+
+                if (_keyPickerCloseRect.Contains(pt) || _btnKeyPickerCancelRect.Contains(pt))
+                {
+                    _lastDrawerActionTime = curTime;
+                    IsKeyPickerOpen = false;
+                    _editingHotkeySlotIndex = -1;
+                    break;
+                }
+                if (_btnKeyPickerRenameRect.Contains(pt))
+                {
+                    _lastDrawerActionTime = curTime;
+                    PromptRenameHotkeyLabel(_editingHotkeySlotIndex);
+                    break;
+                }
+                if (_btnKeyPickerPresetRect.Contains(pt))
+                {
+                    _lastDrawerActionTime = curTime;
+                    CyclePresetHotkeyLabel(_editingHotkeySlotIndex);
+                    break;
+                }
+                if (_btnKeyPickerResetSlotRect.Contains(pt))
+                {
+                    _lastDrawerActionTime = curTime;
+                    TouchOverlaySettings.ResetHotkeySlotToDefault(_editingHotkeySlotIndex, Settings.HotkeyLabels, Settings.HotkeyKeys);
+                    Settings.Save();
+                    IsKeyPickerOpen = false;
+                    _editingHotkeySlotIndex = -1;
+                    break;
+                }
+
+                bool picked = false;
+                for (int r = 0; r < KeyPickerRows.Length && !picked; r++)
+                {
+                    var rowKeys = KeyPickerRows[r];
+                    for (int c = 0; c < rowKeys.Length; c++)
+                    {
+                        Rectangle cellRect = GetKeyPickerCellRect(r, c, rowKeys.Length);
+                        if (cellRect.Contains(pt))
+                        {
+                            _lastDrawerActionTime = curTime;
+                            Settings.HotkeyKeys[_editingHotkeySlotIndex] = rowKeys[c];
+                            Settings.Save();
+                            IsKeyPickerOpen = false;
+                            _editingHotkeySlotIndex = -1;
+                            picked = true;
+                            break;
+                        }
+                    }
+                }
+                if (picked) break;
             }
         }
 
@@ -1008,11 +1760,53 @@ namespace SDViOSTouchControls
                             Settings.CustomPositionsSet = true;
                             UpdateLayout(_viewportWidth, _viewportHeight);
                         }
+                        else if (_activeDragTarget == 3)
+                        {
+                            if (!Settings.CustomTriggersSet)
+                            {
+                                Settings.RightTriggerNormX = _rtCenter.X / _viewportWidth;
+                                Settings.RightTriggerNormY = _rtCenter.Y / _viewportHeight;
+                            }
+                            _ltCenter = new Vector2(
+                                Math.Clamp(pos.X, _btnLTRect.Width / 2f + 10, _viewportWidth - _btnLTRect.Width / 2f - 10),
+                                Math.Clamp(pos.Y, _btnLTRect.Height / 2f + 10, _viewportHeight - _btnLTRect.Height / 2f - 10)
+                            );
+                            Settings.LeftTriggerNormX = _ltCenter.X / _viewportWidth;
+                            Settings.LeftTriggerNormY = _ltCenter.Y / _viewportHeight;
+                            Settings.CustomTriggersSet = true;
+                            UpdateLayout(_viewportWidth, _viewportHeight);
+                        }
+                        else if (_activeDragTarget == 4)
+                        {
+                            if (!Settings.CustomTriggersSet)
+                            {
+                                Settings.LeftTriggerNormX = _ltCenter.X / _viewportWidth;
+                                Settings.LeftTriggerNormY = _ltCenter.Y / _viewportHeight;
+                            }
+                            _rtCenter = new Vector2(
+                                Math.Clamp(pos.X, _btnRTRect.Width / 2f + 10, _viewportWidth - _btnRTRect.Width / 2f - 10),
+                                Math.Clamp(pos.Y, _btnRTRect.Height / 2f + 10, _viewportHeight - _btnRTRect.Height / 2f - 10)
+                            );
+                            Settings.RightTriggerNormX = _rtCenter.X / _viewportWidth;
+                            Settings.RightTriggerNormY = _rtCenter.Y / _viewportHeight;
+                            Settings.CustomTriggersSet = true;
+                            UpdateLayout(_viewportWidth, _viewportHeight);
+                        }
                     }
                 }
-                else if (_dragTouchId == -1 && touch.State == TouchLocationState.Pressed)
+                else if (_dragTouchId == -1 && (touch.State == TouchLocationState.Pressed || touch.State == TouchLocationState.Moved))
                 {
-                    if (Vector2.Distance(pos, _joystickCenter) <= _joystickRadius * 1.5f)
+                    if (_btnLTRect.Contains(pt) || Vector2.Distance(pos, _ltCenter) <= 50f)
+                    {
+                        _activeDragTarget = 3;
+                        _dragTouchId = touch.Id;
+                    }
+                    else if (_btnRTRect.Contains(pt) || Vector2.Distance(pos, _rtCenter) <= 50f)
+                    {
+                        _activeDragTarget = 4;
+                        _dragTouchId = touch.Id;
+                    }
+                    else if (Vector2.Distance(pos, _joystickCenter) <= _joystickRadius * 1.4f)
                     {
                         _activeDragTarget = 1;
                         _dragTouchId = touch.Id;
@@ -1074,27 +1868,37 @@ namespace SDViOSTouchControls
                 }
                 catch { }
 
-                // 4. Hardware Keyboard Emulation
-                var activeKeys = new List<Keys>();
-                if (DPadUp) { activeKeys.Add(Keys.W); activeKeys.Add(Keys.Up); }
-                if (DPadDown) { activeKeys.Add(Keys.S); activeKeys.Add(Keys.Down); }
-                if (DPadLeft) { activeKeys.Add(Keys.A); activeKeys.Add(Keys.Left); }
-                if (DPadRight) { activeKeys.Add(Keys.D); activeKeys.Add(Keys.Right); }
+                // 4. Hardware Keyboard Emulation (reusing _activeKeysList & _setKeysArgs to avoid per-frame GC allocations)
+                _activeKeysList.Clear();
+                if (DPadUp) { _activeKeysList.Add(Keys.W); _activeKeysList.Add(Keys.Up); }
+                if (DPadDown) { _activeKeysList.Add(Keys.S); _activeKeysList.Add(Keys.Down); }
+                if (DPadLeft) { _activeKeysList.Add(Keys.A); _activeKeysList.Add(Keys.Left); }
+                if (DPadRight) { _activeKeysList.Add(Keys.D); _activeKeysList.Add(Keys.Right); }
 
                 bool isGamepad = Game1.options != null && Game1.options.gamepadControls;
 
                 if (ButtonA)
                 {
-                    activeKeys.Add(Keys.X);
-                    activeKeys.Add(Keys.Space);
+                    _activeKeysList.Add(Keys.X);
+                    _activeKeysList.Add(Keys.Space);
                 }
-                if (ButtonX) activeKeys.Add(Keys.C);
-                if (ButtonY) activeKeys.Add(Keys.E);
-                if (ButtonB || ButtonMenu) activeKeys.Add(Keys.Escape);
+                if (ButtonX) _activeKeysList.Add(Keys.C);
+                if (ButtonY) _activeKeysList.Add(Keys.E);
+                if (ButtonB || ButtonMenu) _activeKeysList.Add(Keys.Escape);
 
-                if (ButtonY || ButtonB || ButtonMenu)
+                for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
                 {
-                    Log($"[TVP_DEBUG] ForwardInputToGame: ButtonY={ButtonY}, ButtonB={ButtonB}, ButtonMenu={ButtonMenu}, isGamepad={isGamepad}, activeKeys=[{string.Join(",", activeKeys)}], curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}");
+                    if (_hotkeyTouchActive[i] || _hotkeyPulseFrames[i] > 0)
+                    {
+                        Keys hk = Settings.HotkeyKeys[i];
+                        if (hk != Keys.None && !_activeKeysList.Contains(hk))
+                            _activeKeysList.Add(hk);
+                    }
+                }
+
+                if (ModEntry.VerboseInputLogging && (ButtonY || ButtonB || ButtonMenu || HasActiveHotkeyInput))
+                {
+                    Log($"[TVP_DEBUG] ForwardInputToGame: ButtonY={ButtonY}, ButtonB={ButtonB}, ButtonMenu={ButtonMenu}, isGamepad={isGamepad}, activeKeys=[{string.Join(",", _activeKeysList)}], curMenu={Game1.activeClickableMenu?.GetType().Name ?? "none"}");
                 }
 
                 try
@@ -1103,7 +1907,8 @@ namespace SDViOSTouchControls
                     {
                         _setKeysMethod = typeof(Microsoft.Xna.Framework.Input.Keyboard).GetMethod("SetKeys", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                     }
-                    _setKeysMethod?.Invoke(null, new object[] { activeKeys });
+                    _setKeysArgs[0] = _activeKeysList;
+                    _setKeysMethod?.Invoke(null, _setKeysArgs);
                 }
                 catch { }
 
@@ -1112,7 +1917,10 @@ namespace SDViOSTouchControls
                 {
                     if (_currentKeyboardStateField != null)
                     {
-                        _currentKeyboardStateField.SetValue(_inputInstance, new KeyboardState(activeKeys.ToArray()));
+                        var kbState = _activeKeysList.Count == 0
+                            ? _emptyKeyboardState
+                            : new KeyboardState(_activeKeysList.ToArray());
+                        _currentKeyboardStateField.SetValue(_inputInstance, kbState);
                     }
                     if (_currentGamepadStateField != null)
                     {
@@ -1262,6 +2070,13 @@ namespace SDViOSTouchControls
                 }
             }
 
+            // 0. Draw Key Picker Modal
+            if (IsKeyPickerOpen)
+            {
+                DrawKeyPickerModal(spriteBatch);
+                return;
+            }
+
             // 1. Draw Edit Layout Mode
             if (IsEditLayoutMode)
             {
@@ -1293,8 +2108,33 @@ namespace SDViOSTouchControls
                 DrawButton(spriteBatch, _btnMenuRect, "MENU", IsVisualButtonMenu ? Color.Orange * 0.9f : Color.DarkOrange * Math.Max(0.5f, alpha), Color.White, 2);
             }
 
+            if (Settings.ShowHotkeyDrawerBtn && !_btnHotkeyDrawerToggleRect.IsEmpty)
+            {
+                Color modsBg = IsHotkeyDrawerOpen
+                    ? Color.Indigo * 0.95f
+                    : new Color(56, 42, 96) * Math.Max(0.6f, alpha);
+                DrawButton(spriteBatch, _btnHotkeyDrawerToggleRect, "MODS", modsBg, Color.White, 2);
+                if (IsHotkeyDrawerOpen)
+                {
+                    DrawRectBorder(spriteBatch, _btnHotkeyDrawerToggleRect, 2, Color.Gold);
+                }
+            }
+
+            if (IsHotkeyDrawerOpen && Settings.ShowHotkeyDrawerBtn)
+            {
+                DrawHotkeyDrawer(spriteBatch, alpha);
+            }
+
             if (IsVisible)
             {
+                // Draw Left Trigger (LT) and Right Trigger (RT) shoulder buttons
+                Color ltBg = IsVisualButtonLT ? Color.DeepSkyBlue * 0.95f : new Color(36, 48, 72) * Math.Max(0.75f, alpha);
+                Color rtBg = IsVisualButtonRT ? Color.DeepSkyBlue * 0.95f : new Color(36, 48, 72) * Math.Max(0.75f, alpha);
+                DrawButton(spriteBatch, _btnLTRect, "LT", ltBg, Color.White, 2);
+                DrawFilledRect(spriteBatch, new Rectangle(_btnLTRect.X, _btnLTRect.Y, _btnLTRect.Width, 3), (IsVisualButtonLT ? Color.White : Color.LightSkyBlue) * Math.Max(0.75f, alpha));
+                DrawButton(spriteBatch, _btnRTRect, "RT", rtBg, Color.White, 2);
+                DrawFilledRect(spriteBatch, new Rectangle(_btnRTRect.X, _btnRTRect.Y, _btnRTRect.Width, 3), (IsVisualButtonRT ? Color.White : Color.LightSkyBlue) * Math.Max(0.75f, alpha));
+
                 // Draw joystick base & thumb
                 DrawFilledRect(spriteBatch, _joystickBaseRect, Color.Black * (alpha * 0.65f));
                 DrawRectBorder(spriteBatch, _joystickBaseRect, 2, Color.White * (alpha * 0.7f));
@@ -1334,6 +2174,103 @@ namespace SDViOSTouchControls
             }
         }
 
+        private void DrawHotkeyDrawer(SpriteBatch sb, float alpha)
+        {
+            if (_pixelTexture == null) return;
+
+            float panelAlpha = Math.Max(0.88f, alpha);
+            DrawFilledRect(sb, _hotkeyDrawerRect, new Color(18, 22, 34) * panelAlpha);
+            DrawRectBorder(sb, _hotkeyDrawerRect, 2, (_isHotkeyRebindMode ? Color.Gold : Color.MediumPurple) * panelAlpha);
+
+            for (int i = 0; i < TouchOverlaySettings.HotkeySlotCount; i++)
+            {
+                Rectangle r = _hotkeySlotRects[i];
+                bool isActive = _hotkeyTouchActive[i] || _hotkeyPulseFrames[i] > 0 || _hotkeyVisualFrames[i] > 0;
+                Color slotBg = isActive
+                    ? Color.LimeGreen * 0.92f
+                    : (_isHotkeyRebindMode ? new Color(72, 54, 18) * 0.92f : new Color(36, 44, 68) * 0.92f);
+
+                DrawFilledRect(sb, r, slotBg);
+                DrawRectBorder(sb, r, 2, _isHotkeyRebindMode ? Color.Gold : (isActive ? Color.Lime : Color.White * 0.3f));
+
+                string label = Settings.HotkeyLabels[i];
+                string keyBadge = $"[{FormatKeyShort(Settings.HotkeyKeys[i])}]";
+
+                Rectangle topHalf = new Rectangle(r.X, r.Y + 3, r.Width, 20);
+                Rectangle botHalf = new Rectangle(r.X, r.Y + 22, r.Width, 18);
+                OverlayFont.DrawCenteredString(sb, _pixelTexture, label, topHalf, Color.White, 2);
+                OverlayFont.DrawCenteredString(sb, _pixelTexture, keyBadge, botHalf, isActive ? Color.White : Color.Gold, 2);
+            }
+
+            // Drawer footer buttons
+            DrawButton(
+                sb,
+                _btnHotkeyBindModeRect,
+                _isHotkeyRebindMode ? "TAP A SLOT..." : "REBIND SLOT",
+                _isHotkeyRebindMode ? Color.DarkGoldenrod : Color.Indigo,
+                Color.White,
+                2
+            );
+
+            DrawButton(
+                sb,
+                _btnHotkeyAutoCloseRect,
+                Settings.AutoCloseHotkeyDrawer ? "AUTO HIDE: ON" : "STAY OPEN",
+                Settings.AutoCloseHotkeyDrawer ? Color.DarkSlateBlue : Color.DarkSlateGray,
+                Color.White,
+                2
+            );
+
+            DrawButton(
+                sb,
+                _btnHotkeyCloseDrawerRect,
+                "CLOSE",
+                Color.DarkRed * 0.85f,
+                Color.White,
+                2
+            );
+        }
+
+        private void DrawKeyPickerModal(SpriteBatch sb)
+        {
+            if (_pixelTexture == null) return;
+
+            int slot = Math.Clamp(_editingHotkeySlotIndex, 0, TouchOverlaySettings.HotkeySlotCount - 1);
+            Keys currentKey = Settings.HotkeyKeys[slot];
+            string currentLabel = Settings.HotkeyLabels[slot];
+
+            DrawFilledRect(sb, new Rectangle(0, 0, _viewportWidth, _viewportHeight), Color.Black * 0.65f);
+            DrawFilledRect(sb, _keyPickerModalRect, new Color(20, 24, 36) * 0.97f);
+            DrawRectBorder(sb, _keyPickerModalRect, 3, Color.Gold);
+
+            string title = $"BIND SLOT #{slot + 1}: {currentLabel} [{FormatKeyShort(currentKey)}]";
+            OverlayFont.DrawString(sb, _pixelTexture, title, new Vector2(_keyPickerModalRect.Left + 20, _keyPickerModalRect.Top + 16), Color.Gold, 2);
+
+            DrawFilledRect(sb, _keyPickerCloseRect, Color.DarkRed * 0.85f);
+            DrawRectBorder(sb, _keyPickerCloseRect, 2, Color.Red);
+            OverlayFont.DrawCenteredString(sb, _pixelTexture, "X", _keyPickerCloseRect, Color.White, 2);
+
+            for (int r = 0; r < KeyPickerRows.Length; r++)
+            {
+                var rowKeys = KeyPickerRows[r];
+                for (int c = 0; c < rowKeys.Length; c++)
+                {
+                    Keys k = rowKeys[c];
+                    Rectangle cellRect = GetKeyPickerCellRect(r, c, rowKeys.Length);
+                    bool isSelected = (k == currentKey);
+                    Color bg = isSelected ? Color.DarkGreen : new Color(40, 48, 72);
+                    DrawFilledRect(sb, cellRect, bg);
+                    DrawRectBorder(sb, cellRect, 2, isSelected ? Color.Lime : Color.White * 0.25f);
+                    OverlayFont.DrawCenteredString(sb, _pixelTexture, FormatKeyShort(k), cellRect, isSelected ? Color.Yellow : Color.White, 2);
+                }
+            }
+
+            DrawButton(sb, _btnKeyPickerRenameRect, "TYPE LABEL", Color.DarkSlateBlue, Color.White, 2);
+            DrawButton(sb, _btnKeyPickerPresetRect, $"NAME: {currentLabel}", Color.Indigo, Color.Gold, 2);
+            DrawButton(sb, _btnKeyPickerResetSlotRect, "DEFAULT", Color.DarkSlateGray, Color.White, 2);
+            DrawButton(sb, _btnKeyPickerCancelRect, "CANCEL", Color.DarkRed * 0.85f, Color.White, 2);
+        }
+
         private void DrawEditLayoutScreen(SpriteBatch sb)
         {
             if (_pixelTexture == null) return;
@@ -1348,6 +2285,15 @@ namespace SDViOSTouchControls
             DrawFilledRect(sb, _btnDoneEditRect, Color.DarkGreen * 0.9f);
             DrawRectBorder(sb, _btnDoneEditRect, 2, Color.Lime);
             OverlayFont.DrawCenteredString(sb, _pixelTexture, "DONE", _btnDoneEditRect, Color.White, 2);
+
+            // Highlight LT and RT draggable zones
+            DrawFilledRect(sb, _btnLTRect, Color.SlateBlue * 0.4f);
+            DrawRectBorder(sb, _btnLTRect, 2, Color.LightSkyBlue);
+            OverlayFont.DrawCenteredString(sb, _pixelTexture, "LT", _btnLTRect, Color.White, 2);
+
+            DrawFilledRect(sb, _btnRTRect, Color.SlateBlue * 0.4f);
+            DrawRectBorder(sb, _btnRTRect, 2, Color.LightSkyBlue);
+            OverlayFont.DrawCenteredString(sb, _pixelTexture, "RT", _btnRTRect, Color.White, 2);
 
             // Highlight Joystick draggable zone
             DrawFilledRect(sb, _joystickBaseRect, Color.SlateBlue * 0.4f);
@@ -1415,9 +2361,10 @@ namespace SDViOSTouchControls
             DrawButton(sb, _btnDeadzone, dzStr, Color.DarkSlateBlue, Color.White, 2);
 
             // Row 4: Extra Buttons
-            OverlayFont.DrawString(sb, _pixelTexture, "KEYBOARD / MENU", new Vector2(startX, startY + rowSpacing * 4 + 6), Color.White, 2);
+            OverlayFont.DrawString(sb, _pixelTexture, "TOP BAR BUTTONS", new Vector2(startX, startY + rowSpacing * 4 + 6), Color.White, 2);
             DrawButton(sb, _btnToggleKeyboard, Settings.ShowKeyboardBtn ? "KEY: ON" : "KEY: OFF", Settings.ShowKeyboardBtn ? Color.DarkGreen : Color.DarkSlateGray, Color.White, 2);
             DrawButton(sb, _btnToggleMenu, Settings.ShowMenuBtn ? "MENU: ON" : "MENU: OFF", Settings.ShowMenuBtn ? Color.DarkGreen : Color.DarkSlateGray, Color.White, 2);
+            DrawButton(sb, _btnToggleHotkeyDrawer, Settings.ShowHotkeyDrawerBtn ? "MODS: ON" : "MODS: OFF", Settings.ShowHotkeyDrawerBtn ? Color.DarkGreen : Color.DarkSlateGray, Color.White, 2);
 
             // Row 5: Mouse Mode
             OverlayFont.DrawString(sb, _pixelTexture, "MOUSE MODE", new Vector2(startX, startY + rowSpacing * 5 + 6), Color.White, 2);
