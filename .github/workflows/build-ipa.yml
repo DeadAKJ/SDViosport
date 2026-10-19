@@ -35,12 +35,6 @@ jobs:
         run: |
           dotnet run --project tools/PatchMonoGame
 
-      - name: Build Built-in Touch Controls Mod
-        run: |
-          dotnet build src/Mods/SDViOSTouchControls/SDViOSTouchControls.csproj -c Release
-          cp src/Mods/SDViOSTouchControls/bin/Release/net6.0/SDViOSTouchControls.dll src/SDViOS/Resources/Mods/SDViOSTouchControls/SDViOSTouchControls.dll
-          cp src/Mods/SDViOSTouchControls/bin/Release/net6.0/SDViOSTouchControls.dll src/SDViOS/Resources/Mods/SDViOSTouchControls/SDViOSTouchControlsMod.dll
-
       - name: Restore NuGet Packages
         run: |
           dotnet restore src/SDViOS/SDViOS.csproj -p:CheckEolWorkloads=false -p:CheckEolTargetFramework=false
