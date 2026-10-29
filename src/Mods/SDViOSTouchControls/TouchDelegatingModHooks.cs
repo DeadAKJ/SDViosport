@@ -17,6 +17,7 @@ namespace SDViOSTouchControls
         private readonly HashSet<Keys> _mergedKeys = new HashSet<Keys>();
 
         private int _sittingTicks = 0;
+        private bool _prevButtonA = false;
         private bool _prevButtonX = false;
         private static FieldInfo? _anotherClickField;
 
@@ -119,13 +120,58 @@ namespace SDViOSTouchControls
                 }
 
                 // Forward gamepad buttons and triggers so SMAPI and GamePadState consumers register them
-                if (pad.ButtonX || pad.ButtonLT || pad.ButtonRT)
+                if (pad.ButtonA || pad.ButtonX || pad.ButtonLT || pad.ButtonRT)
                 {
                     gamePadState = pad.EffectiveGamePadState;
                 }
             }
 
-            base.OnGame1_UpdateControlInput(ref keyboardState, ref mouseState, ref gamePadState, action);
+            bool buttonA = pad != null && pad.ButtonA;
+            bool justPressedA = buttonA && !_prevButtonA;
+            _prevButtonA = buttonA;
+
+            if (justPressedA && Game1.activeClickableMenu == null)
+            {
+                // Pulse simulated right-click on rising edge of Button A to satisfy didPlayerJustRightClick for containers
+                mouseState = new MouseState(mouseState.X, mouseState.Y, mouseState.ScrollWheelValue, mouseState.LeftButton, ButtonState.Pressed, mouseState.MiddleButton, mouseState.XButton1, mouseState.XButton2);
+            }
+
+            bool actionOldMouseVis = Game1.wasMouseVisibleThisFrame;
+            if (buttonA && Game1.activeClickableMenu == null)
+            {
+                Game1.lastCursorMotionWasMouse = false;
+                Game1.wasMouseVisibleThisFrame = false;
+            }
+
+            try
+            {
+                base.OnGame1_UpdateControlInput(ref keyboardState, ref mouseState, ref gamePadState, action);
+            }
+            finally
+            {
+                if (buttonA && Game1.activeClickableMenu == null)
+                {
+                    Game1.wasMouseVisibleThisFrame = actionOldMouseVis;
+                }
+            }
+
+            // Post-input handling for Button A container / object interaction fallback
+            if (justPressedA && Game1.activeClickableMenu == null && !Game1.eventUp && !Game1.freezeControls)
+            {
+                var player = Game1.player;
+                if (player != null && !player.isEating && !player.isRidingHorse() && !player.IsSitting() && !player.UsingTool && player.freezePause <= 0)
+                {
+                    Vector2 grabTile = player.GetGrabTile();
+                    if (Game1.currentLocation != null && Game1.activeClickableMenu == null && !Game1.dialogueUp)
+                    {
+                        try
+                        {
+                            Game1.tryToCheckAt(grabTile, player);
+                        }
+                        catch { }
+                    }
+                }
+            }
 
             // Post-input handling for Button X tool / melee weapon swinging
             bool buttonX = pad != null && pad.ButtonX;

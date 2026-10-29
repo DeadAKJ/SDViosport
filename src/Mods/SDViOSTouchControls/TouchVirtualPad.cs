@@ -235,9 +235,10 @@ namespace SDViOSTouchControls
                 bool isGamepad = Game1.options != null && Game1.options.gamepadControls;
                 if (isGamepad)
                     return CurrentSimulatedGamePadState;
-                if (ButtonLT || ButtonRT || ButtonX)
+                if (ButtonA || ButtonLT || ButtonRT || ButtonX)
                 {
                     var buttons = new GamePadButtons(
+                        (ButtonA ? Buttons.A : 0) |
                         (ButtonLT ? Buttons.LeftTrigger : 0) |
                         (ButtonRT ? Buttons.RightTrigger : 0) |
                         (ButtonX ? Buttons.X : 0)
@@ -1971,6 +1972,10 @@ namespace SDViOSTouchControls
                 {
                     _activeKeysList.Add(Keys.X);
                     _activeKeysList.Add(Keys.Space);
+                    if (Game1.activeClickableMenu == null && !Game1.eventUp)
+                    {
+                        Game1.lastCursorMotionWasMouse = false;
+                    }
                 }
                 if (ButtonX)
                 {
