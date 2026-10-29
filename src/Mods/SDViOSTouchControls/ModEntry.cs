@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using HarmonyLib;
 using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Audio;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
 using Microsoft.Xna.Framework.Input.Touch;
@@ -11,6 +13,7 @@ using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
 using StardewValley.Menus;
+using StardewValley.Tools;
 
 namespace SDViOSTouchControls
 {
@@ -874,6 +877,32 @@ namespace SDViOSTouchControls
             {
                 Monitor.Log($"[SDViOSTouchControls] Error patching didPlayerJustRightClick: {ex.Message}", LogLevel.Error);
             }
+
+            // 8. Fishing Reeling Sound Cleanup Patch
+            try
+            {
+                foreach (var m in typeof(FishingRod).GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    if (m.Name == "pullFishFromWater" || m.Name == "doDoneFishing")
+                    {
+                        try
+                        {
+                            harmony.Patch(m, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixStopFishingReelSounds), BindingFlags.Static | BindingFlags.NonPublic)));
+                            Monitor.Log($"[SDViOSTouchControls] Harmony patched FishingRod.{m.Name} -> stop stuck reel sounds.", LogLevel.Info);
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[SDViOSTouchControls] Note patching FishingRod sound cleanup: {ex.Message}", LogLevel.Warn);
+            }
+        }
+
+        private static void PostfixStopFishingReelSounds()
+        {
+            StopStuckFishingSounds(forceSweepPool: true);
         }
 
         private static void PostfixDidPlayerJustRightClick(bool ignoreNonMouseHeldInput, ref bool __result)
@@ -2111,6 +2140,9 @@ namespace SDViOSTouchControls
 
                 // Process virtual pad touches, point & click, and trackpad BEFORE Game1.Update runs!
                 TouchVirtualPad.Instance.Update(Game1.currentGameTime);
+
+                // Ensure stuck fishing reel sounds ("fastReel", "slowReel", "SinWave") are stopped when not actively reeling/casting
+                StopStuckFishingSounds(forceSweepPool: false);
             }
             catch (Exception ex)
             {
@@ -2139,8 +2171,354 @@ namespace SDViOSTouchControls
 
             _lastTickMenu = Game1.activeClickableMenu;
 
+            StopStuckFishingSounds(forceSweepPool: false);
+
             // Process any pending midday QuickSave state sync
             QuickSaveManager.Instance?.Update();
+        }
+
+        private static bool _wasInBobberBar = false;
+        private static bool _wasActivelyCasting = false;
+        private static bool _wasFishCaughtOrPulling = false;
+        private static bool _audioReflectionInitialized = false;
+        private static FieldInfo? _audioEngineWrapperField;
+        private static FieldInfo? _soundBankWrapperField;
+        private static FieldInfo? _soundBankSoundsField;
+        private static Type? _xactSoundType;
+        private static MethodInfo? _xactSoundStopMethod;
+        private static FieldInfo? _xactSoundWaveField;
+        private static FieldInfo? _xactSoundClipsField;
+        private static FieldInfo? _xactClipEventsField;
+        private static FieldInfo? _playWaveEventWavField;
+        private static FieldInfo? _seiEffectField;
+        private static FieldInfo? _poolLockerField;
+        private static FieldInfo? _poolPlayingInstancesField;
+        private static FieldInfo? _seiIsXActField;
+        private static MethodInfo? _seiStopBoolMethod;
+        private static readonly HashSet<SoundEffect> _reelSoundEffects = new HashSet<SoundEffect>();
+
+        private static void InitAudioReflection()
+        {
+            if (_audioReflectionInitialized) return;
+            _audioReflectionInitialized = true;
+            try
+            {
+                var mgAsm = typeof(AudioEngine).Assembly;
+                var aewType = typeof(Game1).Assembly.GetType("StardewValley.Audio.AudioEngineWrapper");
+                if (aewType != null)
+                {
+                    _audioEngineWrapperField = aewType.GetField("audioEngine", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                }
+                _soundBankWrapperField = typeof(SoundBankWrapper).GetField("soundBank", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                _soundBankSoundsField = typeof(SoundBank).GetField("_sounds", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+                _xactSoundType = mgAsm.GetType("Microsoft.Xna.Framework.Audio.XactSound");
+                if (_xactSoundType != null)
+                {
+                    _xactSoundStopMethod = _xactSoundType.GetMethod("Stop", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(AudioStopOptions) }, null);
+                    _xactSoundWaveField = _xactSoundType.GetField("_wave", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    _xactSoundClipsField = _xactSoundType.GetField("_soundClips", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                }
+
+                var xactClipType = mgAsm.GetType("Microsoft.Xna.Framework.Audio.XactClip");
+                if (xactClipType != null)
+                {
+                    _xactClipEventsField = xactClipType.GetField("_events", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                }
+
+                var playWaveEventType = mgAsm.GetType("Microsoft.Xna.Framework.Audio.PlayWaveEvent");
+                if (playWaveEventType != null)
+                {
+                    _playWaveEventWavField = playWaveEventType.GetField("_wav", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                }
+
+                _seiEffectField = typeof(SoundEffectInstance).GetField("_effect", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+                var poolType = mgAsm.GetType("Microsoft.Xna.Framework.Audio.SoundEffectInstancePool");
+                if (poolType != null)
+                {
+                    _poolLockerField = poolType.GetField("_locker", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                    _poolPlayingInstancesField = poolType.GetField("_playingInstances", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                }
+
+                _seiIsXActField = typeof(SoundEffectInstance).GetField("_isXAct", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                _seiStopBoolMethod = typeof(SoundEffectInstance).GetMethod("Stop", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(bool) }, null);
+            }
+            catch (Exception ex)
+            {
+                ModMonitor?.Log($"[SDViOSTouchControls] Note initializing audio reflection: {ex.Message}", LogLevel.Trace);
+            }
+        }
+
+        private static void RecordReelSoundEffect(SoundEffectInstance? inst)
+        {
+            if (inst == null || _seiEffectField == null) return;
+            try
+            {
+                if (_seiEffectField.GetValue(inst) is SoundEffect eff)
+                {
+                    _reelSoundEffects.Add(eff);
+                }
+            }
+            catch { }
+        }
+
+        private static void HarvestReelSoundEffectsFromXact(System.Collections.IDictionary soundDict, string cueName)
+        {
+            try
+            {
+                if (!soundDict.Contains(cueName)) return;
+                if (soundDict[cueName] is Array xactSounds)
+                {
+                    foreach (var xs in xactSounds)
+                    {
+                        if (xs == null) continue;
+                        if (_xactSoundWaveField?.GetValue(xs) is SoundEffectInstance wave)
+                            RecordReelSoundEffect(wave);
+                        if (_xactSoundClipsField?.GetValue(xs) is Array clips)
+                        {
+                            foreach (var clip in clips)
+                            {
+                                if (clip != null && _xactClipEventsField?.GetValue(clip) is Array events)
+                                {
+                                    foreach (var ev in events)
+                                    {
+                                        if (ev != null && _playWaveEventWavField?.GetValue(ev) is SoundEffectInstance clipWav)
+                                            RecordReelSoundEffect(clipWav);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void StopStuckFishingSounds(bool forceSweepPool)
+        {
+            try
+            {
+                bool inBobberBar = Game1.activeClickableMenu is BobberBar;
+                var rod = Game1.player?.CurrentTool as FishingRod;
+                bool isCasting = rod != null && (rod.isCasting || rod.castedButBobberStillInAir);
+                bool isTimingCast = rod != null && rod.isTimingCast;
+                bool isFishCaughtOrPulling = rod != null && (rod.fishCaught || rod.pullingOutOfWater || rod.showingTreasure);
+
+                bool justLeftBobberBar = _wasInBobberBar && !inBobberBar;
+                bool justStoppedCasting = _wasActivelyCasting && !isCasting;
+                bool justCaughtOrPulled = !_wasFishCaughtOrPulling && isFishCaughtOrPulling;
+
+                _wasInBobberBar = inBobberBar;
+                _wasActivelyCasting = isCasting;
+                _wasFishCaughtOrPulling = isFishCaughtOrPulling;
+
+                // While in BobberBar or casting, opportunistically record the SoundEffect references used by fastReel / slowReel / SinWave
+                if (inBobberBar || isCasting || isTimingCast)
+                {
+                    InitAudioReflection();
+                    if (Game1.soundBank is SoundBankWrapper sbw0 &&
+                        _soundBankWrapperField?.GetValue(sbw0) is SoundBank sb0 &&
+                        _soundBankSoundsField?.GetValue(sb0) is System.Collections.IDictionary sd0)
+                    {
+                        HarvestReelSoundEffectsFromXact(sd0, "fastReel");
+                        HarvestReelSoundEffectsFromXact(sd0, "slowReel");
+                        HarvestReelSoundEffectsFromXact(sd0, "SinWave");
+                    }
+                }
+
+                bool stoppedAnyCue = false;
+
+                // 1. Stop BobberBar static reel sounds whenever not in BobberBar
+                if (!inBobberBar)
+                {
+                    if (BobberBar.reelSound != null)
+                    {
+                        try { BobberBar.reelSound.Stop(AudioStopOptions.Immediate); } catch { }
+                        BobberBar.reelSound = null;
+                        stoppedAnyCue = true;
+                    }
+                    if (BobberBar.unReelSound != null)
+                    {
+                        try { BobberBar.unReelSound.Stop(AudioStopOptions.Immediate); } catch { }
+                        BobberBar.unReelSound = null;
+                        stoppedAnyCue = true;
+                    }
+                }
+
+                // 2. Stop FishingRod.reelSound whenever not actively casting (and not in BobberBar)
+                if (!inBobberBar && !isCasting)
+                {
+                    if (FishingRod.reelSound != null)
+                    {
+                        try { FishingRod.reelSound.Stop(AudioStopOptions.Immediate); } catch { }
+                        FishingRod.reelSound = null;
+                        stoppedAnyCue = true;
+                    }
+                }
+
+                // 3. Stop FishingRod.chargeSound whenever not charging cast meter
+                if (!isTimingCast)
+                {
+                    if (FishingRod.chargeSound != null)
+                    {
+                        try { FishingRod.chargeSound.Stop(AudioStopOptions.Immediate); } catch { }
+                        FishingRod.chargeSound = null;
+                        stoppedAnyCue = true;
+                    }
+                }
+
+                // 4. Deep XACT + OpenAL sweep when leaving BobberBar, catching a fish, or stopping a cast/cue
+                if (forceSweepPool || justLeftBobberBar || justStoppedCasting || justCaughtOrPulled || stoppedAnyCue)
+                {
+                    InitAudioReflection();
+
+                    // 4a. Stop any active Cues in AudioEngine.ActiveCues for "fastReel", "slowReel", or "SinWave"
+                    if (Game1.audioEngine != null && _audioEngineWrapperField?.GetValue(Game1.audioEngine) is AudioEngine ae)
+                    {
+                        lock (ae.UpdateLock)
+                        {
+                            var activeCues = ae.ActiveCues;
+                            if (activeCues != null)
+                            {
+                                for (int i = activeCues.Count - 1; i >= 0; i--)
+                                {
+                                    var cue = activeCues[i];
+                                    if (cue == null) continue;
+                                    string? name = cue.Name;
+                                    if ((!inBobberBar && name == "fastReel") ||
+                                        (!inBobberBar && !isCasting && name == "slowReel") ||
+                                        (!isTimingCast && name == "SinWave"))
+                                    {
+                                        try { cue.Stop(AudioStopOptions.Immediate); } catch { }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 4b. Stop shared XactSound instances in SoundBank._sounds["fastReel" / "slowReel" / "SinWave"]
+                    if (Game1.soundBank is SoundBankWrapper sbw &&
+                        _soundBankWrapperField?.GetValue(sbw) is SoundBank sb &&
+                        _soundBankSoundsField?.GetValue(sb) is System.Collections.IDictionary soundDict)
+                    {
+                        if (!inBobberBar)
+                        {
+                            StopXactSoundEntry(soundDict, "fastReel");
+                        }
+                        if (!inBobberBar && !isCasting)
+                        {
+                            StopXactSoundEntry(soundDict, "slowReel");
+                        }
+                        if (!isTimingCast)
+                        {
+                            StopXactSoundEntry(soundDict, "SinWave");
+                        }
+                    }
+
+                    // 4c. Sweep SoundEffectInstancePool._playingInstances for orphaned looped or reel-matching SoundEffectInstances
+                    var locker = _poolLockerField?.GetValue(null);
+                    var playingList = _poolPlayingInstancesField?.GetValue(null) as List<SoundEffectInstance>;
+                    if (locker != null && playingList != null)
+                    {
+                        lock (locker)
+                        {
+                            for (int i = playingList.Count - 1; i >= 0; i--)
+                            {
+                                var inst = playingList[i];
+                                if (inst == null) continue;
+                                try
+                                {
+                                    bool isOrphanedLoop = false;
+                                    if (inst.IsLooped)
+                                    {
+                                        bool isXAct = _seiIsXActField != null && _seiIsXActField.GetValue(inst) is bool b && b;
+                                        if (!isXAct) isOrphanedLoop = true;
+                                    }
+
+                                    bool isReelEffect = false;
+                                    if (!inBobberBar && !isCasting && !isTimingCast &&
+                                        _seiEffectField?.GetValue(inst) is SoundEffect eff &&
+                                        _reelSoundEffects.Contains(eff))
+                                    {
+                                        isReelEffect = true;
+                                    }
+
+                                    if (isOrphanedLoop || isReelEffect)
+                                    {
+                                        try { _seiIsXActField?.SetValue(inst, false); } catch { }
+                                        if (_seiStopBoolMethod != null)
+                                            _seiStopBoolMethod.Invoke(inst, new object[] { true });
+                                        else
+                                            inst.Stop();
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void StopXactSoundEntry(System.Collections.IDictionary soundDict, string cueName)
+        {
+            try
+            {
+                if (!soundDict.Contains(cueName)) return;
+                if (soundDict[cueName] is Array xactSounds)
+                {
+                    foreach (var xs in xactSounds)
+                    {
+                        if (xs == null) continue;
+                        try
+                        {
+                            if (_xactSoundWaveField?.GetValue(xs) is SoundEffectInstance wave)
+                            {
+                                RecordReelSoundEffect(wave);
+                                try { _seiIsXActField?.SetValue(wave, false); } catch { }
+                                try
+                                {
+                                    if (_seiStopBoolMethod != null)
+                                        _seiStopBoolMethod.Invoke(wave, new object[] { true });
+                                    else
+                                        wave.Stop();
+                                }
+                                catch { }
+                            }
+                            if (_xactSoundClipsField?.GetValue(xs) is Array clips)
+                            {
+                                foreach (var clip in clips)
+                                {
+                                    if (clip != null && _xactClipEventsField?.GetValue(clip) is Array events)
+                                    {
+                                        foreach (var ev in events)
+                                        {
+                                            if (ev != null && _playWaveEventWavField?.GetValue(ev) is SoundEffectInstance clipWav)
+                                            {
+                                                RecordReelSoundEffect(clipWav);
+                                                try { _seiIsXActField?.SetValue(clipWav, false); } catch { }
+                                                try
+                                                {
+                                                    if (_seiStopBoolMethod != null)
+                                                        _seiStopBoolMethod.Invoke(clipWav, new object[] { true });
+                                                    else
+                                                        clipWav.Stop();
+                                                }
+                                                catch { }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _xactSoundStopMethod?.Invoke(xs, new object[] { AudioStopOptions.Immediate });
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
         }
 
         private void OnButtonPressed(object? sender, ButtonPressedEventArgs e)
