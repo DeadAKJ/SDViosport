@@ -890,77 +890,74 @@ namespace SDViOSTouchControls
             ref string? error,
             ref bool __result)
         {
-            if (Game1.gameMode == 6)
+            error = null;
+            if (string.IsNullOrWhiteSpace(relativePath))
             {
-                error = null;
-                if (string.IsNullOrWhiteSpace(relativePath))
+                assetName = null;
+                __result = true;
+                return false;
+            }
+
+            try
+            {
+                // Normalize leading ./
+                string fileName = System.IO.Path.GetFileName(relativePath);
+                if (fileName.StartsWith('.'))
                 {
-                    assetName = null;
-                    __result = true;
-                    return false;
+                    string? dir = System.IO.Path.GetDirectoryName(relativePath);
+                    relativePath = System.IO.Path.Combine(dir ?? "", fileName.TrimStart('.'));
                 }
 
-                try
+                var mcmType = __instance.GetType();
+
+                // 1. If it's a mod-relative file (does not start with or contain ..)
+                if (!relativePath.StartsWith("..") && !relativePath.Contains(".."))
                 {
-                    // Normalize leading ./
-                    string fileName = System.IO.Path.GetFileName(relativePath);
-                    if (fileName.StartsWith('.'))
+                    string modPath = System.IO.Path.Combine(modRelativeMapFolder ?? "", relativePath);
+                    if (_mcmGetModFileGeneric == null)
                     {
-                        string? dir = System.IO.Path.GetDirectoryName(relativePath);
-                        relativePath = System.IO.Path.Combine(dir ?? "", fileName.TrimStart('.'));
-                    }
-
-                    var mcmType = __instance.GetType();
-
-                    // 1. If it's a mod-relative file (does not start with or contain ..)
-                    if (!relativePath.StartsWith("..") && !relativePath.Contains(".."))
-                    {
-                        string modPath = System.IO.Path.Combine(modRelativeMapFolder ?? "", relativePath);
-                        if (_mcmGetModFileGeneric == null)
+                        var mGetModFile = mcmType.GetMethod("GetModFile", BindingFlags.Instance | BindingFlags.NonPublic);
+                        if (mGetModFile != null)
                         {
-                            var mGetModFile = mcmType.GetMethod("GetModFile", BindingFlags.Instance | BindingFlags.NonPublic);
-                            if (mGetModFile != null)
-                            {
-                                _mcmGetModFileGeneric = mGetModFile.MakeGenericMethod(typeof(Texture2D));
-                            }
-                        }
-                        if (_mcmGetModFileGeneric != null)
-                        {
-                            var fileInfo = _mcmGetModFileGeneric.Invoke(__instance, new object[] { modPath }) as System.IO.FileInfo;
-                            if (fileInfo != null && fileInfo.Exists)
-                            {
-                                _mcmGetInternalAssetKey ??= mcmType.GetMethod("GetInternalAssetKey", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                                assetName = _mcmGetInternalAssetKey?.Invoke(__instance, new object[] { modPath }) as IAssetName;
-                                __result = true;
-                                return false;
-                            }
+                            _mcmGetModFileGeneric = mGetModFile.MakeGenericMethod(typeof(Texture2D));
                         }
                     }
-
-                    // 2. Otherwise it's a content asset (e.g. Maps/ZCCC_Entrance_Tilesheet)
-                    // Resolve asset name WITHOUT loading the full Texture2D through GameContentManager!
-                    _mcmGetContentKey ??= mcmType.GetMethod("GetContentKeyForTilesheetImageSource", BindingFlags.Instance | BindingFlags.NonPublic);
-                    string? contentKey = _mcmGetContentKey?.Invoke(__instance, new object[] { relativePath }) as string;
-                    if (contentKey != null)
+                    if (_mcmGetModFileGeneric != null)
                     {
-                        _mcmCoordinatorField ??= mcmType.BaseType?.GetField("Coordinator", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                        var coord = _mcmCoordinatorField?.GetValue(__instance);
-                        if (coord != null)
+                        var fileInfo = _mcmGetModFileGeneric.Invoke(__instance, new object[] { modPath }) as System.IO.FileInfo;
+                        if (fileInfo != null && fileInfo.Exists)
                         {
-                            _coordParseAssetNameMethod ??= coord.GetType().GetMethod("ParseAssetName", new[] { typeof(string), typeof(bool) });
-                            if (_coordParseAssetNameMethod != null)
-                            {
-                                assetName = _coordParseAssetNameMethod.Invoke(coord, new object[] { contentKey, false }) as IAssetName;
-                                __result = true;
-                                return false; // Return success immediately without loading texture into RAM!
-                            }
+                            _mcmGetInternalAssetKey ??= mcmType.GetMethod("GetInternalAssetKey", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                            assetName = _mcmGetInternalAssetKey?.Invoke(__instance, new object[] { modPath }) as IAssetName;
+                            __result = true;
+                            return false;
                         }
                     }
                 }
-                catch
+
+                // 2. Otherwise it's a content asset (e.g. Maps/ZCCC_Entrance_Tilesheet)
+                // Resolve asset name WITHOUT loading the full Texture2D through GameContentManager!
+                _mcmGetContentKey ??= mcmType.GetMethod("GetContentKeyForTilesheetImageSource", BindingFlags.Instance | BindingFlags.NonPublic);
+                string? contentKey = _mcmGetContentKey?.Invoke(__instance, new object[] { relativePath }) as string;
+                if (contentKey != null)
                 {
-                    return true; // Fall back to original method if reflection fails
+                    _mcmCoordinatorField ??= mcmType.BaseType?.GetField("Coordinator", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var coord = _mcmCoordinatorField?.GetValue(__instance);
+                    if (coord != null)
+                    {
+                        _coordParseAssetNameMethod ??= coord.GetType().GetMethod("ParseAssetName", new[] { typeof(string), typeof(bool) });
+                        if (_coordParseAssetNameMethod != null)
+                        {
+                            assetName = _coordParseAssetNameMethod.Invoke(coord, new object[] { contentKey, false }) as IAssetName;
+                            __result = true;
+                            return false; // Return success immediately without loading texture into RAM!
+                        }
+                    }
                 }
+            }
+            catch
+            {
+                return true; // Fall back to original method if reflection fails
             }
             return true;
         }
@@ -1019,14 +1016,20 @@ namespace SDViOSTouchControls
             if (location == null) return;
             try
             {
+                LazyIosDisplayDevice.EnsureInstalled();
                 _forceMapLoad = true;
                 if (location.map == null)
                 {
                     location.reloadMap();
                 }
-                if (location.map != null && Game1.mapDisplayDevice != null)
+
+                // Prune previous locations' tilesheet references from the display device
+                LazyIosDisplayDevice.Instance?.PruneTileSheets(location.map);
+
+                long availMb = MemoryWatchdog.Available() / (1024 * 1024);
+                if (availMb < 120)
                 {
-                    location.map.LoadTileSheets(Game1.mapDisplayDevice);
+                    MemoryWatchdog.ForceCollect($"Warp({location.Name})", minIntervalMs: 2500, compactLoh: true);
                 }
             }
             catch (Exception ex)
@@ -1066,10 +1069,6 @@ namespace SDViOSTouchControls
                 {
                     _forceMapLoad = true;
                     __instance.reloadMap();
-                    if (__instance.map != null && Game1.mapDisplayDevice != null)
-                    {
-                        __instance.map.LoadTileSheets(Game1.mapDisplayDevice);
-                    }
                 }
                 catch { }
                 finally
@@ -1122,7 +1121,7 @@ namespace SDViOSTouchControls
 
         private static bool PrefixMapLoadTileSheets(xTile.Map __instance)
         {
-            if (Game1.gameMode == 6 && !_forceMapLoad)
+            if (!_forceMapLoad)
             {
                 if (!IsEssentialMap(__instance))
                 {
@@ -1134,7 +1133,7 @@ namespace SDViOSTouchControls
 
         private static bool PrefixDevLoadTileSheet(xTile.Tiles.TileSheet tileSheet)
         {
-            if (Game1.gameMode == 6 && !_forceMapLoad)
+            if (!_forceMapLoad)
             {
                 if (tileSheet == null || !IsEssentialMap(tileSheet.Map))
                 {
@@ -1866,12 +1865,33 @@ namespace SDViOSTouchControls
 
         private bool _legacyNeutralized = false;
         private bool _drawnThisFrame = false;
+        private RenderTarget2D? _trackedScreen;
+        private RenderTarget2D? _trackedUiScreen;
 
         private void OnUpdateTicking(object? sender, UpdateTickingEventArgs e)
         {
             try
             {
                 _drawnThisFrame = false;
+
+                LazyIosDisplayDevice.EnsureInstalled();
+
+                if (Game1.game1 != null)
+                {
+                    var curScreen = Game1.game1.screen;
+                    if (curScreen != null && _trackedScreen != null && !ReferenceEquals(curScreen, _trackedScreen))
+                    {
+                        try { if (!_trackedScreen.IsDisposed) _trackedScreen.Dispose(); } catch { }
+                    }
+                    _trackedScreen = curScreen;
+
+                    var curUiScreen = Game1.game1.uiScreen;
+                    if (curUiScreen != null && _trackedUiScreen != null && !ReferenceEquals(curUiScreen, _trackedUiScreen))
+                    {
+                        try { if (!_trackedUiScreen.IsDisposed) _trackedUiScreen.Dispose(); } catch { }
+                    }
+                    _trackedUiScreen = curUiScreen;
+                }
 
                 // 1. Lock GamepadMode to ForceOff on iOS:
                 // Prevents Game1.CheckGamepadMode from flapping between mouse and controller,

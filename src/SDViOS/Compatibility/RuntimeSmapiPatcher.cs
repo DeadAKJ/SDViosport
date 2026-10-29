@@ -112,6 +112,10 @@ namespace SDViOS.Compatibility
                 if (PatchReferenceToInvalidMemberFinder(mod))
                     modified = true;
 
+                // 6. ModContentManager & CoreAssetPropagator: Prevent eager tilesheet Texture2D loading and background map reloads
+                if (PatchModContentManagerAndCoreAssetPropagator(mod))
+                    modified = true;
+
                 if (!modified)
                 {
                     EngineLogger.Log($"[RuntimeSmapiPatcher] '{smapiDllPath}' is already patched.");
@@ -575,6 +579,95 @@ namespace SDViOS.Compatibility
                 EngineLogger.LogError($"[RuntimeSmapiPatcher] Failed to patch ReferenceToInvalidMemberFinder: {ex.Message}");
                 return false;
             }
+        }
+
+        private static bool PatchModContentManagerAndCoreAssetPropagator(ModuleDefinition mod)
+        {
+            bool modified = false;
+            try
+            {
+                // 1. ModContentManager.TryGetTilesheetAssetName: return parsed AssetName directly without loading Texture2D into RAM
+                var mcmType = mod.GetType("StardewModdingAPI.Framework.ContentManagers.ModContentManager");
+                var tryGetMethod = mcmType?.Methods.FirstOrDefault(m => m.Name == "TryGetTilesheetAssetName");
+                if (tryGetMethod != null && tryGetMethod.HasBody && tryGetMethod.Body.ExceptionHandlers.Count > 0)
+                {
+                    var parseInst = tryGetMethod.Body.Instructions.FirstOrDefault(i =>
+                        i.OpCode == OpCodes.Callvirt && i.Operand is MethodReference mr && mr.Name == "ParseAssetName");
+                    if (parseInst != null && parseInst.Next != null && parseInst.Next.OpCode == OpCodes.Stloc_0)
+                    {
+                        var stloc0 = parseInst.Next;
+                        int idx = tryGetMethod.Body.Instructions.IndexOf(stloc0);
+                        while (tryGetMethod.Body.Instructions.Count > idx + 1)
+                        {
+                            tryGetMethod.Body.Instructions.RemoveAt(idx + 1);
+                        }
+                        tryGetMethod.Body.ExceptionHandlers.Clear();
+                        var il = tryGetMethod.Body.GetILProcessor();
+                        il.Emit(OpCodes.Ldarg_3);
+                        il.Emit(OpCodes.Ldloc_0);
+                        il.Emit(OpCodes.Stind_Ref);
+                        il.Emit(OpCodes.Ldc_I4_1);
+                        il.Emit(OpCodes.Ret);
+                        modified = true;
+                        EngineLogger.Log("[RuntimeSmapiPatcher] Patched ModContentManager.TryGetTilesheetAssetName to skip eager Texture2D loading.");
+                    }
+                }
+
+                // 2. CoreAssetPropagator.PropagateMap & UpdateMap: only reload map for Game1.currentLocation
+                var capType = mod.GetType("StardewModdingAPI.Metadata.CoreAssetPropagator");
+                var sdvAsmRef = mod.AssemblyReferences.FirstOrDefault(r => r.Name == "Stardew Valley");
+                if (capType != null && sdvAsmRef != null)
+                {
+                    var game1TypeRef = new TypeReference("StardewValley", "Game1", mod, sdvAsmRef);
+                    var gameLocTypeRef = new TypeReference("StardewValley", "GameLocation", mod, sdvAsmRef);
+                    var getCurrentLocRef = new MethodReference("get_currentLocation", gameLocTypeRef, game1TypeRef)
+                    {
+                        HasThis = false
+                    };
+
+                    var propMapMethod = capType.Methods.FirstOrDefault(m => m.Name == "PropagateMap");
+                    if (propMapMethod != null && propMapMethod.HasBody &&
+                        !propMapMethod.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "get_currentLocation"))
+                    {
+                        var newObjInst = propMapMethod.Body.Instructions.FirstOrDefault(i =>
+                            i.OpCode == OpCodes.Newobj && i.Operand is MethodReference mr && mr.DeclaringType.Name.Contains("DisplayClass"));
+                        if (newObjInst != null && newObjInst.Previous != null && newObjInst.Previous.Operand is Instruction continueTarget)
+                        {
+                            newObjInst.Previous.OpCode = OpCodes.Brfalse;
+                            var il = propMapMethod.Body.GetILProcessor();
+                            il.InsertBefore(newObjInst, il.Create(OpCodes.Ldloc_3));
+                            il.InsertBefore(newObjInst, il.Create(OpCodes.Call, getCurrentLocRef));
+                            il.InsertBefore(newObjInst, il.Create(OpCodes.Bne_Un, continueTarget));
+                            modified = true;
+                            EngineLogger.Log("[RuntimeSmapiPatcher] Patched CoreAssetPropagator.PropagateMap to skip background locations.");
+                        }
+                    }
+
+                    var updateMapMethod = capType.Methods.FirstOrDefault(m => m.Name == "UpdateMap");
+                    if (updateMapMethod != null && updateMapMethod.HasBody &&
+                        !updateMapMethod.Body.Instructions.Any(i => i.Operand is MethodReference mr && mr.Name == "get_currentLocation"))
+                    {
+                        var clearDoorsInst = updateMapMethod.Body.Instructions.FirstOrDefault(i =>
+                            i.OpCode == OpCodes.Ldfld && i.Operand is FieldReference fr && fr.Name == "interiorDoors");
+                        if (clearDoorsInst != null && clearDoorsInst.Previous != null && clearDoorsInst.Previous.OpCode == OpCodes.Ldloc_0)
+                        {
+                            var target = clearDoorsInst.Previous;
+                            var il = updateMapMethod.Body.GetILProcessor();
+                            il.InsertBefore(target, il.Create(OpCodes.Ldloc_0));
+                            il.InsertBefore(target, il.Create(OpCodes.Call, getCurrentLocRef));
+                            il.InsertBefore(target, il.Create(OpCodes.Beq_S, target));
+                            il.InsertBefore(target, il.Create(OpCodes.Ret));
+                            modified = true;
+                            EngineLogger.Log("[RuntimeSmapiPatcher] Patched CoreAssetPropagator.UpdateMap to skip background locations.");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                EngineLogger.LogError($"[RuntimeSmapiPatcher] Failed to patch ModContentManager/CoreAssetPropagator: {ex.Message}");
+            }
+            return modified;
         }
 
         public static void EnsureModsPatched(string modsDir)
