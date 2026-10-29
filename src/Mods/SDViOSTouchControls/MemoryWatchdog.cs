@@ -186,7 +186,7 @@ namespace SDViOSTouchControls
                         if (avail < EmergencyBytes && (now - _lastBackup).TotalSeconds > 15)
                         {
                             _lastBackup = now;
-                            RemoteDebugServer.BackupLogs("LowMemoryEmergency");
+                            LogBackup.BackupLogs("LowMemoryEmergency");
                         }
                         ForceCollect($"Watchdog(avail={avail / MB}MB, +{managedGrowth / MB}MB)", minIntervalMs: gcInterval, compactLoh: compactLoh);
                         lastLog = DateTime.UtcNow;

@@ -29,13 +29,6 @@ namespace SDViOSTouchControls
         private static IClickableMenu? _lastTickMenu = null;
         public static bool IsSavingOrNewDay { get; set; } = false;
 
-        // Thread-safe status snapshot updated on the main thread for RemoteDebugServer
-        public static int CachedGameMode { get; private set; }
-        public static bool CachedWorldReady { get; private set; }
-        public static string CachedTimeString { get; private set; } = "Not loaded";
-        public static string CachedLocationName { get; private set; } = "Menu";
-        public static string CachedActiveMenuName { get; private set; } = "none";
-
         public static string GetCompactStackTrace(int skipFrames = 2, int maxFrames = 6)
         {
             try
@@ -121,10 +114,6 @@ namespace SDViOSTouchControls
             // 8. Background memory watchdog (real iOS headroom + emergency GC during synchronous loads)
             try { MemoryWatchdog.Start(Monitor); }
             catch (Exception ex) { Monitor.Log($"[MEM_DEBUG] Watchdog failed to start: {ex.Message}", LogLevel.Warn); }
-
-            // 8. Embedded Wi-Fi Remote Debug & Log Server (port 8080)
-            try { RemoteDebugServer.Start(Monitor); }
-            catch (Exception ex) { Monitor.Log($"[RemoteServer] Server failed to start: {ex.Message}", LogLevel.Warn); }
 
             Monitor.Log("[SDViOSTouchControls] Mod initialized successfully.", LogLevel.Info);
         }
@@ -1508,7 +1497,7 @@ namespace SDViOSTouchControls
             {
                 Monitor.Log("[SDViOSTouchControls] DayEnding: purging transient assets, compacting memory, and backing up logs...", LogLevel.Info);
                 PurgeTransientAssets();
-                RemoteDebugServer.BackupLogs("DayEnding");
+                LogBackup.BackupLogs("DayEnding");
                 MemoryWatchdog.ForceCollect("DayEnding", minIntervalMs: 500);
                 QuickSaveManager.Instance?.OnDayEnding();
             }
@@ -1520,7 +1509,7 @@ namespace SDViOSTouchControls
             try
             {
                 Monitor.Log("[SDViOSTouchControls] Saving: compacting memory before XML serialization...", LogLevel.Info);
-                RemoteDebugServer.BackupLogs("Saving");
+                LogBackup.BackupLogs("Saving");
                 MemoryWatchdog.ForceCollect("Saving", minIntervalMs: 500);
                 QuickSaveManager.Instance?.OnSaving();
             }
@@ -1532,7 +1521,7 @@ namespace SDViOSTouchControls
             try
             {
                 Monitor.Log("[SDViOSTouchControls] Saved: save complete, running GC before day transition...", LogLevel.Info);
-                RemoteDebugServer.BackupLogs("Saved");
+                LogBackup.BackupLogs("Saved");
                 MemoryWatchdog.ForceCollect("Saved", minIntervalMs: 500);
                 QuickSaveManager.Instance?.OnSaved();
             }
@@ -1819,7 +1808,7 @@ namespace SDViOSTouchControls
 
                 EnsureLocationMapAndTileSheetsLoaded(Game1.currentLocation);
                 MemoryWatchdog.ForceCollect("SaveLoaded", minIntervalMs: 500);
-                RemoteDebugServer.BackupLogs("SaveLoaded");
+                LogBackup.BackupLogs("SaveLoaded");
                 QuickSaveManager.Instance?.OnSaveLoaded();
                 Monitor.Log("[SDViOSTouchControls] Save loaded successfully. Gamepad locked ForceOff & memory compacted.", LogLevel.Info);
             }
@@ -1857,7 +1846,7 @@ namespace SDViOSTouchControls
 
                 EnsureLocationMapAndTileSheetsLoaded(Game1.currentLocation);
                 MemoryWatchdog.ForceCollect("DayStarted", minIntervalMs: 1000);
-                RemoteDebugServer.BackupLogs("DayStarted");
+                LogBackup.BackupLogs("DayStarted");
                 Monitor.Log("[SDViOSTouchControls] Day started: Large Object Heap compacted.", LogLevel.Info);
             }
             catch { }
@@ -1982,21 +1971,6 @@ namespace SDViOSTouchControls
 
             // Process any pending midday QuickSave state sync
             QuickSaveManager.Instance?.Update();
-
-            // Update thread-safe status snapshot every 15 ticks (4x/sec) for RemoteDebugServer
-            if (e.IsMultipleOf(15))
-            {
-                try
-                {
-                    CachedGameMode = Game1.gameMode;
-                    bool worldReady = Context.IsWorldReady;
-                    CachedWorldReady = worldReady;
-                    CachedTimeString = worldReady ? $"{Game1.timeOfDay} (Day {Game1.dayOfMonth} {Game1.currentSeason} Y{Game1.year})" : "Not loaded";
-                    CachedLocationName = worldReady ? (Game1.currentLocation?.Name ?? "none") : "Menu";
-                    CachedActiveMenuName = Game1.activeClickableMenu?.GetType().Name ?? "none";
-                }
-                catch { }
-            }
         }
 
         private void OnButtonPressed(object? sender, ButtonPressedEventArgs e)

@@ -44,7 +44,7 @@ namespace SDViOS.Diagnostics
                     // Ignore rotation errors so logger initialization always succeeds
                 }
 
-                // Open with shared read access so iOS Files app and RemoteDebugServer can inspect while running
+                // Open with shared read access so iOS Files app and diagnostic tools can inspect while running
                 var fileStream = new FileStream(LogFilePath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
                 _fileWriter = new StreamWriter(fileStream, Encoding.UTF8) { AutoFlush = true };
 
