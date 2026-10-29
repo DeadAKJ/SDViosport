@@ -162,11 +162,41 @@ namespace SDViOSTouchControls
                 if (player != null && !player.isEating && !player.isRidingHorse() && !player.IsSitting() && !player.UsingTool && player.freezePause <= 0)
                 {
                     Vector2 grabTile = player.GetGrabTile();
-                    if (Game1.currentLocation != null && Game1.activeClickableMenu == null && !Game1.dialogueUp)
+                    var loc = Game1.currentLocation;
+                    if (loc != null && Game1.activeClickableMenu == null && !Game1.dialogueUp)
                     {
                         try
                         {
-                            Game1.tryToCheckAt(grabTile, player);
+                            bool opened = Game1.tryToCheckAt(grabTile, player);
+                            if (!opened && loc.objects.TryGetValue(grabTile, out var directObj) && directObj is StardewValley.Objects.Chest directChest)
+                            {
+                                opened = directChest.checkForAction(player);
+                            }
+
+                            // If facing tile did not interact with a chest/container, check adjacent tiles (North, East, South, West)
+                            if (!opened && Game1.activeClickableMenu == null && !Game1.dialogueUp)
+                            {
+                                Vector2[] adjacent = new Vector2[]
+                                {
+                                    new Vector2(player.Tile.X, player.Tile.Y - 1),
+                                    new Vector2(player.Tile.X + 1, player.Tile.Y),
+                                    new Vector2(player.Tile.X, player.Tile.Y + 1),
+                                    new Vector2(player.Tile.X - 1, player.Tile.Y)
+                                };
+
+                                for (int i = 0; i < adjacent.Length; i++)
+                                {
+                                    Vector2 tile = adjacent[i];
+                                    if (loc.objects.TryGetValue(tile, out var adjObj) && adjObj is StardewValley.Objects.Chest adjChest)
+                                    {
+                                        player.faceGeneralDirection(tile * 64f);
+                                        if (Game1.tryToCheckAt(tile, player) || adjChest.checkForAction(player))
+                                        {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         catch { }
                     }

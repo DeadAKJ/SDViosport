@@ -849,6 +849,31 @@ namespace SDViOSTouchControls
             {
                 Monitor.Log($"[SDViOSTouchControls] Note patching menu diagnostics: {ex.Message}", LogLevel.Warn);
             }
+
+            // 7. Action Button & Container / Chest Interaction Patch
+            try
+            {
+                var mDidPlayerRightClick = typeof(Game1).GetMethod("didPlayerJustRightClick", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(bool) }, null);
+                if (mDidPlayerRightClick != null)
+                {
+                    harmony.Patch(mDidPlayerRightClick, postfix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PostfixDidPlayerJustRightClick), BindingFlags.Static | BindingFlags.NonPublic)));
+                    Monitor.Log("[SDViOSTouchControls] Harmony patched Game1.didPlayerJustRightClick.", LogLevel.Info);
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[SDViOSTouchControls] Error patching didPlayerJustRightClick: {ex.Message}", LogLevel.Error);
+            }
+        }
+
+        private static void PostfixDidPlayerJustRightClick(bool ignoreNonMouseHeldInput, ref bool __result)
+        {
+            if (__result) return;
+            var pad = TouchVirtualPad.Instance;
+            if (pad != null && (pad.ButtonA || pad.SimulatedMouseRightDown))
+            {
+                __result = true;
+            }
         }
 
         private static MethodInfo? _mcmGetModFileGeneric;

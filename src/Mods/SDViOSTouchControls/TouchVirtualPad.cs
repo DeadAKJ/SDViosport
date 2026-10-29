@@ -303,7 +303,7 @@ namespace SDViOSTouchControls
                 int my = Math.Clamp(SimulatedMousePosition.Y, 0, maxY);
 
                 bool isLeft = IsLeftClickActive;
-                bool isRight = IsRightClickActive;
+                bool isRight = IsRightClickActive || ButtonA;
 
                 return new MouseState(
                     mx,
