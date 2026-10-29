@@ -27,6 +27,7 @@ namespace SDViOSTouchControls
         public static IMonitor? ModMonitor { get; private set; }
         public static bool VerboseInputLogging { get; set; } = false;
         private static IClickableMenu? _lastTickMenu = null;
+        public static bool IsSavingOrNewDay { get; set; } = false;
 
         // Thread-safe status snapshot updated on the main thread for RemoteDebugServer
         public static int CachedGameMode { get; private set; }
@@ -106,9 +107,18 @@ namespace SDViOSTouchControls
             helper.Events.GameLoop.Saved += OnSaved;
             helper.Events.GameLoop.SaveLoaded += OnSaveLoaded;
             helper.Events.GameLoop.DayStarted += OnDayStarted;
+            helper.Events.GameLoop.ReturnedToTitle += OnReturnedToTitle;
             helper.Events.Content.AssetsInvalidated += OnAssetsInvalidated;
+            helper.Events.Input.ButtonPressed += OnButtonPressed;
 
-            // 7. Background memory watchdog (real iOS headroom + emergency GC during synchronous loads)
+            // 7. Initialize QuickSave (midday save state manager)
+            QuickSaveManager.Initialize(helper, Monitor);
+
+            // Register Console Commands for QuickSave / QuickLoad
+            helper.ConsoleCommands.Add("quick_save", "Quick save the game mid-day from anywhere.", (cmd, args) => QuickSaveManager.Instance?.QuickSave());
+            helper.ConsoleCommands.Add("quick_load", "Quick load the midday save state for this farm.", (cmd, args) => QuickSaveManager.Instance?.QuickLoad());
+
+            // 8. Background memory watchdog (real iOS headroom + emergency GC during synchronous loads)
             try { MemoryWatchdog.Start(Monitor); }
             catch (Exception ex) { Monitor.Log($"[MEM_DEBUG] Watchdog failed to start: {ex.Message}", LogLevel.Warn); }
 
@@ -1473,9 +1483,10 @@ namespace SDViOSTouchControls
             try
             {
                 Monitor.Log("[SDViOSTouchControls] DayEnding: purging transient assets, compacting memory, and backing up logs...", LogLevel.Info);
-                PurgeContentAssets();
+                PurgeTransientAssets();
                 RemoteDebugServer.BackupLogs("DayEnding");
                 MemoryWatchdog.ForceCollect("DayEnding", minIntervalMs: 500);
+                QuickSaveManager.Instance?.OnDayEnding();
             }
             catch { }
         }
@@ -1487,6 +1498,7 @@ namespace SDViOSTouchControls
                 Monitor.Log("[SDViOSTouchControls] Saving: compacting memory before XML serialization...", LogLevel.Info);
                 RemoteDebugServer.BackupLogs("Saving");
                 MemoryWatchdog.ForceCollect("Saving", minIntervalMs: 500);
+                QuickSaveManager.Instance?.OnSaving();
             }
             catch { }
         }
@@ -1498,11 +1510,120 @@ namespace SDViOSTouchControls
                 Monitor.Log("[SDViOSTouchControls] Saved: save complete, running GC before day transition...", LogLevel.Info);
                 RemoteDebugServer.BackupLogs("Saved");
                 MemoryWatchdog.ForceCollect("Saved", minIntervalMs: 500);
+                QuickSaveManager.Instance?.OnSaved();
             }
             catch { }
         }
 
-        private void PurgeContentAssets()
+        private static bool IsCoreAsset(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return true;
+            key = key.Replace('\\', '/');
+
+            // Audio assets MUST NEVER be touched or evicted
+            if (key.IndexOf("Audio", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                key.IndexOf("Sound", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                key.IndexOf("Wave", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                key.IndexOf("Cue", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                key.IndexOf("Music", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                key.IndexOf("Jukebox", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+
+            // Title screen sprites, UI, and Fonts
+            if (key.StartsWith("LooseSprites/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Fonts/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Minigames/Title", StringComparison.OrdinalIgnoreCase)) return true;
+
+            // Core static game sprites on Game1
+            if (key.Equals("Maps/springobjects", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.Equals("TileSheets/bobbers", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.Equals("TileSheets/tools", StringComparison.OrdinalIgnoreCase)) return true;
+
+            return false;
+        }
+
+        private static bool IsPurgeableAsset(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return false;
+            key = key.Replace('\\', '/');
+
+            // Protected core assets, fonts, loose sprites, and audio must never be purged
+            if (IsCoreAsset(key)) return false;
+
+            // Never touch Game data tables (Data/AudioChanges, Data/Locations, Data/Objects, etc.)
+            // Only Data/Events is transient cutscene data that can be safely evicted
+            if (key.StartsWith("Data/", StringComparison.OrdinalIgnoreCase) &&
+                !key.StartsWith("Data/Events", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // Never touch UI strings needed by TitleMenu / HUD
+            if (key.StartsWith("Strings/UI", StringComparison.OrdinalIgnoreCase) ||
+                key.StartsWith("Strings/StringsFromCSFiles", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // Game map and tilesheet textures
+            if (key.StartsWith("Maps/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("TileSheets/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Buildings/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("TerrainFeatures/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Mines/", StringComparison.OrdinalIgnoreCase)) return true;
+
+            // Character, portrait, animal, monster textures
+            if (key.StartsWith("Characters/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Portraits/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Animals/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Monsters/", StringComparison.OrdinalIgnoreCase)) return true;
+
+            // Transient dialogue, schedule, and event strings
+            if (key.StartsWith("Strings/Events", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Data/Events", StringComparison.OrdinalIgnoreCase)) return true;
+
+            return false;
+        }
+
+        private static bool IsCoreDisposable(IDisposable d)
+        {
+            if (d == null) return true;
+            try
+            {
+                // Only Texture2D objects are candidates for eviction/disposal
+                if (d is not Microsoft.Xna.Framework.Graphics.Texture2D tex) return true;
+
+                // If already disposed, consider protected
+                if (tex.IsDisposed) return true;
+
+                if (ReferenceEquals(d, Game1.mouseCursors)) return true;
+                if (ReferenceEquals(d, Game1.mouseCursors2)) return true;
+                if (ReferenceEquals(d, Game1.mouseCursors_1_6)) return true;
+                if (ReferenceEquals(d, Game1.objectSpriteSheet)) return true;
+                if (ReferenceEquals(d, Game1.objectSpriteSheet_2)) return true;
+                if (ReferenceEquals(d, Game1.toolSpriteSheet)) return true;
+                if (ReferenceEquals(d, Game1.menuTexture)) return true;
+                if (ReferenceEquals(d, Game1.uncoloredMenuTexture)) return true;
+                if (ReferenceEquals(d, Game1.shadowTexture)) return true;
+                if (ReferenceEquals(d, Game1.daybg)) return true;
+                if (ReferenceEquals(d, Game1.nightbg)) return true;
+                if (ReferenceEquals(d, Game1.rainTexture)) return true;
+                if (Game1.activeClickableMenu is TitleMenu tm)
+                {
+                    if (ReferenceEquals(d, tm.titleButtonsTexture)) return true;
+                    if (ReferenceEquals(d, tm.cloudsTexture)) return true;
+                }
+                if (ReferenceEquals(d, Game1.controllerMaps)) return true;
+                if (ReferenceEquals(d, Game1.giftboxTexture)) return true;
+                if (ReferenceEquals(d, Game1.bobbersTexture)) return true;
+            }
+            catch { }
+            return false;
+        }
+
+        public static void PurgeTransientAssets()
         {
             try
             {
@@ -1512,26 +1633,142 @@ namespace SDViOSTouchControls
                 if (field?.GetValue(content) is System.Collections.IDictionary dict)
                 {
                     var keysToRemove = new System.Collections.Generic.List<object>();
-                    foreach (var key in dict.Keys)
+                    lock (content)
                     {
-                        if (key is string s)
+                        foreach (var key in dict.Keys)
                         {
-                            if (s.StartsWith("Characters/schedules", StringComparison.OrdinalIgnoreCase) ||
-                                s.StartsWith("Characters/Dialogue", StringComparison.OrdinalIgnoreCase) ||
-                                s.StartsWith("Strings/", StringComparison.OrdinalIgnoreCase) ||
-                                s.StartsWith("Data/Events", StringComparison.OrdinalIgnoreCase))
+                            if (key is string s)
                             {
-                                keysToRemove.Add(key);
+                                if (s.StartsWith("Characters/schedules", StringComparison.OrdinalIgnoreCase) ||
+                                    s.StartsWith("Characters/Dialogue", StringComparison.OrdinalIgnoreCase) ||
+                                    s.StartsWith("Strings/Events", StringComparison.OrdinalIgnoreCase) ||
+                                    s.StartsWith("Data/Events", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    keysToRemove.Add(key);
+                                }
                             }
                         }
+                        foreach (var k in keysToRemove) dict.Remove(k);
                     }
-                    foreach (var k in keysToRemove) dict.Remove(k);
-                    Monitor.Log($"[MEM_PURGE] Evicted {keysToRemove.Count} transient assets from Game1.content.", LogLevel.Info);
+                    ModMonitor?.Log($"[MEM_PURGE] Evicted {keysToRemove.Count} transient assets from Game1.content.", LogLevel.Info);
                 }
             }
             catch (Exception ex)
             {
-                Monitor.Log($"[MEM_PURGE] Error in PurgeContentAssets: {ex.Message}", LogLevel.Trace);
+                ModMonitor?.Log($"[MEM_PURGE] Error in PurgeTransientAssets: {ex.Message}", LogLevel.Trace);
+            }
+        }
+
+        public static void PurgeNonCoreAssets(IModHelper? helper = null)
+        {
+            try
+            {
+                long managedBefore = GC.GetTotalMemory(false);
+                int evictedAssets = 0;
+                int disposedAssets = 0;
+
+                // NOTE: DO NOT invoke helper.GameContent.InvalidateCache here!
+                // Invalidating SMAPI caches when returning to title triggers CoreAssetPropagator
+                // to propagate Data/AudioChanges, causing MissingFieldException in AudioCueModificationManager
+                // and a massive memory spike that kills the app under iOS Jetsam.
+
+                // 1. Discover all ContentManager instances from MonoGame
+                var cmListField = typeof(Microsoft.Xna.Framework.Content.ContentManager)
+                    .GetField("ContentManagers", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                var loadedField = typeof(Microsoft.Xna.Framework.Content.ContentManager)
+                    .GetField("loadedAssets", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var disposableField = typeof(Microsoft.Xna.Framework.Content.ContentManager)
+                    .GetField("disposableAssets", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+                var managers = new List<Microsoft.Xna.Framework.Content.ContentManager>();
+                if (Game1.content != null) managers.Add(Game1.content);
+                if (Game1.game1?.Content != null && !managers.Contains(Game1.game1.Content)) managers.Add(Game1.game1.Content);
+
+                if (cmListField?.GetValue(null) is System.Collections.IEnumerable rawList)
+                {
+                    foreach (var item in rawList)
+                    {
+                        if (item is WeakReference wr && wr.Target is Microsoft.Xna.Framework.Content.ContentManager cm)
+                        {
+                            if (!managers.Contains(cm)) managers.Add(cm);
+                        }
+                        else if (item is Microsoft.Xna.Framework.Content.ContentManager directCm)
+                        {
+                            if (!managers.Contains(directCm)) managers.Add(directCm);
+                        }
+                    }
+                }
+
+                // 2. Safely evict unneeded game map/character textures and dispose textures
+                foreach (var cm in managers)
+                {
+                    if (cm == null) continue;
+                    try
+                    {
+                        var dict = loadedField?.GetValue(cm) as System.Collections.IDictionary;
+                        var disposables = disposableField?.GetValue(cm) as System.Collections.IList;
+
+                        if (dict != null)
+                        {
+                            var keysToRemove = new List<object>();
+                            lock (cm)
+                            {
+                                foreach (var key in dict.Keys)
+                                {
+                                    if (key is string s && IsPurgeableAsset(s))
+                                    {
+                                        keysToRemove.Add(key);
+                                    }
+                                }
+
+                                foreach (var key in keysToRemove)
+                                {
+                                    var val = dict[key];
+                                    dict.Remove(key);
+                                    evictedAssets++;
+
+                                    if (val is IDisposable disp && !IsCoreDisposable(disp))
+                                    {
+                                        try
+                                        {
+                                            if (disp is Microsoft.Xna.Framework.Graphics.Texture2D tex)
+                                            {
+                                                if (!tex.IsDisposed)
+                                                {
+                                                    tex.Dispose();
+                                                    disposedAssets++;
+                                                }
+                                            }
+                                            else
+                                            {
+                                                disp.Dispose();
+                                                disposedAssets++;
+                                            }
+                                            disposables?.Remove(disp);
+                                        }
+                                        catch { }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ModMonitor?.Log($"[MEM_PURGE] Error purging manager {cm.GetType().Name}: {ex.Message}", LogLevel.Trace);
+                    }
+                }
+
+                // 3. Force immediate full-heap garbage collection and finalizer execution
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                GC.WaitForPendingFinalizers();
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+
+                long managedAfter = GC.GetTotalMemory(false);
+                ModMonitor?.Log($"[MEM_PURGE] Safe texture purge complete: evicted {evictedAssets} assets ({disposedAssets} textures disposed). Managed heap: {managedBefore / (1024 * 1024)} MB -> {managedAfter / (1024 * 1024)} MB.", LogLevel.Info);
+            }
+            catch (Exception ex)
+            {
+                ModMonitor?.Log($"[MEM_PURGE] Error in PurgeNonCoreAssets: {ex.Message}", LogLevel.Warn);
             }
         }
 
@@ -1559,9 +1796,25 @@ namespace SDViOSTouchControls
                 EnsureLocationMapAndTileSheetsLoaded(Game1.currentLocation);
                 MemoryWatchdog.ForceCollect("SaveLoaded", minIntervalMs: 500);
                 RemoteDebugServer.BackupLogs("SaveLoaded");
+                QuickSaveManager.Instance?.OnSaveLoaded();
                 Monitor.Log("[SDViOSTouchControls] Save loaded successfully. Gamepad locked ForceOff & memory compacted.", LogLevel.Info);
             }
             catch { }
+        }
+
+        private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
+        {
+            try
+            {
+                TouchVirtualPad.Instance?.ResetInputState();
+                PurgeNonCoreAssets();
+                MemoryWatchdog.ForceCollect("ReturnedToTitle", minIntervalMs: 50);
+                Monitor.Log("[SDViOSTouchControls] Returned to title: Input reset, non-core assets purged, and memory compacted.", LogLevel.Info);
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[SDViOSTouchControls] Error in OnReturnedToTitle: {ex.Message}", LogLevel.Trace);
+            }
         }
 
         private void OnDayStarted(object? sender, DayStartedEventArgs e)
@@ -1682,6 +1935,9 @@ namespace SDViOSTouchControls
 
             _lastTickMenu = Game1.activeClickableMenu;
 
+            // Process any pending midday QuickSave state sync
+            QuickSaveManager.Instance?.Update();
+
             // Update thread-safe status snapshot every 15 ticks (4x/sec) for RemoteDebugServer
             if (e.IsMultipleOf(15))
             {
@@ -1695,6 +1951,27 @@ namespace SDViOSTouchControls
                     CachedActiveMenuName = Game1.activeClickableMenu?.GetType().Name ?? "none";
                 }
                 catch { }
+            }
+        }
+
+        private void OnButtonPressed(object? sender, ButtonPressedEventArgs e)
+        {
+            try
+            {
+                if (!Context.IsWorldReady) return;
+
+                if (e.Button == SButton.F5 || e.Button == SButton.K)
+                {
+                    QuickSaveManager.Instance?.QuickSave();
+                }
+                else if (e.Button == SButton.F7)
+                {
+                    QuickSaveManager.Instance?.QuickLoad();
+                }
+            }
+            catch (Exception ex)
+            {
+                Monitor.Log($"[QuickSave] Error handling button press {e.Button}: {ex.Message}", LogLevel.Trace);
             }
         }
 

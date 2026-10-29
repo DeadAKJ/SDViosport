@@ -19,23 +19,44 @@ if not token:
     print("Warning: GITHUB_TOKEN not found in environment or tools/token.txt.")
 
 repo = 'DeadAKJ/SDViosport'
-version_name = 'v1.2.4-fix-mod-loading-compatibility'
+version_name = 'v3.3.0-save-state-ui-scale-tool-swing-fix'
 
-changelog_content = """Version: v1.2.4-fix-mod-loading-compatibility
-Date: 2026-10-01
+changelog_content = """Version: v3.3.0-save-state-ui-scale-tool-swing-fix
+Date: 2026-10-29
 
 Changes:
-1. Fix SMAPI Mod Loading Compatibility on iOS:
+1. Midday Save State Manager (QuickSaveManager):
+   - Added in-game midday save state saving and loading via overlay drawer buttons ('SAVE STATE' / 'LOAD STATE') and console commands ('quick_save', 'quick_load').
+   - Cleanly serializes world state to midday save files and restores on demand.
+
+2. Fix In-Game QuickLoad & Exit-to-Title Crashes:
    - Root Cause:
-     * When SMAPI loads mods (e.g. Content Patcher, Generic Mod Config Menu), Mono.Cecil validates assembly metadata references.
-     * On desktop platforms, BCL assemblies reside next to the game executable. On iOS, BCL runtime assemblies reside in the app bundle (`SDViOS.app`).
-     * `Constants.ConfigureAssemblyResolver` previously only registered `GamePath` and `InternalFilesPath`, omitting `AppContext.BaseDirectory` (`SDViOS.app`). Consequently, Cecil failed to resolve standard .NET BCL assemblies (`System.Linq`, `System.Collections`, `System.Private.CoreLib`, etc.), returning null for valid standard method calls.
-     * Furthermore, `ReferenceToInvalidMemberFinder.Handle` lacked an early `ShouldValidate` guard for method calls, and routed unresolved methods directly to `IL_02a2` (the broken code reporter), flagging hundreds of standard .NET methods (like `Enumerable.Concat`, `Action` constructors, `LinkedList` members) as "no such method" and marking mods as incompatible.
-   - AppContext.BaseDirectory Resolver Registration:
-     * Patched `Constants.ConfigureAssemblyResolver` in `RuntimeSmapiPatcher` to automatically add `AppContext.BaseDirectory` (`SDViOS.app`) to Cecil's search directories.
-   - Early ShouldValidate Method Guard:
-     * Patched `ReferenceToInvalidMemberFinder.Handle` to check `ShouldValidate(methodRef.DeclaringType)` before resolving methods. Third-party and BCL method calls outside the core game assemblies are no longer falsely flagged as broken code.
-     * Retargeted the method-level `ShouldValidate` `brfalse` branch to the clean method exit rather than the broken code reporting block.
+     * Calling helper.GameContent.InvalidateCache during title return or quick-load triggered SMAPI's CoreAssetPropagator on Data/AudioChanges, throwing MissingFieldException: CueDefinition.name in AudioCueModificationManager.ApplyAllCueModifications().
+     * Simultaneously triggered mass table re-propagation across dozens of data assets, exhausting RAM (~19 MB headroom remaining) and triggering immediate iOS Jetsam SIGKILL OOM.
+   - Fix:
+     * Removed broad InvalidateCache calls during teardown.
+     * Implemented IsPurgeableAsset and IsCoreDisposable to safely evict and dispose unneeded map/character textures from MonoGame ContentManager instances while protecting audio, UI, and title data.
+     * QuickSaveManager performs safe world texture eviction, runs full GC flush, and triggers SaveGame.Load without crashing or re-entering audio propagator loops.
+
+3. Fix Touch Cursor Desync with UI Scaling:
+   - Root Cause:
+     * TouchVirtualPad was applying uiScale division to touch coordinates, and Stardew Valley's getMousePosition(true) divided by uiScale again, resulting in a quadratic offset (touch / uiScale^2).
+     * CurrentSimulatedMouseState was clamping coordinates to scaled UI viewport dimensions rather than raw screen bounds.
+   - Fix:
+     * SimulatedMousePosition is now maintained and clamped strictly in raw screen pixels (0.._rawScreenWidth, 0.._rawScreenHeight).
+     * Game1's built-in single uiScale conversion accurately aligns cursor position directly under the finger.
+     * OnGameSetMousePosition sets raw window coordinates directly without division.
+     * Overlay feedback rendering in Draw scales coordinates appropriately for uiScreen.
+
+4. Universal Tool & Melee Weapon Swinging via Button X:
+   - Root Cause:
+     * Game1.didPlayerJustLeftClick(true) inspects hardware input state directly, returning false on iOS touch controls without a physical mouse/keyboard/gamepad, blocking player.FireTool() and player.BeginUsingTool() on MeleeWeapon items.
+     * MeleeWeapon.leftClick() explicitly ignores scythes (!isScythe()) and only triggers combo animations when already swinging.
+     * Non-melee tools were omitted from post-input handling and targeted mouse coordinates (often hitting UI menus or distant tiles).
+   - Fix:
+     * Added (ButtonX ? Buttons.X : 0) to EffectiveGamePadState.
+     * In TouchDelegatingModHooks, Button X directly calls player.Halt(); player.BeginUsingTool(); when starting a swing, and weapon.leftClick(player) with anotherClick = true when continuing a combo.
+     * For non-melee tools (pickaxes, axes, hoes, watering cans, fishing rods), temporarily sets Game1.wasMouseVisibleThisFrame = false and calls Game1.pressUseToolButton(), ensuring tools target the tile directly in front of the farmer without cursor misdirection.
 """
 
 

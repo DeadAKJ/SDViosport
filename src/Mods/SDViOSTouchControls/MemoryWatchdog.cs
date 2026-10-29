@@ -25,6 +25,7 @@ namespace SDViOSTouchControls
         private static Thread? _thread;
         private static IMonitor? _monitor;
         private static bool _nativeAvailable = true;
+        private static bool _lohCompactionSupported = true;
         private static long _minSeen = long.MaxValue;
         private static long _lastPostGcManaged = 0;
         private static DateTime _lastBackup = DateTime.MinValue;
@@ -69,16 +70,22 @@ namespace SDViOSTouchControls
                     long availBefore = Available();
                     if (availBefore >= 0 && availBefore < _minSeen) _minSeen = availBefore;
                     long managedBefore = GC.GetTotalMemory(false);
-                    if (compactLoh)
+                    if (compactLoh && _lohCompactionSupported)
                     {
                         try { System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce; }
-                        catch (Exception sex) { LogErr("GCSettings.LOHCompactionMode", sex); }
+                        catch (PlatformNotSupportedException) { _lohCompactionSupported = false; }
+                        catch (Exception sex) { _lohCompactionSupported = false; LogErr("GCSettings.LOHCompactionMode", sex); }
                     }
 
                     var sw = System.Diagnostics.Stopwatch.StartNew();
                     try
                     {
                         GC.Collect(2, GCCollectionMode.Forced, true, compactLoh);
+                        if (compactLoh)
+                        {
+                            GC.WaitForPendingFinalizers();
+                            GC.Collect(2, GCCollectionMode.Forced, true, compactLoh);
+                        }
                     }
                     catch (Exception gex)
                     {
@@ -115,7 +122,7 @@ namespace SDViOSTouchControls
                     {
                         gameMode = Game1.gameMode;
                         worldReady = Context.IsWorldReady;
-                        loading = gameMode == 6 || !worldReady;
+                        loading = gameMode == 6 || !worldReady || ModEntry.IsSavingOrNewDay;
                     }
                     catch { }
 

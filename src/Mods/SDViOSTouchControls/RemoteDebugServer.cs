@@ -429,6 +429,62 @@ namespace SDViOSTouchControls
                 string json = $"{{\"forced_gc\": {forceGc.ToString().ToLower()}, \"avail_mb_before\": {beforeAvail}, \"avail_mb_after\": {afterAvail}, \"managed_mb_before\": {beforeManaged}, \"managed_mb_after\": {afterManaged}}}";
                 SendResponse(stream, 200, "OK", "application/json", Encoding.UTF8.GetBytes(json));
             }
+            else if (path == "/api/quicksave" || path == "/quicksave")
+            {
+                bool success = false;
+                string msg = "";
+                try
+                {
+                    if (QuickSaveManager.Instance != null)
+                    {
+                        success = QuickSaveManager.Instance.QuickSave();
+                        msg = success ? "Quick save initiated successfully" : "Quick save rejected (check world/player state)";
+                    }
+                    else
+                    {
+                        msg = "QuickSaveManager not initialized";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    msg = ex.Message;
+                }
+
+                string json = $"{{\"success\": {(success ? "true" : "false")}, \"message\": \"{msg}\"}}";
+                SendResponse(stream, success ? 200 : 400, success ? "OK" : "Bad Request", "application/json", Encoding.UTF8.GetBytes(json));
+            }
+            else if (path == "/api/quickload" || path == "/quickload")
+            {
+                bool success = false;
+                string msg = "";
+                try
+                {
+                    if (QuickSaveManager.Instance != null)
+                    {
+                        success = QuickSaveManager.Instance.QuickLoad();
+                        msg = success ? "Quick load initiated successfully" : "Quick load rejected (no save state found or busy)";
+                    }
+                    else
+                    {
+                        msg = "QuickSaveManager not initialized";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    msg = ex.Message;
+                }
+
+                string json = $"{{\"success\": {(success ? "true" : "false")}, \"message\": \"{msg}\"}}";
+                SendResponse(stream, success ? 200 : 400, success ? "OK" : "Bad Request", "application/json", Encoding.UTF8.GetBytes(json));
+            }
+            else if (path == "/api/savestate")
+            {
+                var state = QuickSaveManager.Instance?.GetSavedState();
+                string json = state != null
+                    ? System.Text.Json.JsonSerializer.Serialize(state)
+                    : "{\"hasState\": false}";
+                SendResponse(stream, 200, "OK", "application/json", Encoding.UTF8.GetBytes(json));
+            }
             else if (path == "/files")
             {
                 string relDir = q.GetValueOrDefault("dir", "");
@@ -810,6 +866,13 @@ namespace SDViOSTouchControls
         <div class='stat'><span>In-Game Time:</span><span class='stat-val'>{timeStr}</span></div>
         <div class='stat'><span>Current Location:</span><span class='stat-val'>{locStr}</span></div>
         <div class='stat'><span>Active Menu:</span><span class='stat-val'>{menuStr}</span></div>
+    </div>
+
+    <div class='card'>
+        <h3>QuickSave / Save State</h3>
+        <a class='btn btn-green' href='/quicksave' target='_blank'>💾 Quick Save State</a>
+        <a class='btn' href='/quickload' target='_blank'>🔄 Quick Load State</a>
+        <a class='btn' href='/api/savestate' target='_blank'>📋 View Save State JSON</a>
     </div>
 
     <div class='card'>
