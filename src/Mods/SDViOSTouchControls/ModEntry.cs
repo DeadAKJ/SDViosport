@@ -1595,6 +1595,7 @@ namespace SDViOSTouchControls
 
             // Transient dialogue, schedule, and event strings
             if (key.StartsWith("Strings/Events", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Strings/schedules", StringComparison.OrdinalIgnoreCase)) return true;
             if (key.StartsWith("Data/Events", StringComparison.OrdinalIgnoreCase)) return true;
 
             return false;
@@ -1654,6 +1655,7 @@ namespace SDViOSTouchControls
                             {
                                 if (s.StartsWith("Characters/schedules", StringComparison.OrdinalIgnoreCase) ||
                                     s.StartsWith("Characters/Dialogue", StringComparison.OrdinalIgnoreCase) ||
+                                    s.StartsWith("Strings/schedules", StringComparison.OrdinalIgnoreCase) ||
                                     s.StartsWith("Strings/Events", StringComparison.OrdinalIgnoreCase) ||
                                     s.StartsWith("Data/Events", StringComparison.OrdinalIgnoreCase))
                                 {
@@ -1680,6 +1682,8 @@ namespace SDViOSTouchControls
                 int evictedAssets = 0;
                 int disposedAssets = 0;
 
+                LazyIosDisplayDevice.Instance?.PruneTileSheets(null);
+
                 // NOTE: DO NOT invoke helper.GameContent.InvalidateCache here!
                 // Invalidating SMAPI caches when returning to title triggers CoreAssetPropagator
                 // to propagate Data/AudioChanges, causing MissingFieldException in AudioCueModificationManager
@@ -1696,6 +1700,7 @@ namespace SDViOSTouchControls
                 var managers = new List<Microsoft.Xna.Framework.Content.ContentManager>();
                 if (Game1.content != null) managers.Add(Game1.content);
                 if (Game1.game1?.Content != null && !managers.Contains(Game1.game1.Content)) managers.Add(Game1.game1.Content);
+                if (Game1.game1?.xTileContent != null && !managers.Contains(Game1.game1.xTileContent)) managers.Add(Game1.game1.xTileContent);
 
                 if (cmListField?.GetValue(null) is System.Collections.IEnumerable rawList)
                 {

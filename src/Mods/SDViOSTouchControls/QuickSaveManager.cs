@@ -416,6 +416,7 @@ namespace SDViOSTouchControls
                     MemoryWatchdog.ForceCollect("PreQuickLoad", minIntervalMs: 50);
                     Game1.playSound("bigSelect");
                     SaveGame.Load(saveFolder);
+                    Game1.exitActiveMenu();
                 }
 
                 return true;
@@ -442,6 +443,14 @@ namespace SDViOSTouchControls
                 }
                 _pendingPositionRestore = null;
                 _pendingFacingDirection = -1;
+            }
+
+            // Ensure TitleMenu is never left lingering as activeClickableMenu during loadingMode (6) or playingGameMode (3),
+            // because SMAPI's Context.IsSaveLoaded checks !(Game1.activeClickableMenu is TitleMenu).
+            if ((Game1.gameMode == 6 || (Game1.gameMode == 3 && Game1.hasLoadedGame)) && Game1.activeClickableMenu is TitleMenu)
+            {
+                TitleMenu.subMenu = null;
+                Game1.exitActiveMenu();
             }
 
             // Handle delayed in-game QuickLoad reload sequence
@@ -487,6 +496,7 @@ namespace SDViOSTouchControls
                         MemoryWatchdog.ForceCollect("PreQuickLoadAfterTitle", minIntervalMs: 50);
                         Game1.playSound("bigSelect");
                         SaveGame.Load(target);
+                        Game1.exitActiveMenu();
                     }
                 }
                 return;
