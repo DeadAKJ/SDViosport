@@ -560,7 +560,7 @@ namespace SDViOSTouchControls
                     Monitor.Log("[SDViOSTouchControls] Harmony patched XnaDisplayDevice.LoadTileSheet -> deferred loading during save load.", LogLevel.Info);
                 }
 
-                // CoreAssetPropagator, ModContentManager, and TitleContainer
+                // CoreAssetPropagator, ModContentManager, ContentManager, and TitleContainer
                 try
                 {
                     var mOpenStream = typeof(Microsoft.Xna.Framework.TitleContainer).GetMethod("OpenStream", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null);
@@ -569,10 +569,17 @@ namespace SDViOSTouchControls
                         harmony.Patch(mOpenStream, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixTitleContainerOpenStream), BindingFlags.Static | BindingFlags.NonPublic)));
                         Monitor.Log("[SDViOSTouchControls] Harmony patched TitleContainer.OpenStream -> support absolute iOS mod paths.", LogLevel.Info);
                     }
+
+                    var mCmOpenStream = typeof(Microsoft.Xna.Framework.Content.ContentManager).GetMethod("OpenStream", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(string) }, null);
+                    if (mCmOpenStream != null)
+                    {
+                        harmony.Patch(mCmOpenStream, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixContentManagerOpenStream), BindingFlags.Static | BindingFlags.NonPublic)));
+                        Monitor.Log("[SDViOSTouchControls] Harmony patched ContentManager.OpenStream -> support absolute iOS mod paths.", LogLevel.Info);
+                    }
                 }
                 catch (Exception ex)
                 {
-                    Monitor.Log($"[SDViOSTouchControls] Note patching TitleContainer.OpenStream: {ex.Message}", LogLevel.Trace);
+                    Monitor.Log($"[SDViOSTouchControls] Note patching TitleContainer/ContentManager.OpenStream: {ex.Message}", LogLevel.Trace);
                 }
 
                 try
@@ -905,6 +912,34 @@ namespace SDViOSTouchControls
                 {
                     throw new Microsoft.Xna.Framework.Content.ContentLoadException("Opening stream error.", ex);
                 }
+            }
+            return true;
+        }
+
+        private static bool PrefixContentManagerOpenStream(Microsoft.Xna.Framework.Content.ContentManager __instance, string assetName, ref System.IO.Stream __result)
+        {
+            try
+            {
+                string rootDir = __instance.RootDirectory ?? string.Empty;
+                if (System.IO.Path.IsPathRooted(rootDir) || System.IO.Path.IsPathRooted(assetName))
+                {
+                    string fullPath = System.IO.Path.Combine(rootDir, assetName).Replace('\\', System.IO.Path.DirectorySeparatorChar);
+                    if (!fullPath.EndsWith(".xnb", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string withXnb = fullPath + ".xnb";
+                        if (System.IO.File.Exists(withXnb))
+                            fullPath = withXnb;
+                    }
+                    if (System.IO.File.Exists(fullPath))
+                    {
+                        __result = System.IO.File.OpenRead(fullPath);
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new Microsoft.Xna.Framework.Content.ContentLoadException("Opening stream error.", ex);
             }
             return true;
         }

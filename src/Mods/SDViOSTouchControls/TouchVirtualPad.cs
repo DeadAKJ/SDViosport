@@ -235,13 +235,12 @@ namespace SDViOSTouchControls
                 bool isGamepad = Game1.options != null && Game1.options.gamepadControls;
                 if (isGamepad)
                     return CurrentSimulatedGamePadState;
-                if (ButtonA || ButtonLT || ButtonRT || ButtonX)
+                if (ButtonA || ButtonLT || ButtonRT)
                 {
                     var buttons = new GamePadButtons(
                         (ButtonA ? Buttons.A : 0) |
                         (ButtonLT ? Buttons.LeftTrigger : 0) |
-                        (ButtonRT ? Buttons.RightTrigger : 0) |
-                        (ButtonX ? Buttons.X : 0)
+                        (ButtonRT ? Buttons.RightTrigger : 0)
                     );
                     var triggers = new GamePadTriggers(ButtonLT ? 1f : 0f, ButtonRT ? 1f : 0f);
                     return new GamePadState(default, triggers, buttons, default);
@@ -278,6 +277,8 @@ namespace SDViOSTouchControls
             ButtonRT = false;
             LeftStick = Vector2.Zero;
             _stickTouchId = -1;
+            _btnXTouchId = -1;
+            _btnATouchId = -1;
             _trackpadPrimaryTouchId = -1;
             _trackpadSecondTouchId = -1;
             IsKeyPickerOpen = false;
@@ -404,6 +405,8 @@ namespace SDViOSTouchControls
         private Vector2 _currentStickPos;
         private int _activeDragTarget = 0;
         private int _dragTouchId = -1;
+        private int _btnXTouchId = -1;
+        private int _btnATouchId = -1;
 
         private Texture2D? _pixelTexture;
 
@@ -743,6 +746,8 @@ namespace SDViOSTouchControls
                 _trackpadPrimaryTouchId = -1;
                 _trackpadSecondTouchId = -1;
                 _stickTouchId = -1;
+                _btnXTouchId = -1;
+                _btnATouchId = -1;
                 _pointClickTouchId = -1;
                 _pointClickHoldFrames = 0;
                 SimulatedMouseLeftDown = false;
@@ -760,6 +765,8 @@ namespace SDViOSTouchControls
                 _trackpadPrimaryTouchId = -1;
                 _trackpadSecondTouchId = -1;
                 _stickTouchId = -1;
+                _btnXTouchId = -1;
+                _btnATouchId = -1;
                 _pointClickTouchId = -1;
                 _pointClickHoldFrames = 0;
                 SimulatedMouseLeftDown = false;
@@ -777,6 +784,8 @@ namespace SDViOSTouchControls
                 _trackpadPrimaryTouchId = -1;
                 _trackpadSecondTouchId = -1;
                 _stickTouchId = -1;
+                _btnXTouchId = -1;
+                _btnATouchId = -1;
                 _pointClickTouchId = -1;
                 _pointClickHoldFrames = 0;
                 SimulatedMouseLeftDown = false;
@@ -790,6 +799,8 @@ namespace SDViOSTouchControls
 
             // 3. Process Gamepad & Mouse Touches
             bool stickTouchPresent = false;
+            bool btnXTouchPresent = false;
+            bool btnATouchPresent = false;
             bool pointClickTouchPresent = false;
             bool trackpadPrimaryPresent = false;
             bool trackpadSecondPresent = false;
@@ -815,6 +826,35 @@ namespace SDViOSTouchControls
                     {
                         stickTouchPresent = true;
                         UpdateJoystickVector(new Vector2(pt.X, pt.Y));
+                    }
+                    continue;
+                }
+
+                // Priority 1b: If this touch is already claimed by Button X or Button A, keep holding it until Released
+                if (_btnXTouchId != -1 && touch.Id == _btnXTouchId)
+                {
+                    if (touch.State == TouchLocationState.Released)
+                    {
+                        _btnXTouchId = -1;
+                    }
+                    else
+                    {
+                        btnXTouchPresent = true;
+                        ButtonX = true;
+                    }
+                    continue;
+                }
+
+                if (_btnATouchId != -1 && touch.Id == _btnATouchId)
+                {
+                    if (touch.State == TouchLocationState.Released)
+                    {
+                        _btnATouchId = -1;
+                    }
+                    else
+                    {
+                        btnATouchPresent = true;
+                        ButtonA = true;
                     }
                     continue;
                 }
@@ -1004,10 +1044,34 @@ namespace SDViOSTouchControls
 
                 // Check Action & Trigger Buttons
                 bool hitButton = false;
-                if (_btnARect.Contains(pt)) { ButtonA = true; hitButton = true; }
-                if (_btnXRect.Contains(pt)) { ButtonX = true; hitButton = true; }
-                if (_btnLTRect.Contains(pt)) { ltTouchFound = true; hitButton = true; }
-                if (_btnRTRect.Contains(pt)) { rtTouchFound = true; hitButton = true; }
+                if (_btnARect.Contains(pt) && touch.State != TouchLocationState.Released)
+                {
+                    ButtonA = true;
+                    hitButton = true;
+                    if (_btnATouchId == -1)
+                    {
+                        _btnATouchId = touch.Id;
+                        btnATouchPresent = true;
+                        if (_trackpadPrimaryTouchId == touch.Id) _trackpadPrimaryTouchId = -1;
+                        if (_trackpadSecondTouchId == touch.Id) _trackpadSecondTouchId = -1;
+                        if (_pointClickTouchId == touch.Id) _pointClickTouchId = -1;
+                    }
+                }
+                if (_btnXRect.Contains(pt) && touch.State != TouchLocationState.Released)
+                {
+                    ButtonX = true;
+                    hitButton = true;
+                    if (_btnXTouchId == -1)
+                    {
+                        _btnXTouchId = touch.Id;
+                        btnXTouchPresent = true;
+                        if (_trackpadPrimaryTouchId == touch.Id) _trackpadPrimaryTouchId = -1;
+                        if (_trackpadSecondTouchId == touch.Id) _trackpadSecondTouchId = -1;
+                        if (_pointClickTouchId == touch.Id) _pointClickTouchId = -1;
+                    }
+                }
+                if (_btnLTRect.Contains(pt) && touch.State != TouchLocationState.Released) { ltTouchFound = true; hitButton = true; }
+                if (_btnRTRect.Contains(pt) && touch.State != TouchLocationState.Released) { rtTouchFound = true; hitButton = true; }
 
                 if (_btnYRect.Contains(pt))
                 {
@@ -1106,6 +1170,16 @@ namespace SDViOSTouchControls
                 _stickTouchId = -1;
                 LeftStick = Vector2.Zero;
                 _currentStickPos = _joystickCenter;
+            }
+
+            if (!btnXTouchPresent && _btnXTouchId != -1)
+            {
+                _btnXTouchId = -1;
+            }
+
+            if (!btnATouchPresent && _btnATouchId != -1)
+            {
+                _btnATouchId = -1;
             }
 
             if (!pointClickTouchPresent && _pointClickTouchId != -1)

@@ -130,6 +130,11 @@ namespace SDViOSTouchControls
             bool justPressedA = buttonA && !_prevButtonA;
             _prevButtonA = buttonA;
 
+            bool buttonX = pad != null && pad.ButtonX;
+            bool justPressedX = buttonX && !_prevButtonX;
+            _prevButtonX = buttonX;
+            bool wasUsingToolBeforeInput = Game1.player != null && Game1.player.UsingTool;
+
             if (justPressedA && Game1.activeClickableMenu == null)
             {
                 // Pulse simulated right-click on rising edge of Button A to satisfy didPlayerJustRightClick for containers
@@ -137,7 +142,7 @@ namespace SDViOSTouchControls
             }
 
             bool actionOldMouseVis = Game1.wasMouseVisibleThisFrame;
-            if (buttonA && Game1.activeClickableMenu == null)
+            if ((buttonA || buttonX) && Game1.activeClickableMenu == null)
             {
                 Game1.lastCursorMotionWasMouse = false;
                 Game1.wasMouseVisibleThisFrame = false;
@@ -149,7 +154,7 @@ namespace SDViOSTouchControls
             }
             finally
             {
-                if (buttonA && Game1.activeClickableMenu == null)
+                if ((buttonA || buttonX) && Game1.activeClickableMenu == null)
                 {
                     Game1.wasMouseVisibleThisFrame = actionOldMouseVis;
                 }
@@ -204,10 +209,6 @@ namespace SDViOSTouchControls
             }
 
             // Post-input handling for Button X tool / melee weapon swinging
-            bool buttonX = pad != null && pad.ButtonX;
-            bool justPressedX = buttonX && !_prevButtonX;
-            _prevButtonX = buttonX;
-
             if (buttonX && Game1.activeClickableMenu == null && !Game1.eventUp && !Game1.freezeControls)
             {
                 Game1.lastCursorMotionWasMouse = false;
@@ -235,9 +236,46 @@ namespace SDViOSTouchControls
                             catch { }
                         }
                     }
+                    else if (player.CurrentTool is FishingRod rod)
+                    {
+                        // Only invoke pressUseToolButton if base.OnGame1_UpdateControlInput did not already handle it:
+                        // 1. Starting a cast on rising edge (justPressedX) when not yet UsingTool
+                        // 2. Reeling in / hooking a nibbling fish on rising edge (justPressedX) when already fishing/reeling (not while charging/casting)
+                        // 3. Dismissing a caught fish display on rising edge (justPressedX) when fishCaught is true
+                        bool shouldPressFishing = false;
+                        if (justPressedX)
+                        {
+                            if (!wasUsingToolBeforeInput && player.CanMove && !player.UsingTool)
+                            {
+                                shouldPressFishing = true;
+                            }
+                            else if (wasUsingToolBeforeInput && player.UsingTool && !rod.isTimingCast && !rod.isCasting && !rod.pullingOutOfWater)
+                            {
+                                if ((rod.isFishing || rod.isNibbling) && !rod.hit)
+                                {
+                                    shouldPressFishing = true;
+                                }
+                            }
+                        }
+
+                        if (shouldPressFishing)
+                        {
+                            bool oldMouseVis = Game1.wasMouseVisibleThisFrame;
+                            Game1.wasMouseVisibleThisFrame = false;
+                            try
+                            {
+                                Game1.pressUseToolButton();
+                            }
+                            catch { }
+                            finally
+                            {
+                                Game1.wasMouseVisibleThisFrame = oldMouseVis;
+                            }
+                        }
+                    }
                     else if (player.CurrentTool != null)
                     {
-                        if ((player.CanMove && !player.UsingTool) || (player.UsingTool && player.CurrentTool is FishingRod && justPressedX))
+                        if (player.CanMove && !player.UsingTool)
                         {
                             bool oldMouseVis = Game1.wasMouseVisibleThisFrame;
                             Game1.wasMouseVisibleThisFrame = false;
