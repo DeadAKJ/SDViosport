@@ -560,7 +560,21 @@ namespace SDViOSTouchControls
                     Monitor.Log("[SDViOSTouchControls] Harmony patched XnaDisplayDevice.LoadTileSheet -> deferred loading during save load.", LogLevel.Info);
                 }
 
-                // CoreAssetPropagator and ModContentManager
+                // CoreAssetPropagator, ModContentManager, and TitleContainer
+                try
+                {
+                    var mOpenStream = typeof(Microsoft.Xna.Framework.TitleContainer).GetMethod("OpenStream", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null);
+                    if (mOpenStream != null)
+                    {
+                        harmony.Patch(mOpenStream, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixTitleContainerOpenStream), BindingFlags.Static | BindingFlags.NonPublic)));
+                        Monitor.Log("[SDViOSTouchControls] Harmony patched TitleContainer.OpenStream -> support absolute iOS mod paths.", LogLevel.Info);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Monitor.Log($"[SDViOSTouchControls] Note patching TitleContainer.OpenStream: {ex.Message}", LogLevel.Trace);
+                }
+
                 try
                 {
                     foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
@@ -871,6 +885,30 @@ namespace SDViOSTouchControls
         private static FieldInfo? _mcmCoordinatorField;
         private static MethodInfo? _coordParseAssetNameMethod;
 
+        private static bool PrefixTitleContainerOpenStream(string name, ref System.IO.Stream __result)
+        {
+            if (!string.IsNullOrEmpty(name) && System.IO.Path.IsPathRooted(name))
+            {
+                try
+                {
+                    string normalized = name.Replace('\\', System.IO.Path.DirectorySeparatorChar);
+                    if (!System.IO.File.Exists(normalized) && !normalized.EndsWith(".xnb", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string withXnb = normalized + ".xnb";
+                        if (System.IO.File.Exists(withXnb))
+                            normalized = withXnb;
+                    }
+                    __result = System.IO.File.OpenRead(normalized);
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    throw new Microsoft.Xna.Framework.Content.ContentLoadException("Opening stream error.", ex);
+                }
+            }
+            return true;
+        }
+
         private static bool PrefixTryGetTilesheetAssetName(
             object __instance,
             string modRelativeMapFolder,
@@ -1106,6 +1144,20 @@ namespace SDViOSTouchControls
         private static void PostfixForceGC()
         {
             MemoryWatchdog.ForceCollect("FarmTypeManager", minIntervalMs: 1500);
+        }
+
+        public static void ForceLoadTileSheet(xTile.Display.XnaDisplayDevice device, xTile.Tiles.TileSheet tileSheet)
+        {
+            bool prev = _forceMapLoad;
+            try
+            {
+                _forceMapLoad = true;
+                device.LoadTileSheet(tileSheet);
+            }
+            finally
+            {
+                _forceMapLoad = prev;
+            }
         }
 
         private static bool PrefixMapLoadTileSheets(xTile.Map __instance)
@@ -1549,10 +1601,12 @@ namespace SDViOSTouchControls
             if (key.StartsWith("Fonts/", StringComparison.OrdinalIgnoreCase)) return true;
             if (key.StartsWith("Minigames/Title", StringComparison.OrdinalIgnoreCase)) return true;
 
-            // Core static game sprites on Game1
+            // Core static game sprites on Game1, FarmerRenderer, HoeDirt, Farm, etc.
             if (key.Equals("Maps/springobjects", StringComparison.OrdinalIgnoreCase)) return true;
-            if (key.Equals("TileSheets/bobbers", StringComparison.OrdinalIgnoreCase)) return true;
-            if (key.Equals("TileSheets/tools", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Characters/Farmer/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("TileSheets/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("TerrainFeatures/", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("Buildings/", StringComparison.OrdinalIgnoreCase)) return true;
 
             return false;
         }
@@ -1562,7 +1616,7 @@ namespace SDViOSTouchControls
             if (string.IsNullOrEmpty(key)) return false;
             key = key.Replace('\\', '/');
 
-            // Protected core assets, fonts, loose sprites, and audio must never be purged
+            // Protected core assets, fonts, loose sprites, farmer sprites, shared tilesheets, and audio must never be purged
             if (IsCoreAsset(key)) return false;
 
             // Never touch Game data tables (Data/AudioChanges, Data/Locations, Data/Objects, etc.)
@@ -1580,14 +1634,11 @@ namespace SDViOSTouchControls
                 return false;
             }
 
-            // Game map and tilesheet textures
+            // Game map assets and mine textures
             if (key.StartsWith("Maps/", StringComparison.OrdinalIgnoreCase)) return true;
-            if (key.StartsWith("TileSheets/", StringComparison.OrdinalIgnoreCase)) return true;
-            if (key.StartsWith("Buildings/", StringComparison.OrdinalIgnoreCase)) return true;
-            if (key.StartsWith("TerrainFeatures/", StringComparison.OrdinalIgnoreCase)) return true;
             if (key.StartsWith("Mines/", StringComparison.OrdinalIgnoreCase)) return true;
 
-            // Character, portrait, animal, monster textures
+            // NPC Character, portrait, animal, monster textures (Characters/Farmer/* is protected by IsCoreAsset)
             if (key.StartsWith("Characters/", StringComparison.OrdinalIgnoreCase)) return true;
             if (key.StartsWith("Portraits/", StringComparison.OrdinalIgnoreCase)) return true;
             if (key.StartsWith("Animals/", StringComparison.OrdinalIgnoreCase)) return true;
@@ -1617,6 +1668,10 @@ namespace SDViOSTouchControls
                 if (ReferenceEquals(d, Game1.mouseCursors_1_6)) return true;
                 if (ReferenceEquals(d, Game1.objectSpriteSheet)) return true;
                 if (ReferenceEquals(d, Game1.objectSpriteSheet_2)) return true;
+                if (ReferenceEquals(d, Game1.cropSpriteSheet)) return true;
+                if (ReferenceEquals(d, Game1.emoteSpriteSheet)) return true;
+                if (ReferenceEquals(d, Game1.debrisSpriteSheet)) return true;
+                if (ReferenceEquals(d, Game1.bigCraftableSpriteSheet)) return true;
                 if (ReferenceEquals(d, Game1.toolSpriteSheet)) return true;
                 if (ReferenceEquals(d, Game1.menuTexture)) return true;
                 if (ReferenceEquals(d, Game1.uncoloredMenuTexture)) return true;
@@ -1624,6 +1679,10 @@ namespace SDViOSTouchControls
                 if (ReferenceEquals(d, Game1.daybg)) return true;
                 if (ReferenceEquals(d, Game1.nightbg)) return true;
                 if (ReferenceEquals(d, Game1.rainTexture)) return true;
+                if (ReferenceEquals(d, Game1.buffsIcons)) return true;
+                if (ReferenceEquals(d, Game1.animations)) return true;
+                if (ReferenceEquals(d, Game1.birdsSpriteSheet)) return true;
+                if (ReferenceEquals(d, Game1.concessionsSpriteSheet)) return true;
                 if (Game1.activeClickableMenu is TitleMenu tm)
                 {
                     if (ReferenceEquals(d, tm.titleButtonsTexture)) return true;
@@ -1632,9 +1691,78 @@ namespace SDViOSTouchControls
                 if (ReferenceEquals(d, Game1.controllerMaps)) return true;
                 if (ReferenceEquals(d, Game1.giftboxTexture)) return true;
                 if (ReferenceEquals(d, Game1.bobbersTexture)) return true;
+                if (ReferenceEquals(d, FarmerRenderer.hairStylesTexture)) return true;
+                if (ReferenceEquals(d, FarmerRenderer.shirtsTexture)) return true;
+                if (ReferenceEquals(d, FarmerRenderer.hatsTexture)) return true;
+                if (ReferenceEquals(d, FarmerRenderer.accessoriesTexture)) return true;
+                if (ReferenceEquals(d, FarmerRenderer.pantsTexture)) return true;
+                if (ReferenceEquals(d, StardewValley.TerrainFeatures.HoeDirt.lightTexture)) return true;
+                if (ReferenceEquals(d, StardewValley.TerrainFeatures.HoeDirt.darkTexture)) return true;
+                if (ReferenceEquals(d, StardewValley.TerrainFeatures.HoeDirt.snowTexture)) return true;
+                if (ReferenceEquals(d, Farm.houseTextures)) return true;
+                if (ReferenceEquals(d, MapSeat.mapChairTexture)) return true;
+                if (ReferenceEquals(d, Tool.weaponsTexture)) return true;
+                if (ReferenceEquals(d, StardewValley.Projectiles.Projectile.projectileSheet)) return true;
             }
             catch { }
             return false;
+        }
+
+        public static void RepairStaticTextures()
+        {
+            try
+            {
+                var content = Game1.content;
+                if (content == null) return;
+
+                if (StardewValley.TerrainFeatures.HoeDirt.lightTexture != null && StardewValley.TerrainFeatures.HoeDirt.lightTexture.IsDisposed)
+                    StardewValley.TerrainFeatures.HoeDirt.lightTexture = content.Load<Texture2D>("TerrainFeatures\\hoeDirt");
+                if (StardewValley.TerrainFeatures.HoeDirt.darkTexture != null && StardewValley.TerrainFeatures.HoeDirt.darkTexture.IsDisposed)
+                    StardewValley.TerrainFeatures.HoeDirt.darkTexture = content.Load<Texture2D>("TerrainFeatures\\hoeDirtDark");
+                if (StardewValley.TerrainFeatures.HoeDirt.snowTexture != null && StardewValley.TerrainFeatures.HoeDirt.snowTexture.IsDisposed)
+                    StardewValley.TerrainFeatures.HoeDirt.snowTexture = content.Load<Texture2D>("TerrainFeatures\\hoeDirtSnow");
+
+                if (FarmerRenderer.pantsTexture != null && FarmerRenderer.pantsTexture.IsDisposed)
+                    FarmerRenderer.pantsTexture = content.Load<Texture2D>("Characters\\Farmer\\pants");
+                if (FarmerRenderer.shirtsTexture != null && FarmerRenderer.shirtsTexture.IsDisposed)
+                    FarmerRenderer.shirtsTexture = content.Load<Texture2D>("Characters\\Farmer\\shirts");
+                if (FarmerRenderer.hatsTexture != null && FarmerRenderer.hatsTexture.IsDisposed)
+                    FarmerRenderer.hatsTexture = content.Load<Texture2D>("Characters\\Farmer\\hats");
+                if (FarmerRenderer.hairStylesTexture != null && FarmerRenderer.hairStylesTexture.IsDisposed)
+                    FarmerRenderer.hairStylesTexture = content.Load<Texture2D>("Characters\\Farmer\\hairstyles");
+                if (FarmerRenderer.accessoriesTexture != null && FarmerRenderer.accessoriesTexture.IsDisposed)
+                    FarmerRenderer.accessoriesTexture = content.Load<Texture2D>("Characters\\Farmer\\accessories");
+
+                if (Farm.houseTextures != null && Farm.houseTextures.IsDisposed)
+                    Farm.houseTextures = content.Load<Texture2D>("Buildings\\houses");
+                if (MapSeat.mapChairTexture != null && MapSeat.mapChairTexture.IsDisposed)
+                    MapSeat.mapChairTexture = content.Load<Texture2D>("TileSheets\\ChairTiles");
+                if (Tool.weaponsTexture != null && Tool.weaponsTexture.IsDisposed)
+                    Tool.weaponsTexture = content.Load<Texture2D>("TileSheets\\weapons");
+                if (StardewValley.Projectiles.Projectile.projectileSheet != null && StardewValley.Projectiles.Projectile.projectileSheet.IsDisposed)
+                    StardewValley.Projectiles.Projectile.projectileSheet = content.Load<Texture2D>("TileSheets\\Projectiles");
+
+                var fr = Game1.player?.FarmerRenderer;
+                if (fr != null)
+                {
+                    var baseTexField = typeof(FarmerRenderer).GetField("baseTexture", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    if (baseTexField?.GetValue(fr) is Texture2D bt && bt.IsDisposed)
+                    {
+                        baseTexField.SetValue(fr, null);
+                    }
+                    typeof(FarmerRenderer).GetField("_baseTextureDirty", BindingFlags.Instance | BindingFlags.NonPublic)?.SetValue(fr, true);
+                    typeof(FarmerRenderer).GetField("_spriteDirty", BindingFlags.Instance | BindingFlags.NonPublic)?.SetValue(fr, true);
+                    typeof(FarmerRenderer).GetField("_shirtDirty", BindingFlags.Instance | BindingFlags.NonPublic)?.SetValue(fr, true);
+                    typeof(FarmerRenderer).GetField("_pantsDirty", BindingFlags.Instance | BindingFlags.NonPublic)?.SetValue(fr, true);
+                    typeof(FarmerRenderer).GetField("_shoesDirty", BindingFlags.Instance | BindingFlags.NonPublic)?.SetValue(fr, true);
+                    typeof(FarmerRenderer).GetField("_skinDirty", BindingFlags.Instance | BindingFlags.NonPublic)?.SetValue(fr, true);
+                    typeof(FarmerRenderer).GetField("_eyesDirty", BindingFlags.Instance | BindingFlags.NonPublic)?.SetValue(fr, true);
+                }
+            }
+            catch (Exception ex)
+            {
+                ModMonitor?.Log($"[SDViOSTouchControls] Note in RepairStaticTextures: {ex.Message}", LogLevel.Trace);
+            }
         }
 
         public static void PurgeTransientAssets()
@@ -1749,15 +1877,13 @@ namespace SDViOSTouchControls
                                     {
                                         try
                                         {
-                                            if (disp is Microsoft.Xna.Framework.Graphics.Texture2D tex)
-                                            {
-                                                if (!tex.IsDisposed)
-                                                {
-                                                    tex.Dispose();
-                                                    disposedAssets++;
-                                                }
-                                            }
-                                            else
+                                            // Do NOT call tex.Dispose() directly on Texture2D instances!
+                                            // Mods, ParsedItemData caches, or static game fields may still hold references
+                                            // to the Texture2D; deleting its GL texture ID turns sprites into black boxes
+                                            // and causes LazyIosDisplayDevice.DrawTile to re-run LoadTileSheet every frame.
+                                            // Instead, remove it from disposableAssets so when no references remain,
+                                            // GC finalization / GraphicsDevice cleanup reclaims it safely.
+                                            if (disp is not Microsoft.Xna.Framework.Graphics.Texture2D)
                                             {
                                                 disp.Dispose();
                                                 disposedAssets++;
@@ -1811,10 +1937,13 @@ namespace SDViOSTouchControls
                     Game1.exitActiveMenu();
                 }
 
+                RepairStaticTextures();
                 EnsureLocationMapAndTileSheetsLoaded(Game1.currentLocation);
                 MemoryWatchdog.ForceCollect("SaveLoaded", minIntervalMs: 500);
                 LogBackup.BackupLogs("SaveLoaded");
                 QuickSaveManager.Instance?.OnSaveLoaded();
+                RepairStaticTextures();
+                EnsureLocationMapAndTileSheetsLoaded(Game1.currentLocation);
                 Monitor.Log("[SDViOSTouchControls] Save loaded successfully. Gamepad locked ForceOff & memory compacted.", LogLevel.Info);
             }
             catch { }
@@ -1849,6 +1978,7 @@ namespace SDViOSTouchControls
                     Game1.exitActiveMenu();
                 }
 
+                RepairStaticTextures();
                 EnsureLocationMapAndTileSheetsLoaded(Game1.currentLocation);
                 MemoryWatchdog.ForceCollect("DayStarted", minIntervalMs: 1000);
                 LogBackup.BackupLogs("DayStarted");

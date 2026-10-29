@@ -22,6 +22,8 @@ namespace SDViOSTouchControls
     public sealed class LazyIosDisplayDevice : XnaDisplayDevice, IDisplayDevice
     {
         public static LazyIosDisplayDevice? Instance { get; private set; }
+        private readonly HashSet<TileSheet> _failedTileSheets = new();
+        private static System.Reflection.FieldInfo? _loadedAssetsField;
 
         public LazyIosDisplayDevice(ContentManager contentManager, GraphicsDevice graphicsDevice)
             : base(contentManager, graphicsDevice)
@@ -36,7 +38,7 @@ namespace SDViOSTouchControls
                 if (Game1.mapDisplayDevice is LazyIosDisplayDevice)
                     return;
 
-                var content = Game1.content;
+                var content = Game1.game1?.xTileContent ?? Game1.content;
                 var gd = Game1.graphics?.GraphicsDevice;
                 if (content != null && gd != null && !gd.IsDisposed)
                 {
@@ -60,6 +62,7 @@ namespace SDViOSTouchControls
             if (tileSheet != null)
             {
                 m_tileSheetTextures.Remove(tileSheet);
+                _failedTileSheets.Remove(tileSheet);
             }
         }
 
@@ -67,6 +70,7 @@ namespace SDViOSTouchControls
         {
             try
             {
+                _failedTileSheets.Clear();
                 if (m_tileSheetTextures == null || m_tileSheetTextures.Count == 0)
                     return;
 
@@ -102,22 +106,57 @@ namespace SDViOSTouchControls
             if (tile == null || tile.TileSheet == null)
                 return;
 
-            xTile.Dimensions.Rectangle tileImageBounds = tile.TileSheet.GetTileImageBounds(tile.TileIndex);
-            if (!m_tileSheetTextures.TryGetValue(tile.TileSheet, out Texture2D? value) || value == null || value.IsDisposed)
+            var ts = tile.TileSheet;
+            if (!m_tileSheetTextures.TryGetValue(ts, out Texture2D? value) || value == null || value.IsDisposed)
             {
+                if (_failedTileSheets.Contains(ts))
+                    return;
+
                 try
                 {
-                    base.LoadTileSheet(tile.TileSheet);
-                    m_tileSheetTextures.TryGetValue(tile.TileSheet, out value);
+                    ModEntry.ForceLoadTileSheet(this, ts);
+                    m_tileSheetTextures.TryGetValue(ts, out value);
+
+                    // If the ContentManager returned a cached Texture2D that was previously disposed,
+                    // evict it from the ContentManager's loadedAssets dictionary and reload a fresh GPU texture.
+                    if (value != null && value.IsDisposed && m_contentManager != null && !string.IsNullOrEmpty(ts.ImageSource))
+                    {
+                        _loadedAssetsField ??= typeof(ContentManager).GetField("loadedAssets", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+                        if (_loadedAssetsField?.GetValue(m_contentManager) is System.Collections.IDictionary dict)
+                        {
+                            string norm = ts.ImageSource.Replace('\\', '/');
+                            object? matchKey = null;
+                            foreach (var k in dict.Keys)
+                            {
+                                if (k is string s && string.Equals(s.Replace('\\', '/'), norm, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    matchKey = k;
+                                    break;
+                                }
+                            }
+                            if (matchKey != null)
+                                dict.Remove(matchKey);
+                        }
+                        ModEntry.ForceLoadTileSheet(this, ts);
+                        m_tileSheetTextures.TryGetValue(ts, out value);
+                    }
+
+                    if (value == null || value.IsDisposed)
+                    {
+                        _failedTileSheets.Add(ts);
+                        return;
+                    }
                 }
                 catch
                 {
+                    _failedTileSheets.Add(ts);
                     return;
                 }
             }
 
             if (value != null && !value.IsDisposed)
             {
+                xTile.Dimensions.Rectangle tileImageBounds = ts.GetTileImageBounds(tile.TileIndex);
                 m_tilePosition.X = location.X;
                 m_tilePosition.Y = location.Y;
                 m_sourceRectangle.X = tileImageBounds.X;
