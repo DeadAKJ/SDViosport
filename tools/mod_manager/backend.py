@@ -265,28 +265,43 @@ class IOSModBackend:
 
             # 1. Discover installed Stardew Valley app bundle ID
             bundle_id = None
-            try:
-                async with InstallationProxyService(self.lockdown) as ip:
-                    apps = await ip.get_apps()
-                    for bid in apps.keys():
-                        b_lower = bid.lower()
-                        if "deadakj.sdvios" in b_lower or "stardew" in b_lower or "sdvios" in b_lower:
-                            bundle_id = bid
-                            break
-            except Exception as e:
-                print(f"[Backend] Warning during app discovery: {e}")
+            candidate_bids = [
+                "com.deadakj.sdvios.KRS7366K7J",
+                "com.deadakj.sdvios",
+                "com.chucklefish.stardewvalley"
+            ]
+            for c_bid in candidate_bids:
+                try:
+                    ha = await HouseArrestService.create(self.lockdown, c_bid, documents_only=True)
+                    bundle_id = c_bid
+                    self.house_arrest = ha
+                    break
+                except Exception:
+                    continue
 
             if not bundle_id:
-                # Default to known bundle ID
+                try:
+                    async with InstallationProxyService(self.lockdown) as ip:
+                        apps = await ip.get_apps()
+                        for bid in apps.keys():
+                            b_lower = bid.lower()
+                            if "deadakj.sdvios" in b_lower or "stardew" in b_lower or "sdvios" in b_lower:
+                                bundle_id = bid
+                                break
+                except Exception as e:
+                    print(f"[Backend] Warning during app discovery: {e}")
+
+            if not bundle_id:
                 bundle_id = "com.deadakj.sdvios"
 
             self.bundle_id = bundle_id
             print(f"[Backend] Connecting to container: {self.bundle_id}")
 
-            # 2. Connect via HouseArrest (VendDocuments)
-            self.house_arrest = await HouseArrestService.create(
-                self.lockdown, self.bundle_id, documents_only=True
-            )
+            # 2. Connect via HouseArrest (VendDocuments) if not already created above
+            if not self.house_arrest:
+                self.house_arrest = await HouseArrestService.create(
+                    self.lockdown, self.bundle_id, documents_only=True
+                )
 
             # Ensure /Documents/Mods exists
             try:
@@ -456,7 +471,7 @@ class IOSModBackend:
     async def _parse_manifest_afc(self, folder_name: str, manifest_path: str) -> ModInfo:
         """Parse manifest.json over AFC."""
         is_enabled = not folder_name.startswith(".disabled_") and not folder_name.startswith(".disabled-") and not folder_name.startswith(".")
-        clean_name = folder_name.replace(".disabled_", "").replace(".disabled-", "")
+        clean_name = get_clean_folder_name(folder_name)
 
         mod = ModInfo(
             folder_name=folder_name,
