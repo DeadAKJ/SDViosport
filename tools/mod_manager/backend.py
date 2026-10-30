@@ -87,12 +87,16 @@ def save_profiles(profiles: dict[str, dict]) -> bool:
 
 
 def create_profile_snapshot(name: str, mods: list[ModInfo], description: str = "") -> dict:
-    """Create a serializable mod profile dictionary from a list of ModInfo objects."""
+    """Create a serializable mod profile dictionary from a list of ModInfo objects.
+    Deduplicates mods that have both an enabled and a disabled copy on the device,
+    preferring the highest version and preserving enabled=True if any copy is enabled.
+    """
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    mod_entries = []
+    merged: dict[str, dict] = {}
     for m in mods:
         clean_folder = m.folder_name.replace(".disabled_", "").replace(".disabled-", "")
-        mod_entries.append({
+        key = clean_folder.strip().lower() or (m.unique_id or m.name).strip().lower()
+        entry = {
             "unique_id": m.unique_id,
             "name": m.name,
             "clean_folder": clean_folder,
@@ -101,12 +105,23 @@ def create_profile_snapshot(name: str, mods: list[ModInfo], description: str = "
             "nexus_id": m.nexus_id,
             "is_content_pack": bool(m.is_content_pack),
             "is_code_mod": bool(m.is_code_mod),
-        })
+        }
+        if key not in merged:
+            merged[key] = entry
+        else:
+            prev = merged[key]
+            # If either copy is enabled, the mod is enabled in the current setup
+            combined_enabled = prev["is_enabled"] or entry["is_enabled"]
+            # Keep metadata from whichever copy has the newer version
+            if is_version_newer(entry["version"], prev["version"]):
+                merged[key] = entry
+            merged[key]["is_enabled"] = combined_enabled
+
     return {
         "name": name,
         "description": description,
         "updated_at": now_str,
-        "mods": mod_entries,
+        "mods": list(merged.values()),
     }
 
 
@@ -539,7 +554,7 @@ class IOSModBackend:
         return self._parse_manifest_bytes(folder_name, raw_bytes)
 
     async def toggle_mod(self, mod: ModInfo) -> tuple[bool, str]:
-        """Toggle a mod between Enabled and Disabled."""
+        """Toggle a mod between Enabled and Disabled, resolving any duplicate folder collisions by keeping the newer version."""
         if not self.is_connected:
             return False, "Not connected"
 
@@ -552,7 +567,20 @@ class IOSModBackend:
             src = os.path.join(mods_dir, mod.folder_name)
             dst = os.path.join(mods_dir, new_folder)
             try:
-                os.rename(src, dst)
+                if os.path.exists(dst) and os.path.abspath(src) != os.path.abspath(dst):
+                    dst_mod = self._parse_manifest_local(new_folder, os.path.join(dst, "manifest.json"))
+                    if is_version_newer(dst_mod.version, mod.version):
+                        # Destination already has a newer version; remove the older src
+                        if os.path.exists(src):
+                            shutil.rmtree(src)
+                        mod.folder_name = new_folder
+                        mod.is_enabled = target_enabled
+                        mod.version = dst_mod.version
+                        return True, f"Mod {'enabled' if target_enabled else 'disabled'} (kept newer v{dst_mod.version})"
+                    else:
+                        shutil.rmtree(dst)
+                if os.path.exists(src):
+                    os.rename(src, dst)
                 mod.folder_name = new_folder
                 mod.is_enabled = target_enabled
                 return True, f"Mod {'enabled' if target_enabled else 'disabled'}"
@@ -563,6 +591,10 @@ class IOSModBackend:
             def _wifi_toggle():
                 q_from = urllib.parse.quote(f"Mods/{mod.folder_name}")
                 q_to = urllib.parse.quote(f"Mods/{new_folder}")
+                try:
+                    self._wifi_post(f"/api/delete?path={q_to}")
+                except Exception:
+                    pass
                 self._wifi_post(f"/api/rename?from={q_from}&to={q_to}")
                 mod.folder_name = new_folder
                 mod.is_enabled = target_enabled
@@ -579,7 +611,32 @@ class IOSModBackend:
         try:
             src = f"/Documents/Mods/{mod.folder_name}"
             dst = f"/Documents/Mods/{new_folder}"
-            await self.house_arrest.rename(src, dst)
+            if src != dst and await self.house_arrest.exists(dst):
+                # Both enabled and disabled folders exist on the device! Compare versions and keep the newer one.
+                dst_ver = ""
+                try:
+                    dst_manifest = f"{dst}/manifest.json"
+                    if await self.house_arrest.exists(dst_manifest):
+                        raw_bytes = await self.house_arrest.get_file_contents(dst_manifest)
+                        dst_info = self._parse_manifest_bytes(new_folder, raw_bytes)
+                        dst_ver = dst_info.version
+                except Exception:
+                    pass
+
+                if dst_ver and is_version_newer(dst_ver, mod.version):
+                    # Destination already has a strictly newer version; delete older src and use dst!
+                    if await self.house_arrest.exists(src):
+                        await self.house_arrest.rm(src)
+                    mod.folder_name = new_folder
+                    mod.is_enabled = target_enabled
+                    mod.version = dst_ver
+                    return True, f"Mod {'enabled' if target_enabled else 'disabled'} (kept newer v{dst_ver})"
+                else:
+                    # Source is newer or equal; remove redundant dst before renaming src -> dst
+                    await self.house_arrest.rm(dst)
+
+            if await self.house_arrest.exists(src):
+                await self.house_arrest.rename(src, dst)
             mod.folder_name = new_folder
             mod.is_enabled = target_enabled
             return True, f"Mod {'enabled' if target_enabled else 'disabled'}"
@@ -593,18 +650,34 @@ class IOSModBackend:
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> tuple[bool, str, dict]:
         """Apply a saved mod profile to the connected device or local folder.
-
-        Args:
-            profile_data: Profile dict created by create_profile_snapshot().
-            strict: If True, any installed mod not present in the profile is disabled
-                    (except SDViOSTouchControls which stays enabled unless explicitly disabled).
-            progress_callback: Optional status callback.
+        Automatically deduplicates any redundant enabled/disabled folder pairs on the device,
+        always keeping the highest installed version of each mod.
         """
         if not self.is_connected:
             return False, "Not connected to device or folder.", {}
 
         profile_name = profile_data.get("name", "Profile")
-        profile_mods = profile_data.get("mods", [])
+        raw_profile_mods = profile_data.get("mods", [])
+
+        # Deduplicate profile entries (in case an older profile saved both an enabled and disabled copy)
+        dedup_profile: dict[str, dict] = {}
+        for entry in raw_profile_mods:
+            cfolder = (entry.get("clean_folder") or "").strip().lower()
+            uid = (entry.get("unique_id") or "").strip().lower()
+            mname = (entry.get("name") or "").strip().lower()
+            key = cfolder or uid or mname
+            if not key:
+                continue
+            if key not in dedup_profile:
+                dedup_profile[key] = dict(entry)
+            else:
+                prev = dedup_profile[key]
+                combined_enabled = bool(prev.get("is_enabled", True)) or bool(entry.get("is_enabled", True))
+                if is_version_newer(str(entry.get("version", "")), str(prev.get("version", ""))):
+                    dedup_profile[key] = dict(entry)
+                dedup_profile[key]["is_enabled"] = combined_enabled
+
+        profile_mods = list(dedup_profile.values())
 
         by_uid: dict[str, dict] = {}
         by_folder: dict[str, dict] = {}
@@ -625,24 +698,46 @@ class IOSModBackend:
             progress_callback(f"Reading installed mods for profile '{profile_name}'...")
 
         installed_mods = await self.list_mods()
-        matched_profile_keys = set()
 
+        # Group installed mods by clean_folder (case-insensitive) to resolve any duplicate pairs
+        groups_by_clean: dict[str, list[ModInfo]] = {}
+        for mod in installed_mods:
+            clean_folder = mod.folder_name.replace(".disabled_", "").replace(".disabled-", "")
+            key = clean_folder.strip().lower()
+            groups_by_clean.setdefault(key, []).append(mod)
+
+        matched_profile_keys = set()
         enabled_changed = 0
         disabled_changed = 0
         unchanged = 0
+        deduped_count = 0
         errors = []
 
-        for mod in installed_mods:
-            clean_folder = mod.folder_name.replace(".disabled_", "").replace(".disabled-", "")
-            uid_lower = (mod.unique_id or "").strip().lower()
-            cfolder_lower = clean_folder.strip().lower()
-            name_lower = (mod.name or "").strip().lower()
+        for cfolder_lower, group in groups_by_clean.items():
+            # Pick the copy with the highest version if duplicates exist (e.g. 'Automate' and '.disabled_Automate')
+            if len(group) > 1:
+                group.sort(
+                    key=lambda m: (parse_version_tuple(m.version), 1 if m.is_enabled else 0),
+                    reverse=True
+                )
+                winner = group[0]
+                for loser in group[1:]:
+                    if progress_callback:
+                        progress_callback(f"Removing older duplicate {loser.folder_name} (v{loser.version})...")
+                    await self.delete_mod(loser)
+                    deduped_count += 1
+            else:
+                winner = group[0]
+
+            clean_folder = winner.folder_name.replace(".disabled_", "").replace(".disabled-", "")
+            uid_lower = (winner.unique_id or "").strip().lower()
+            name_lower = (winner.name or "").strip().lower()
 
             entry = None
-            if uid_lower and uid_lower in by_uid:
-                entry = by_uid[uid_lower]
-            elif cfolder_lower and cfolder_lower in by_folder:
+            if cfolder_lower and cfolder_lower in by_folder:
                 entry = by_folder[cfolder_lower]
+            elif uid_lower and uid_lower in by_uid:
+                entry = by_uid[uid_lower]
             elif name_lower and name_lower in by_name:
                 entry = by_name[name_lower]
 
@@ -651,7 +746,6 @@ class IOSModBackend:
                 matched_profile_keys.add(entry_key)
                 target_enabled = bool(entry.get("is_enabled", True))
             else:
-                # Not present in the profile
                 is_touch_controls = (
                     uid_lower == "com.deadakj.sdviostouchcontrols"
                     or cfolder_lower == "sdviostouchcontrols"
@@ -661,20 +755,20 @@ class IOSModBackend:
                 elif strict:
                     target_enabled = False
                 else:
-                    target_enabled = mod.is_enabled
+                    target_enabled = winner.is_enabled
 
-            if mod.is_enabled != target_enabled:
+            if winner.is_enabled != target_enabled:
                 action_label = "Enabling" if target_enabled else "Disabling"
                 if progress_callback:
-                    progress_callback(f"{action_label} {mod.name}...")
-                ok, msg = await self.toggle_mod(mod)
+                    progress_callback(f"{action_label} {winner.name} (v{winner.version})...")
+                ok, msg = await self.toggle_mod(winner)
                 if ok:
                     if target_enabled:
                         enabled_changed += 1
                     else:
                         disabled_changed += 1
                 else:
-                    errors.append(f"{mod.name}: {msg}")
+                    errors.append(f"{winner.name}: {msg}")
             else:
                 unchanged += 1
 
@@ -691,6 +785,7 @@ class IOSModBackend:
             "enabled_changed": enabled_changed,
             "disabled_changed": disabled_changed,
             "unchanged": unchanged,
+            "deduped_count": deduped_count,
             "missing_mods": missing_mods,
             "errors": errors,
         }
@@ -699,6 +794,8 @@ class IOSModBackend:
             f"Applied profile '{profile_name}': "
             f"{enabled_changed} enabled, {disabled_changed} disabled, {unchanged} unchanged."
         )
+        if deduped_count:
+            summary += f" (Cleaned up {deduped_count} older duplicate mod folder(s).)"
         if missing_mods:
             summary += f" ({len(missing_mods)} enabled mod(s) in profile are not installed on device.)"
         if errors:
@@ -922,13 +1019,15 @@ class IOSModBackend:
             installed_names = []
 
             for mod_dir in mod_dirs:
-                # Read name from manifest
+                # Read name and version from manifest
                 m_path = os.path.join(mod_dir, "manifest.json")
                 mod_name = os.path.basename(mod_dir)
+                new_ver = ""
                 try:
-                    with open(m_path, "r", encoding="utf-8-sig", errors="ignore") as f:
-                        m_data = json.load(f)
-                        mod_name = m_data.get("Name", mod_name)
+                    with open(m_path, "rb") as f:
+                        parsed_new = self._parse_manifest_bytes(os.path.basename(mod_dir), f.read())
+                        mod_name = parsed_new.name or mod_name
+                        new_ver = parsed_new.version or ""
                 except Exception:
                     pass
 
@@ -942,19 +1041,35 @@ class IOSModBackend:
                 if progress_callback:
                     progress_callback(f"Installing {mod_name}...")
 
+                disabled_variants = [f".disabled_{folder_name}", f".disabled-{folder_name}"]
+
                 if self.local_mode_dir:
                     mods_dir = self.local_mode_dir if os.path.basename(self.local_mode_dir).lower() == "mods" else os.path.join(self.local_mode_dir, "Mods")
                     dst = os.path.join(mods_dir, folder_name)
-                    if os.path.exists(dst):
-                        shutil.rmtree(dst)
-                    shutil.copytree(mod_dir, dst)
+                    kept_newer = False
+                    for cand_name in [folder_name] + disabled_variants:
+                        cand_p = os.path.join(mods_dir, cand_name)
+                        if os.path.exists(cand_p):
+                            cand_info = self._parse_manifest_local(cand_name, os.path.join(cand_p, "manifest.json"))
+                            if new_ver and cand_info.version and is_version_newer(cand_info.version, new_ver) and not kept_newer:
+                                # Existing version is strictly newer; keep it and ensure it is enabled at dst
+                                if cand_p != dst:
+                                    if os.path.exists(dst):
+                                        shutil.rmtree(dst)
+                                    os.rename(cand_p, dst)
+                                kept_newer = True
+                            else:
+                                shutil.rmtree(cand_p)
+                    if not kept_newer:
+                        shutil.copytree(mod_dir, dst)
                 elif self.wifi_url:
-                    def _push_mod_wifi(m_dir=mod_dir, f_name=folder_name):
-                        q_del = urllib.parse.quote(f"Mods/{f_name}")
-                        try:
-                            self._wifi_post(f"/api/delete?path={q_del}")
-                        except Exception:
-                            pass
+                    def _push_mod_wifi(m_dir=mod_dir, f_name=folder_name, d_vars=disabled_variants):
+                        for cand_name in [f_name] + d_vars:
+                            q_del = urllib.parse.quote(f"Mods/{cand_name}")
+                            try:
+                                self._wifi_post(f"/api/delete?path={q_del}")
+                            except Exception:
+                                pass
                         zip_tmp = os.path.join(temp_dir, f"_wifi_{f_name}.zip")
                         with zipfile.ZipFile(zip_tmp, "w", zipfile.ZIP_DEFLATED) as zf:
                             for r, _, fls in os.walk(m_dir):
@@ -968,13 +1083,30 @@ class IOSModBackend:
                     await asyncio.to_thread(_push_mod_wifi)
                 else:
                     remote_target = f"/Documents/Mods/{folder_name}"
-                    try:
-                        if await self.house_arrest.exists(remote_target):
-                            await self.house_arrest.rm(remote_target)
-                    except Exception:
-                        pass
-                    # Push directory
-                    await self.house_arrest.push(mod_dir, "/Documents/Mods", progress_bar=False)
+                    kept_newer = False
+                    for cand_name in [folder_name] + disabled_variants:
+                        cand_remote = f"/Documents/Mods/{cand_name}"
+                        try:
+                            if await self.house_arrest.exists(cand_remote):
+                                cand_ver = ""
+                                cand_manifest = f"{cand_remote}/manifest.json"
+                                if await self.house_arrest.exists(cand_manifest):
+                                    raw_b = await self.house_arrest.get_file_contents(cand_manifest)
+                                    cand_ver = self._parse_manifest_bytes(cand_name, raw_b).version
+                                if new_ver and cand_ver and is_version_newer(cand_ver, new_ver) and not kept_newer:
+                                    # Existing installed mod has a strictly newer version; keep it and enable it!
+                                    if cand_remote != remote_target:
+                                        if await self.house_arrest.exists(remote_target):
+                                            await self.house_arrest.rm(remote_target)
+                                        await self.house_arrest.rename(cand_remote, remote_target)
+                                    kept_newer = True
+                                else:
+                                    await self.house_arrest.rm(cand_remote)
+                        except Exception:
+                            pass
+                    if not kept_newer:
+                        # Push directory
+                        await self.house_arrest.push(mod_dir, "/Documents/Mods", progress_bar=False)
 
                 installed_names.append(mod_name)
 

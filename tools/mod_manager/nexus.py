@@ -591,9 +591,23 @@ def get_vortex_stardew_dirs() -> tuple[Optional[str], Optional[str]]:
     return mods_dir, dl_dir
 
 
+def _archive_sort_key(path: str) -> tuple[int, float, str]:
+    """Sort key that orders Nexus archives/folders by embedded upload timestamp or mtime descending."""
+    name = os.path.basename(path)
+    # Nexus archive filenames usually end with -<unix_timestamp>.zip (e.g. -1773542779.zip)
+    m = re.search(r"-(\d{9,11})(?:\.\d+)?(?:\.[a-zA-Z0-9]+)?$", name)
+    ts = int(m.group(1)) if m else 0
+    try:
+        mtime = os.path.getmtime(path)
+    except Exception:
+        mtime = 0.0
+    return (ts, mtime, name.lower())
+
+
 def find_local_vortex_mod(mod_id: int, file_id: Optional[int] = None, mod_name: Optional[str] = None) -> tuple[Optional[str], bool]:
     """
     Check if a mod (by mod_id, file_id, or mod_name) is already in local Vortex downloads or staged mods.
+    Always prefers the newest version when multiple archives exist for the same mod.
     Returns (path, is_dir) or (None, False).
     """
     mods_dir, dl_dir = get_vortex_stardew_dirs()
@@ -604,35 +618,49 @@ def find_local_vortex_mod(mod_id: int, file_id: Optional[int] = None, mod_name: 
         clean = "".join(c if c.isalnum() or c in (" ", "_", "-") else " " for c in mod_name).lower()
         name_tokens = [t for t in clean.split() if len(t) >= 4 and t not in ("mod", "stardew", "valley", "custom", "continued", "redux", "revisited")]
 
-    # 1. Check downloaded archives (.zip, .rar, .7z)
+    # 1. Check downloaded archives (.zip, .rar, .7z), sorted newest-first
     if dl_dir and os.path.isdir(dl_dir):
         try:
-            for f in os.listdir(dl_dir):
-                if not f.endswith((".zip", ".rar", ".7z")) or f.startswith("__vortex"):
-                    continue
+            entries = [
+                os.path.join(dl_dir, f)
+                for f in os.listdir(dl_dir)
+                if f.endswith((".zip", ".rar", ".7z")) and not f.startswith("__vortex")
+            ]
+            entries.sort(key=_archive_sort_key, reverse=True)
+
+            for full_p in entries:
+                f = os.path.basename(full_p)
                 if mod_id and (f"-{mod_id}-" in f or f.endswith(f"-{mod_id}.zip")):
-                    return os.path.join(dl_dir, f), False
+                    return full_p, False
                 if file_id and str(file_id) in f:
-                    return os.path.join(dl_dir, f), False
-                # Fallback: check matching tokens in filename
-                if name_tokens and len(name_tokens) >= 2:
-                    f_lower = f.lower()
+                    return full_p, False
+
+            if name_tokens and len(name_tokens) >= 2:
+                for full_p in entries:
+                    f_lower = os.path.basename(full_p).lower()
                     if all(t in f_lower for t in name_tokens[:3]):
-                        return os.path.join(dl_dir, f), False
+                        return full_p, False
         except Exception:
             pass
 
-    # 2. Check staged mods folder
+    # 2. Check staged mods folder, sorted newest-first
     if mods_dir and os.path.isdir(mods_dir):
         try:
-            for d in os.listdir(mods_dir):
-                full_p = os.path.join(mods_dir, d)
-                if not os.path.isdir(full_p):
-                    continue
+            dir_entries = [
+                os.path.join(mods_dir, d)
+                for d in os.listdir(mods_dir)
+                if os.path.isdir(os.path.join(mods_dir, d))
+            ]
+            dir_entries.sort(key=_archive_sort_key, reverse=True)
+
+            for full_p in dir_entries:
+                d = os.path.basename(full_p)
                 if mod_id and f"-{mod_id}-" in d:
                     return full_p, True
-                if name_tokens and len(name_tokens) >= 2:
-                    d_lower = d.lower()
+
+            if name_tokens and len(name_tokens) >= 2:
+                for full_p in dir_entries:
+                    d_lower = os.path.basename(full_p).lower()
                     if all(t in d_lower for t in name_tokens[:3]):
                         return full_p, True
         except Exception:
