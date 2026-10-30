@@ -23,6 +23,7 @@ tools/token.txt
 __pycache__/
 *.pyc
 tools/mod_manager/config.json
+tools/mod_manager/profiles.json
 tools/mod_manager/downloads/
 
 # Local debug tools & temporary logs/artifacts

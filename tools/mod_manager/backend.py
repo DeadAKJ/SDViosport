@@ -13,6 +13,7 @@ import tempfile
 import asyncio
 import subprocess
 import urllib.request
+from datetime import datetime
 from typing import Optional, Callable, Any
 from dataclasses import dataclass, field
 
@@ -57,6 +58,56 @@ KNOWN_FRAMEWORK_NEXUS_IDS = {
     "pathoschild.lookupanything": 541,
     "pathoschild.automate": 1063,
 }
+
+PROFILES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles.json")
+
+
+def load_profiles() -> dict[str, dict]:
+    """Load saved mod profiles from profiles.json."""
+    if os.path.exists(PROFILES_FILE):
+        try:
+            with open(PROFILES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            print(f"[Backend] Failed to load profiles.json: {e}")
+    return {}
+
+
+def save_profiles(profiles: dict[str, dict]) -> bool:
+    """Persist mod profiles to profiles.json."""
+    try:
+        with open(PROFILES_FILE, "w", encoding="utf-8") as f:
+            json.dump(profiles, f, indent=4, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"[Backend] Failed to save profiles.json: {e}")
+        return False
+
+
+def create_profile_snapshot(name: str, mods: list[ModInfo], description: str = "") -> dict:
+    """Create a serializable mod profile dictionary from a list of ModInfo objects."""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    mod_entries = []
+    for m in mods:
+        clean_folder = m.folder_name.replace(".disabled_", "").replace(".disabled-", "")
+        mod_entries.append({
+            "unique_id": m.unique_id,
+            "name": m.name,
+            "clean_folder": clean_folder,
+            "version": m.version,
+            "is_enabled": bool(m.is_enabled),
+            "nexus_id": m.nexus_id,
+            "is_content_pack": bool(m.is_content_pack),
+            "is_code_mod": bool(m.is_code_mod),
+        })
+    return {
+        "name": name,
+        "description": description,
+        "updated_at": now_str,
+        "mods": mod_entries,
+    }
 
 
 def clean_json(text: str) -> str:
@@ -534,6 +585,125 @@ class IOSModBackend:
             return True, f"Mod {'enabled' if target_enabled else 'disabled'}"
         except Exception as e:
             return False, f"AFC rename failed: {e}"
+
+    async def apply_profile(
+        self,
+        profile_data: dict,
+        strict: bool = True,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> tuple[bool, str, dict]:
+        """Apply a saved mod profile to the connected device or local folder.
+
+        Args:
+            profile_data: Profile dict created by create_profile_snapshot().
+            strict: If True, any installed mod not present in the profile is disabled
+                    (except SDViOSTouchControls which stays enabled unless explicitly disabled).
+            progress_callback: Optional status callback.
+        """
+        if not self.is_connected:
+            return False, "Not connected to device or folder.", {}
+
+        profile_name = profile_data.get("name", "Profile")
+        profile_mods = profile_data.get("mods", [])
+
+        by_uid: dict[str, dict] = {}
+        by_folder: dict[str, dict] = {}
+        by_name: dict[str, dict] = {}
+
+        for entry in profile_mods:
+            uid = (entry.get("unique_id") or "").strip().lower()
+            cfolder = (entry.get("clean_folder") or "").strip().lower()
+            mname = (entry.get("name") or "").strip().lower()
+            if uid:
+                by_uid[uid] = entry
+            if cfolder:
+                by_folder[cfolder] = entry
+            if mname:
+                by_name[mname] = entry
+
+        if progress_callback:
+            progress_callback(f"Reading installed mods for profile '{profile_name}'...")
+
+        installed_mods = await self.list_mods()
+        matched_profile_keys = set()
+
+        enabled_changed = 0
+        disabled_changed = 0
+        unchanged = 0
+        errors = []
+
+        for mod in installed_mods:
+            clean_folder = mod.folder_name.replace(".disabled_", "").replace(".disabled-", "")
+            uid_lower = (mod.unique_id or "").strip().lower()
+            cfolder_lower = clean_folder.strip().lower()
+            name_lower = (mod.name or "").strip().lower()
+
+            entry = None
+            if uid_lower and uid_lower in by_uid:
+                entry = by_uid[uid_lower]
+            elif cfolder_lower and cfolder_lower in by_folder:
+                entry = by_folder[cfolder_lower]
+            elif name_lower and name_lower in by_name:
+                entry = by_name[name_lower]
+
+            if entry is not None:
+                entry_key = (entry.get("unique_id") or entry.get("clean_folder") or entry.get("name") or "").lower()
+                matched_profile_keys.add(entry_key)
+                target_enabled = bool(entry.get("is_enabled", True))
+            else:
+                # Not present in the profile
+                is_touch_controls = (
+                    uid_lower == "com.deadakj.sdviostouchcontrols"
+                    or cfolder_lower == "sdviostouchcontrols"
+                )
+                if is_touch_controls:
+                    target_enabled = True
+                elif strict:
+                    target_enabled = False
+                else:
+                    target_enabled = mod.is_enabled
+
+            if mod.is_enabled != target_enabled:
+                action_label = "Enabling" if target_enabled else "Disabling"
+                if progress_callback:
+                    progress_callback(f"{action_label} {mod.name}...")
+                ok, msg = await self.toggle_mod(mod)
+                if ok:
+                    if target_enabled:
+                        enabled_changed += 1
+                    else:
+                        disabled_changed += 1
+                else:
+                    errors.append(f"{mod.name}: {msg}")
+            else:
+                unchanged += 1
+
+        missing_mods = []
+        for entry in profile_mods:
+            if not entry.get("is_enabled", True):
+                continue
+            entry_key = (entry.get("unique_id") or entry.get("clean_folder") or entry.get("name") or "").lower()
+            if entry_key and entry_key not in matched_profile_keys:
+                missing_mods.append(entry)
+
+        stats = {
+            "profile_name": profile_name,
+            "enabled_changed": enabled_changed,
+            "disabled_changed": disabled_changed,
+            "unchanged": unchanged,
+            "missing_mods": missing_mods,
+            "errors": errors,
+        }
+
+        summary = (
+            f"Applied profile '{profile_name}': "
+            f"{enabled_changed} enabled, {disabled_changed} disabled, {unchanged} unchanged."
+        )
+        if missing_mods:
+            summary += f" ({len(missing_mods)} enabled mod(s) in profile are not installed on device.)"
+        if errors:
+            return False, f"{summary} Errors: {'; '.join(errors)}", stats
+        return True, summary, stats
 
     async def delete_mod(self, mod: ModInfo) -> tuple[bool, str]:
         """Permanently delete a mod."""

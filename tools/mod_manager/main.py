@@ -41,14 +41,22 @@ from PyQt6.QtGui import QColor, QFont, QIcon, QDragEnterEvent, QDropEvent, QText
 from PyQt6.QtNetwork import QTcpServer, QHostAddress
 
 try:
-    from tools.mod_manager.backend import IOSModBackend, ModInfo, KNOWN_FRAMEWORK_NEXUS_IDS, is_requirement_installed, is_version_newer
+    from tools.mod_manager.backend import (
+        IOSModBackend, ModInfo, KNOWN_FRAMEWORK_NEXUS_IDS,
+        is_requirement_installed, is_version_newer,
+        load_profiles, save_profiles, create_profile_snapshot,
+    )
     from tools.mod_manager.nexus import (
         NexusAPI, load_config, save_config, register_nxm_protocol,
         is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR,
         parse_any_url, find_local_vortex_mod
     )
 except ImportError:
-    from backend import IOSModBackend, ModInfo, KNOWN_FRAMEWORK_NEXUS_IDS, is_requirement_installed, is_version_newer
+    from backend import (
+        IOSModBackend, ModInfo, KNOWN_FRAMEWORK_NEXUS_IDS,
+        is_requirement_installed, is_version_newer,
+        load_profiles, save_profiles, create_profile_snapshot,
+    )
     from nexus import (
         NexusAPI, load_config, save_config, register_nxm_protocol,
         is_nxm_registered_to_us, get_vortex_stardew_dirs, DEFAULT_DOWNLOAD_DIR,
@@ -1675,6 +1683,7 @@ class ModManagerWindow(QMainWindow):
         self.dispatcher = AsyncDispatcher()
         self.backend = IOSModBackend()
         self.config = load_config()
+        self.profiles = load_profiles()
         self.nexus_api = NexusAPI(self.config.get("nexus_api_key", ""))
         self.mods_cache: list[ModInfo] = []
         self.updates_cache: dict[str, dict] = {}
@@ -1811,6 +1820,75 @@ class ModManagerWindow(QMainWindow):
         layout = QVBoxLayout(self.tab_mods)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+
+        # Mod Profiles Bar
+        profile_frame = QFrame()
+        profile_frame.setStyleSheet(
+            "QFrame { background-color: #21242D; border: 1px solid #2E323E; border-radius: 8px; }"
+        )
+        profile_bar = QHBoxLayout(profile_frame)
+        profile_bar.setContentsMargins(12, 8, 12, 8)
+        profile_bar.setSpacing(8)
+
+        lbl_prof = QLabel("🗂️ Mod Profile:")
+        lbl_prof.setStyleSheet("color: #DA7C21; font-weight: bold; font-size: 13px; border: none;")
+        profile_bar.addWidget(lbl_prof)
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.setMinimumWidth(260)
+        self.profile_combo.setStyleSheet(
+            "QComboBox { background-color: #191B21; color: #E2E4EA; border: 1px solid #3A3F4D; "
+            "border-radius: 5px; padding: 5px 10px; font-weight: bold; }"
+            "QComboBox::drop-down { border: none; }"
+            "QComboBox QAbstractItemView { background-color: #191B21; color: #E2E4EA; selection-background-color: #DA7C21; }"
+        )
+        profile_bar.addWidget(self.profile_combo)
+
+        self.btn_load_profile = QPushButton("⚡ Load Profile")
+        self.btn_load_profile.setObjectName("SuccessBtn")
+        self.btn_load_profile.setToolTip("Apply the selected mod profile to your device (enables/disables mods to match the profile)")
+        self.btn_load_profile.clicked.connect(self._load_selected_profile)
+        profile_bar.addWidget(self.btn_load_profile)
+
+        self.btn_save_profile = QPushButton("💾 Save New")
+        self.btn_save_profile.setToolTip("Save the current installed mods & enabled/disabled state as a new profile")
+        self.btn_save_profile.clicked.connect(self._save_new_profile)
+        profile_bar.addWidget(self.btn_save_profile)
+
+        self.btn_update_profile = QPushButton("🔄 Update")
+        self.btn_update_profile.setObjectName("SecondaryBtn")
+        self.btn_update_profile.setToolTip("Overwrite the selected profile with your current mod states")
+        self.btn_update_profile.clicked.connect(self._update_selected_profile)
+        profile_bar.addWidget(self.btn_update_profile)
+
+        self.btn_rename_profile = QPushButton("✏️ Rename")
+        self.btn_rename_profile.setObjectName("SecondaryBtn")
+        self.btn_rename_profile.setToolTip("Rename the selected profile")
+        self.btn_rename_profile.clicked.connect(self._rename_selected_profile)
+        profile_bar.addWidget(self.btn_rename_profile)
+
+        self.btn_export_profile = QPushButton("📤 Export")
+        self.btn_export_profile.setObjectName("SecondaryBtn")
+        self.btn_export_profile.setToolTip("Export the selected mod profile to a shareable .json file")
+        self.btn_export_profile.clicked.connect(self._export_selected_profile)
+        profile_bar.addWidget(self.btn_export_profile)
+
+        self.btn_import_profile = QPushButton("📥 Import")
+        self.btn_import_profile.setObjectName("SecondaryBtn")
+        self.btn_import_profile.setToolTip("Import a mod profile from a .json file")
+        self.btn_import_profile.clicked.connect(self._import_profile_file)
+        profile_bar.addWidget(self.btn_import_profile)
+
+        self.btn_delete_profile = QPushButton("🗑 Delete")
+        self.btn_delete_profile.setObjectName("DangerBtn")
+        self.btn_delete_profile.setToolTip("Delete the selected mod profile")
+        self.btn_delete_profile.clicked.connect(self._delete_selected_profile)
+        profile_bar.addWidget(self.btn_delete_profile)
+
+        profile_bar.addStretch()
+        layout.addWidget(profile_frame)
+
+        self._refresh_profile_combo(self.config.get("last_active_profile"))
 
         toolbar = QHBoxLayout()
         self.btn_install_mod = QPushButton("📥 Install Mod (.zip / folder)")
@@ -2864,6 +2942,350 @@ class ModManagerWindow(QMainWindow):
                 self._refresh_saves()
             else:
                 QMessageBox.warning(self, "Error", msg)
+
+    # ----------------- MOD PROFILES -----------------
+    def _refresh_profile_combo(self, select_name: Optional[str] = None):
+        if not hasattr(self, "profile_combo"):
+            return
+        current = select_name or self._get_selected_profile_name()
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+
+        if not self.profiles:
+            self.profile_combo.addItem("— No Saved Profiles —", None)
+        else:
+            for name in sorted(self.profiles.keys(), key=lambda s: s.lower()):
+                pdata = self.profiles[name]
+                pmods = pdata.get("mods", [])
+                enabled_cnt = sum(1 for m in pmods if m.get("is_enabled", True))
+                label = f"{name}  ({enabled_cnt}/{len(pmods)} enabled)"
+                self.profile_combo.addItem(label, name)
+
+        if current and current in self.profiles:
+            idx = self.profile_combo.findData(current)
+            if idx >= 0:
+                self.profile_combo.setCurrentIndex(idx)
+
+        has_profiles = bool(self.profiles)
+        if hasattr(self, "btn_load_profile"):
+            self.btn_load_profile.setEnabled(has_profiles)
+            self.btn_update_profile.setEnabled(has_profiles)
+            self.btn_rename_profile.setEnabled(has_profiles)
+            self.btn_export_profile.setEnabled(has_profiles)
+            self.btn_delete_profile.setEnabled(has_profiles)
+
+        self.profile_combo.blockSignals(False)
+
+    def _get_selected_profile_name(self) -> Optional[str]:
+        if not hasattr(self, "profile_combo") or self.profile_combo.count() == 0:
+            return None
+        return self.profile_combo.currentData()
+
+    def _save_new_profile(self):
+        if not self.backend.is_connected:
+            QMessageBox.warning(self, "Not Connected", "Please connect your iOS device or select a local folder first.")
+            return
+        if not self.mods_cache:
+            QMessageBox.information(self, "No Mods Found", "There are no installed mods to save into a profile.")
+            return
+
+        name, ok = QInputDialog.getText(
+            self,
+            "Save New Mod Profile",
+            f"Enter a name for this mod profile ({sum(1 for m in self.mods_cache if m.is_enabled)}/{len(self.mods_cache)} mods currently enabled):",
+            QLineEdit.EchoMode.Normal,
+            ""
+        )
+        if not ok or not name.strip():
+            return
+
+        name = name.strip()
+        if name in self.profiles:
+            reply = QMessageBox.question(
+                self,
+                "Overwrite Profile?",
+                f"A profile named '{name}' already exists. Overwrite it with the current mod states?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        snapshot = create_profile_snapshot(name, self.mods_cache)
+        self.profiles[name] = snapshot
+        save_profiles(self.profiles)
+        self.config["last_active_profile"] = name
+        save_config(self.config)
+        self._refresh_profile_combo(select_name=name)
+        self.status_bar.setText(f" Saved mod profile '{name}' ({len(self.mods_cache)} mods).")
+        QMessageBox.information(
+            self,
+            "Profile Saved",
+            f"Saved profile '{name}' with {sum(1 for m in self.mods_cache if m.is_enabled)} enabled and "
+            f"{sum(1 for m in self.mods_cache if not m.is_enabled)} disabled mod(s)."
+        )
+
+    def _update_selected_profile(self):
+        name = self._get_selected_profile_name()
+        if not name or name not in self.profiles:
+            QMessageBox.information(self, "No Profile Selected", "Please select a profile to update first.")
+            return
+        if not self.backend.is_connected or not self.mods_cache:
+            QMessageBox.warning(self, "Not Connected", "Connect to your device and load the mod list before updating a profile.")
+            return
+
+        enabled_cnt = sum(1 for m in self.mods_cache if m.is_enabled)
+        reply = QMessageBox.question(
+            self,
+            "Update Profile",
+            f"Update profile '{name}' with your current mod configuration ({enabled_cnt}/{len(self.mods_cache)} enabled)?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        desc = self.profiles[name].get("description", "")
+        self.profiles[name] = create_profile_snapshot(name, self.mods_cache, description=desc)
+        save_profiles(self.profiles)
+        self.config["last_active_profile"] = name
+        save_config(self.config)
+        self._refresh_profile_combo(select_name=name)
+        self.status_bar.setText(f" Updated mod profile '{name}'.")
+
+    def _rename_selected_profile(self):
+        old_name = self._get_selected_profile_name()
+        if not old_name or old_name not in self.profiles:
+            return
+
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Rename Mod Profile",
+            f"Enter a new name for profile '{old_name}':",
+            QLineEdit.EchoMode.Normal,
+            old_name
+        )
+        if not ok or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        if new_name == old_name:
+            return
+        if new_name in self.profiles:
+            QMessageBox.warning(self, "Name Exists", f"A profile named '{new_name}' already exists.")
+            return
+
+        pdata = self.profiles.pop(old_name)
+        pdata["name"] = new_name
+        self.profiles[new_name] = pdata
+        save_profiles(self.profiles)
+        if self.config.get("last_active_profile") == old_name:
+            self.config["last_active_profile"] = new_name
+            save_config(self.config)
+        self._refresh_profile_combo(select_name=new_name)
+        self.status_bar.setText(f" Renamed profile '{old_name}' to '{new_name}'.")
+
+    def _delete_selected_profile(self):
+        name = self._get_selected_profile_name()
+        if not name or name not in self.profiles:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Delete Mod Profile",
+            f"Are you sure you want to delete the saved profile '{name}'?\n(This will not delete any mods from your device.)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.profiles.pop(name, None)
+        save_profiles(self.profiles)
+        if self.config.get("last_active_profile") == name:
+            self.config["last_active_profile"] = ""
+            save_config(self.config)
+        self._refresh_profile_combo()
+        self.status_bar.setText(f" Deleted mod profile '{name}'.")
+
+    def _export_selected_profile(self):
+        name = self._get_selected_profile_name()
+        if not name or name not in self.profiles:
+            QMessageBox.information(self, "No Profile Selected", "Please select a profile to export.")
+            return
+
+        safe_filename = "".join(c if c.isalnum() or c in (" ", "-", "_") else "_" for c in name).strip()
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Mod Profile",
+            f"{safe_filename}.sdvprofile.json",
+            "Mod Profile JSON (*.json)"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.profiles[name], f, indent=4, ensure_ascii=False)
+            self.status_bar.setText(f" Exported profile '{name}' to {path}")
+            QMessageBox.information(self, "Export Complete", f"Profile '{name}' exported to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"Could not export profile:\n{e}")
+
+    def _import_profile_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Mod Profile",
+            "",
+            "Mod Profile JSON (*.json)"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict) or "mods" not in data or not isinstance(data["mods"], list):
+                QMessageBox.warning(self, "Invalid Profile", "Selected JSON file is not a valid SDViOS mod profile.")
+                return
+
+            name = (data.get("name") or os.path.splitext(os.path.basename(path))[0]).strip()
+            if name in self.profiles:
+                reply = QMessageBox.question(
+                    self,
+                    "Overwrite Profile?",
+                    f"Profile '{name}' already exists. Overwrite it?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+
+            data["name"] = name
+            self.profiles[name] = data
+            save_profiles(self.profiles)
+            self._refresh_profile_combo(select_name=name)
+            self.status_bar.setText(f" Imported mod profile '{name}' ({len(data['mods'])} mods).")
+            QMessageBox.information(
+                self,
+                "Profile Imported",
+                f"Imported profile '{name}' ({len(data['mods'])} mods).\nClick '⚡ Load Profile' to apply it to your device."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Import Failed", f"Could not import profile:\n{e}")
+
+    def _load_selected_profile(self):
+        name = self._get_selected_profile_name()
+        if not name or name not in self.profiles:
+            QMessageBox.information(self, "No Profile Selected", "Please save or select a mod profile first.")
+            return
+        if not self.backend.is_connected:
+            QMessageBox.warning(self, "Not Connected", "Please connect your iOS device via USB or select a local folder first.")
+            return
+
+        profile_data = self.profiles[name]
+        pmods = profile_data.get("mods", [])
+        enabled_cnt = sum(1 for m in pmods if m.get("is_enabled", True))
+
+        reply = QMessageBox.question(
+            self,
+            "Load Mod Profile",
+            f"Apply profile '{name}' to your device?\n\n"
+            f"• {enabled_cnt} mod(s) in this profile will be ENABLED\n"
+            f"• All other mods on the device will be DISABLED (except SDViOSTouchControls)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.btn_load_profile.setEnabled(False)
+        self.status_bar.setText(f" Applying mod profile '{name}'...")
+
+        def on_applied(res):
+            self.progress_bar.setVisible(False)
+            self.btn_load_profile.setEnabled(True)
+            ok, msg, stats = res
+            self.config["last_active_profile"] = name
+            save_config(self.config)
+            self.status_bar.setText(f" {msg}")
+            self._refresh_mods()
+
+            missing_mods = stats.get("missing_mods", []) if isinstance(stats, dict) else []
+            if missing_mods:
+                missing_names = "\n".join(f"• {m.get('name', m.get('unique_id', 'Unknown'))}" for m in missing_mods[:12])
+                if len(missing_mods) > 12:
+                    missing_names += f"\n...and {len(missing_mods) - 12} more"
+                install_reply = QMessageBox.question(
+                    self,
+                    "Profile Loaded — Missing Mods Detected",
+                    f"{msg}\n\n"
+                    f"The following enabled mod(s) in profile '{name}' are not currently installed on your device:\n"
+                    f"{missing_names}\n\n"
+                    "Would you like to search your local Vortex cache / downloads to install them automatically?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if install_reply == QMessageBox.StandardButton.Yes:
+                    self._install_missing_profile_mods(missing_mods)
+                return
+
+            if ok:
+                QMessageBox.information(self, "Profile Loaded", msg)
+            else:
+                QMessageBox.warning(self, "Profile Loaded with Warnings", msg)
+
+        def on_error(err):
+            self.progress_bar.setVisible(False)
+            self.btn_load_profile.setEnabled(True)
+            QMessageBox.critical(self, "Profile Error", f"Failed to apply profile '{name}':\n{err}")
+
+        self.dispatcher.run_async(
+            self.backend.apply_profile(profile_data, strict=True),
+            on_success=on_applied,
+            on_error=on_error
+        )
+
+    def _install_missing_profile_mods(self, missing_mods: list[dict]):
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.status_bar.setText(f" Installing {len(missing_mods)} missing mod(s) for profile...")
+
+        def install_worker():
+            installed = []
+            not_found = []
+            for entry in missing_mods:
+                m_name = entry.get("name") or entry.get("clean_folder") or entry.get("unique_id") or "Mod"
+                m_nexus_id = entry.get("nexus_id")
+                uid_lower = (entry.get("unique_id") or "").lower()
+                if not m_nexus_id and uid_lower in KNOWN_FRAMEWORK_NEXUS_IDS:
+                    m_nexus_id = KNOWN_FRAMEWORK_NEXUS_IDS[uid_lower]
+
+                local_path, _ = find_local_vortex_mod(m_nexus_id, mod_name=m_name)
+                if local_path:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.backend.install_mod_archive(local_path),
+                        self.dispatcher.loop
+                    )
+                    ok, _ = fut.result(timeout=180)
+                    if ok:
+                        installed.append(m_name)
+                        continue
+                not_found.append(m_name)
+            return installed, not_found
+
+        def on_done(res):
+            self.progress_bar.setVisible(False)
+            installed, not_found = res
+            self._refresh_mods()
+            summary = f"Installed {len(installed)} missing mod(s) from local cache."
+            if not_found:
+                summary += f"\n\nCould not find local archives for {len(not_found)} mod(s):\n• " + "\n• ".join(not_found[:10])
+            QMessageBox.information(self, "Missing Profile Mods", summary)
+
+        self.dispatcher.run_async(
+            asyncio.to_thread(install_worker),
+            on_success=on_done,
+            on_error=lambda e: (
+                self.progress_bar.setVisible(False),
+                QMessageBox.warning(self, "Error", f"Failed installing missing profile mods: {e}")
+            )
+        )
 
     # ----------------- MODS MANAGEMENT -----------------
     def _refresh_mods(self):
