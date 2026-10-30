@@ -604,10 +604,34 @@ def _archive_sort_key(path: str) -> tuple[int, float, str]:
     return (ts, mtime, name.lower())
 
 
-def find_local_vortex_mod(mod_id: int, file_id: Optional[int] = None, mod_name: Optional[str] = None) -> tuple[Optional[str], bool]:
+def _version_matches_filename(target_version: Optional[str], filename: str) -> bool:
+    """Check if a Nexus archive/folder name matches a specific pinned mod version."""
+    if not target_version:
+        return False
+    v_clean = re.sub(r"^[vV]", "", str(target_version).strip()).lower()
+    if not v_clean:
+        return False
+    f_lower = filename.lower()
+    # Nexus encodes version "1.15.11" as "-1-15-11-" in archive filenames
+    v_dashed = re.sub(r"[._\s]+", "-", v_clean)
+    if f"-{v_dashed}-" in f_lower or f_lower.endswith(f"-{v_dashed}"):
+        return True
+    if f" {v_clean}-" in f_lower or f"-{v_clean}-" in f_lower:
+        return True
+    return False
+
+
+def find_local_vortex_mod(
+    mod_id: int,
+    file_id: Optional[int] = None,
+    mod_name: Optional[str] = None,
+    target_version: Optional[str] = None,
+) -> tuple[Optional[str], bool]:
     """
-    Check if a mod (by mod_id, file_id, or mod_name) is already in local Vortex downloads or staged mods.
-    Always prefers the newest version when multiple archives exist for the same mod.
+    Check if a mod (by mod_id, file_id, mod_name, and optional pinned target_version)
+    is already in local Vortex downloads or staged mods.
+    If target_version is specified (e.g. for a Collection), prefers the exact pinned version
+    (including intentional downgrades) before falling back to the newest cached version.
     Returns (path, is_dir) or (None, False).
     """
     mods_dir, dl_dir = get_vortex_stardew_dirs()
@@ -628,11 +652,19 @@ def find_local_vortex_mod(mod_id: int, file_id: Optional[int] = None, mod_name: 
             ]
             entries.sort(key=_archive_sort_key, reverse=True)
 
+            # 1a. Exact file_id or pinned target_version match on mod_id
+            if target_version or file_id:
+                for full_p in entries:
+                    f = os.path.basename(full_p)
+                    if file_id and str(file_id) in f:
+                        return full_p, False
+                    if mod_id and (f"-{mod_id}-" in f or f.endswith(f"-{mod_id}.zip")) and _version_matches_filename(target_version, f):
+                        return full_p, False
+
+            # 1b. Any version for mod_id (newest first)
             for full_p in entries:
                 f = os.path.basename(full_p)
                 if mod_id and (f"-{mod_id}-" in f or f.endswith(f"-{mod_id}.zip")):
-                    return full_p, False
-                if file_id and str(file_id) in f:
                     return full_p, False
 
             if name_tokens and len(name_tokens) >= 2:
@@ -652,6 +684,14 @@ def find_local_vortex_mod(mod_id: int, file_id: Optional[int] = None, mod_name: 
                 if os.path.isdir(os.path.join(mods_dir, d))
             ]
             dir_entries.sort(key=_archive_sort_key, reverse=True)
+
+            if target_version or file_id:
+                for full_p in dir_entries:
+                    d = os.path.basename(full_p)
+                    if file_id and str(file_id) in d:
+                        return full_p, True
+                    if mod_id and f"-{mod_id}-" in d and _version_matches_filename(target_version, d):
+                        return full_p, True
 
             for full_p in dir_entries:
                 d = os.path.basename(full_p)

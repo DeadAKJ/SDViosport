@@ -625,9 +625,14 @@ class CollectionInstallerDialog(QDialog):
         self.setStyleSheet(DARK_STYLE)
 
         self.mods = self.collection.get("mods", [])
-        # Check local vortex cache for each mod
+        # Check local vortex cache for each mod, preferring the collection's exact pinned version
         for m in self.mods:
-            local_p, is_dir = find_local_vortex_mod(m.get("mod_id", 0), m.get("file_id"), m.get("name"))
+            local_p, is_dir = find_local_vortex_mod(
+                m.get("mod_id", 0),
+                m.get("file_id"),
+                m.get("name"),
+                target_version=m.get("version"),
+            )
             m["local_path"] = local_p
             m["is_local"] = bool(local_p)
             if local_p and m.get("size_bytes", 0) == 0:
@@ -3262,7 +3267,11 @@ class ModManagerWindow(QMainWindow):
                 if not m_nexus_id and uid_lower in KNOWN_FRAMEWORK_NEXUS_IDS:
                     m_nexus_id = KNOWN_FRAMEWORK_NEXUS_IDS[uid_lower]
 
-                local_path, _ = find_local_vortex_mod(m_nexus_id, mod_name=m_name)
+                local_path, _ = find_local_vortex_mod(
+                    m_nexus_id,
+                    mod_name=m_name,
+                    target_version=entry.get("version"),
+                )
                 if local_path:
                     fut = asyncio.run_coroutine_threadsafe(
                         self.backend.install_mod_archive(local_path),
