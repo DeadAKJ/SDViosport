@@ -140,6 +140,24 @@ class NexusAPI:
         if not self.api_key:
             raise ValueError("Nexus API key not configured.")
 
+        # Ensure slug is clean even if a full URL or prefix was passed directly
+        cleaned_slug = slug.strip()
+        m_coll = re.search(r"nexusmods\.com/(?:games/|next/)?([a-zA-Z0-9_-]+)/collections/([a-zA-Z0-9_-]+)", cleaned_slug, re.IGNORECASE)
+        if m_coll:
+            g = m_coll.group(1).lower()
+            if g not in ("next", "games"):
+                domain_name = g
+            cleaned_slug = m_coll.group(2)
+        else:
+            m = re.search(r"collections/([a-zA-Z0-9_-]+)", cleaned_slug, re.IGNORECASE)
+            if m:
+                cleaned_slug = m.group(1)
+            elif cleaned_slug.lower().startswith(("col:", "collection:")):
+                cleaned_slug = re.sub(r"^(?:col:|collection:)", "", cleaned_slug, flags=re.IGNORECASE).strip().split("/")[0].split("?")[0]
+            elif "/" in cleaned_slug or "http" in cleaned_slug or ":" in cleaned_slug:
+                cleaned_slug = cleaned_slug.split("?")[0].split("#")[0].rstrip("/").split("/")[-1]
+        slug = cleaned_slug
+
         query = """
         query GetCollection($slug: String!, $domainName: String!) {
           collection(slug: $slug, domainName: $domainName) {
@@ -452,28 +470,29 @@ def parse_any_url(raw: str) -> dict:
         return {"type": "invalid", "error": "Invalid nxm:// link format"}
 
     # 2. Nexus Collection URL or Prefix
-    coll_match = re.search(r"nexusmods\.com/(?:next/)?(?:stardewvalley/)?collections/([a-zA-Z0-9_-]+)", s, re.IGNORECASE)
-    if not coll_match and (s.lower().startswith("col:") or s.lower().startswith("collection:")):
-        slug = re.sub(r"^(?:col:|collection:)", "", s, flags=re.IGNORECASE).strip()
-        if slug:
-            return {
-                "type": "nexus_collection",
-                "game": "stardewvalley",
-                "slug": slug,
-                "url": f"https://next.nexusmods.com/stardewvalley/collections/{slug}"
-            }
+    coll_game, coll_slug = None, None
+    m_coll = re.search(r"nexusmods\.com/(?:games/|next/)?([a-zA-Z0-9_-]+)/collections/([a-zA-Z0-9_-]+)", s, re.IGNORECASE)
+    if m_coll:
+        g = m_coll.group(1).lower()
+        coll_game = "stardewvalley" if g in ("next", "games") else g
+        coll_slug = m_coll.group(2)
+    elif re.search(r"collections/([a-zA-Z0-9_-]+)", s, re.IGNORECASE):
+        coll_game = "stardewvalley"
+        coll_slug = re.search(r"collections/([a-zA-Z0-9_-]+)", s, re.IGNORECASE).group(1)
+    elif s.lower().startswith("col:") or s.lower().startswith("collection:"):
+        coll_game = "stardewvalley"
+        coll_slug = re.sub(r"^(?:col:|collection:)", "", s, flags=re.IGNORECASE).strip().split("/")[0].split("?")[0]
 
-    if coll_match:
-        slug = coll_match.group(1)
+    if coll_slug:
         return {
             "type": "nexus_collection",
-            "game": "stardewvalley",
-            "slug": slug,
-            "url": f"https://next.nexusmods.com/stardewvalley/collections/{slug}"
+            "game": coll_game or "stardewvalley",
+            "slug": coll_slug,
+            "url": f"https://next.nexusmods.com/{coll_game or 'stardewvalley'}/collections/{coll_slug}"
         }
 
     # 3. Nexus Web URL
-    nexus_match = re.search(r"nexusmods\.com/([^/]+)/mods/(\d+)", s, re.IGNORECASE)
+    nexus_match = re.search(r"nexusmods\.com/(?:games/)?([^/]+)/mods/(\d+)", s, re.IGNORECASE)
     if nexus_match:
         game = nexus_match.group(1).lower()
         mod_id = int(nexus_match.group(2))

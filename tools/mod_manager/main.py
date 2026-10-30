@@ -2071,7 +2071,13 @@ class ModManagerWindow(QMainWindow):
             return
 
         parsed = parse_any_url(slug_or_url)
-        slug = parsed.get("slug", slug_or_url) if parsed.get("type") == "nexus_collection" else slug_or_url
+        if parsed.get("type") == "nexus_collection":
+            slug = parsed["slug"]
+            domain_name = parsed.get("game", "stardewvalley")
+        else:
+            m = re.search(r"collections/([a-zA-Z0-9_-]+)", slug_or_url, re.IGNORECASE)
+            slug = m.group(1) if m else slug_or_url.split("?")[0].split("#")[0].rstrip("/").split("/")[-1]
+            domain_name = "stardewvalley"
 
         if not self.nexus_api.api_key:
             self.tabs.setCurrentIndex(3)
@@ -2083,7 +2089,7 @@ class ModManagerWindow(QMainWindow):
         self.progress_bar.setRange(0, 0)
 
         def fetch():
-            return self.nexus_api.get_collection(slug)
+            return self.nexus_api.get_collection(slug, domain_name=domain_name)
 
         def on_success(coll_data):
             self.progress_bar.setVisible(False)
