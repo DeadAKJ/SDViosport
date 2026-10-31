@@ -114,6 +114,17 @@ namespace SDViOSTouchControls
             helper.ConsoleCommands.Add("quick_save", "Quick save the game mid-day from anywhere.", (cmd, args) => QuickSaveManager.Instance?.QuickSave());
             helper.ConsoleCommands.Add("quick_load", "Quick load the midday save state for this farm.", (cmd, args) => QuickSaveManager.Instance?.QuickLoad());
 
+            // 7.5 Deferred Map Loader (optimization #5: defer non-essential maps during save load)
+            DeferredMapLoader.Initialize(Monitor);
+            DeferredMapLoader.Enabled = TouchOverlaySettings.Instance.EnableDeferredMapLoading;
+            helper.ConsoleCommands.Add("toggle_deferred_maps", "Toggle deferred map loading optimization on/off.", (cmd, args) =>
+            {
+                DeferredMapLoader.Enabled = !DeferredMapLoader.Enabled;
+                TouchOverlaySettings.Instance.EnableDeferredMapLoading = DeferredMapLoader.Enabled;
+                TouchOverlaySettings.Instance.Save();
+                Monitor.Log($"[DeferredMapLoader] Deferred map loading is now {(DeferredMapLoader.Enabled ? "ENABLED" : "DISABLED")}.", LogLevel.Info);
+            });
+
             // 8. Background memory watchdog (real iOS headroom + emergency GC during synchronous loads)
             try { MemoryWatchdog.Start(Monitor); }
             catch (Exception ex) { Monitor.Log($"[MEM_DEBUG] Watchdog failed to start: {ex.Message}", LogLevel.Warn); }
@@ -546,23 +557,11 @@ namespace SDViOSTouchControls
                 Monitor.Log($"[SDViOSTouchControls] Note patching ContentPatcherAnimations: {ex.Message}", LogLevel.Trace);
             }
 
-            // 9. Memory Optimization: Defer Tilesheet Preloading & Skip Map Live-Reload during Save Load
+            // 9. Memory Optimization: Defer Tilesheet Preloading for Non-Essential Maps
+            DeferredMapLoader.ApplyHarmonyPatches(harmony);
+
             try
             {
-                var mMapLoadTileSheets = typeof(xTile.Map).GetMethod("LoadTileSheets", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(xTile.Display.IDisplayDevice) }, null);
-                if (mMapLoadTileSheets != null)
-                {
-                    harmony.Patch(mMapLoadTileSheets, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixMapLoadTileSheets), BindingFlags.Static | BindingFlags.NonPublic)));
-                    Monitor.Log("[SDViOSTouchControls] Harmony patched xTile.Map.LoadTileSheets -> deferred loading during save load.", LogLevel.Info);
-                }
-
-                var mDevLoadTileSheet = typeof(xTile.Display.XnaDisplayDevice).GetMethod("LoadTileSheet", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(xTile.Tiles.TileSheet) }, null);
-                if (mDevLoadTileSheet != null)
-                {
-                    harmony.Patch(mDevLoadTileSheet, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixDevLoadTileSheet), BindingFlags.Static | BindingFlags.NonPublic)));
-                    Monitor.Log("[SDViOSTouchControls] Harmony patched XnaDisplayDevice.LoadTileSheet -> deferred loading during save load.", LogLevel.Info);
-                }
-
                 // CoreAssetPropagator, ModContentManager, ContentManager, and TitleContainer
                 try
                 {
@@ -638,29 +637,6 @@ namespace SDViOSTouchControls
 
                 try
                 {
-                    foreach (var method in typeof(GameLocation).GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                    {
-                        if (method.Name == "reloadMap")
-                        {
-                            try
-                            {
-                                harmony.Patch(method, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixLocationReloadMap), BindingFlags.Static | BindingFlags.NonPublic)));
-                                Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.reloadMap -> defer non-essential maps during save load.", LogLevel.Info);
-                            }
-                            catch (Exception ex)
-                            {
-                                Monitor.Log($"[SDViOSTouchControls] Could not patch GameLocation.reloadMap: {ex.Message}", LogLevel.Trace);
-                            }
-                        }
-                    }
-
-                    var mGetMap = typeof(GameLocation).GetProperty("Map", BindingFlags.Public | BindingFlags.Instance)?.GetGetMethod();
-                    if (mGetMap != null)
-                    {
-                        harmony.Patch(mGetMap, prefix: new HarmonyMethod(typeof(ModEntry).GetMethod(nameof(PrefixLocationGetMap), BindingFlags.Static | BindingFlags.NonPublic)));
-                        Monitor.Log("[SDViOSTouchControls] Harmony patched GameLocation.get_Map -> on-demand load if deferred.", LogLevel.Info);
-                    }
-
                     foreach (var method in typeof(GameLocation).GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                     {
                         if (method.Name == "loadMap")
@@ -1107,6 +1083,7 @@ namespace SDViOSTouchControls
             if (location == null) return;
             try
             {
+                DeferredMapLoader.EnsureLocationRealized(location);
                 LazyIosDisplayDevice.EnsureInstalled();
                 _forceMapLoad = true;
                 if (location.map == null)
@@ -1130,42 +1107,6 @@ namespace SDViOSTouchControls
             finally
             {
                 _forceMapLoad = false;
-            }
-        }
-
-        private static bool PrefixLocationReloadMap(GameLocation __instance)
-        {
-            if (Game1.gameMode == 6 && !_forceMapLoad)
-            {
-                if (!IsEssentialLocation(__instance))
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        private static void PrefixLocationGetMap(GameLocation __instance)
-        {
-            if (_forceMapLoad) return;
-
-            if (__instance != null && __instance.map == null)
-            {
-                if (Game1.gameMode == 6 && !IsEssentialLocation(__instance))
-                {
-                    return;
-                }
-
-                try
-                {
-                    _forceMapLoad = true;
-                    __instance.reloadMap();
-                }
-                catch { }
-                finally
-                {
-                    _forceMapLoad = false;
-                }
             }
         }
 
@@ -1222,30 +1163,6 @@ namespace SDViOSTouchControls
             {
                 _forceMapLoad = prev;
             }
-        }
-
-        private static bool PrefixMapLoadTileSheets(xTile.Map __instance)
-        {
-            if (!_forceMapLoad)
-            {
-                if (!IsEssentialMap(__instance))
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        private static bool PrefixDevLoadTileSheet(xTile.Tiles.TileSheet tileSheet)
-        {
-            if (!_forceMapLoad)
-            {
-                if (tileSheet == null || !IsEssentialMap(tileSheet.Map))
-                {
-                    return false;
-                }
-            }
-            return true;
         }
 
         private static bool PrefixPropagateMap(ref bool __result)
@@ -1993,6 +1910,8 @@ namespace SDViOSTouchControls
             _loadedNpcCount = 0;
             try
             {
+                DeferredMapLoader.OnSaveLoaded();
+
                 if (Game1.options != null)
                 {
                     Game1.options.gamepadMode = Options.GamepadModes.ForceOff;
@@ -2019,6 +1938,7 @@ namespace SDViOSTouchControls
         {
             try
             {
+                DeferredMapLoader.OnReturnedToTitle();
                 TouchVirtualPad.Instance?.ResetInputState();
                 PurgeNonCoreAssets();
                 MemoryWatchdog.ForceCollect("ReturnedToTitle", minIntervalMs: 50);
@@ -2034,6 +1954,8 @@ namespace SDViOSTouchControls
         {
             try
             {
+                DeferredMapLoader.OnDayStarted();
+
                 if (Game1.options != null)
                 {
                     Game1.options.gamepadMode = Options.GamepadModes.ForceOff;
