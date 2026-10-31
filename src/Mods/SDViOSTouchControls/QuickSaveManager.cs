@@ -535,6 +535,9 @@ namespace SDViOSTouchControls
             {
                 _monitor.Log("[QuickSave] Midday save in progress...", LogLevel.Trace);
             }
+
+            // Always ensure non-serializable custom monsters are stripped before XML SaveGame.Save()
+            SanitizeNonVanillaMonsters(_monitor, "OnSaving");
         }
 
         public void OnSaved()
@@ -698,24 +701,81 @@ namespace SDViOSTouchControls
             {
                 if (_stashedMonsters.Count == 0) return;
 
+                int restoredCount = 0;
+                int skippedDuplicateCount = 0;
+
                 foreach (var kvp in _stashedMonsters)
                 {
                     var loc = kvp.Key;
                     if (loc == null || loc.characters == null) continue;
                     foreach (var m in kvp.Value)
                     {
-                        if (m != null && !loc.characters.Contains(m))
+                        if (m == null) continue;
+
+                        // Prevent duplicate restoration if another mod (e.g. FTM AfterMidDaySave)
+                        // or the game already respawned or maintained this monster:
+                        bool alreadyExists = loc.characters.Any(existing =>
+                            existing is Monster other && (
+                                ReferenceEquals(other, m) ||
+                                (other.id != 0 && other.id == m.id) ||
+                                (other.Tile == m.Tile && other.Name == m.Name && other.GetType() == m.GetType())
+                            ));
+
+                        if (!alreadyExists && !loc.characters.Contains(m))
                         {
                             loc.addCharacter(m);
+                            restoredCount++;
+                        }
+                        else
+                        {
+                            skippedDuplicateCount++;
                         }
                     }
                 }
+                _monitor.Log($"[QuickSave] Monster restore complete: {restoredCount} restored, {skippedDuplicateCount} skipped (already present/respawned).", LogLevel.Trace);
                 _stashedMonsters.Clear();
             }
             catch (Exception ex)
             {
                 _monitor.Log($"[QuickSave] Error restoring monsters: {ex.Message}", LogLevel.Trace);
             }
+        }
+
+        /// <summary>
+        /// Scans all game locations and removes any Monster instance whose concrete runtime type
+        /// is declared in an external mod assembly (e.g. FarmTypeManager.Monsters.MummyFTM, RockGolemFTM, etc.).
+        /// Stardew Valley's XML SaveSerializer only knows vanilla types and will throw XmlUnxpectedType
+        /// and crash/hang SaveGame.Save() if any custom monster subclass is present in characters.
+        /// </summary>
+        public static int SanitizeNonVanillaMonsters(IMonitor? monitor, string context)
+        {
+            int removedCount = 0;
+            try
+            {
+                if (Game1.locations == null) return 0;
+                var gameAssembly = typeof(Game1).Assembly;
+
+                foreach (var location in Game1.locations)
+                {
+                    if (location == null || location.characters == null) continue;
+
+                    for (int i = location.characters.Count - 1; i >= 0; i--)
+                    {
+                        var npc = location.characters[i];
+                        if (npc is Monster && npc.GetType().Assembly != gameAssembly)
+                        {
+                            location.characters.RemoveAt(i);
+                            removedCount++;
+                            monitor?.Log($"[{context}] Removed non-serializable custom monster '{npc.GetType().FullName}' (id={npc.id}) from '{location.Name}' to prevent SaveSerializer crash.", LogLevel.Info);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                monitor?.Log($"[{context}] Error sanitizing non-vanilla monsters: {ex.Message}", LogLevel.Warn);
+            }
+            return removedCount;
         }
 
         private void ProtectShippingBin()

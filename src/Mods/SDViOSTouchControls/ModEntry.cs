@@ -1615,6 +1615,7 @@ namespace SDViOSTouchControls
                 PurgeTransientAssets();
                 LogBackup.BackupLogs("DayEnding");
                 MemoryWatchdog.ForceCollect("DayEnding", minIntervalMs: 500);
+                QuickSaveManager.SanitizeNonVanillaMonsters(Monitor, "DayEnding");
                 QuickSaveManager.Instance?.OnDayEnding();
             }
             catch { }
@@ -1627,6 +1628,7 @@ namespace SDViOSTouchControls
                 Monitor.Log("[SDViOSTouchControls] Saving: compacting memory before XML serialization...", LogLevel.Info);
                 LogBackup.BackupLogs("Saving");
                 MemoryWatchdog.ForceCollect("Saving", minIntervalMs: 500);
+                QuickSaveManager.SanitizeNonVanillaMonsters(Monitor, "Saving");
                 QuickSaveManager.Instance?.OnSaving();
             }
             catch { }
